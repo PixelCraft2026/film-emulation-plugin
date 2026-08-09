@@ -1,0 +1,36 @@
+// @ts-nocheck
+/**
+ * ui/i18n — 界面文案（英文，V1；i18n 骨架：后续可按 locale 切换）。
+ */
+export const STRINGS = {
+  title: 'Film Halation',
+  basic: 'Basic',
+  advanced: 'Advanced',
+  strength: 'Strength',
+  sigma: 'Sigma',
+  threshold: 'Threshold',
+  thresholdSoftness: 'Softness',
+  backgroundThreshold: 'Background Threshold',
+  redshiftR: 'Red Shift R',
+  redshiftG: 'Red Shift G',
+  redshiftB: 'Red Shift B',
+  sigmaRatioR: 'Sigma Ratio R',
+  sigmaRatioG: 'Sigma Ratio G',
+  sigmaRatioB: 'Sigma Ratio B',
+  globalDiffusion: 'Glare',
+  centerAttenuation: 'Center Attenuation',
+  blendMode: 'Blend Mode',
+  diffusionMode: 'Diffusion',
+  apply: 'Apply',
+  preview: 'Preview',
+  statusReady: 'Ready.',
+  statusRendering: 'Rendering…',
+  statusApplied: (ms) => `Applied (${ms}ms).`,
+  statusPreviewed: (ms) => `Preview (${ms}ms).`,
+  statusFailed: (msg) => `Failed: ${msg}`,
+  previewHint: 'Preview renders at ≤1024px with fast diffusion.',
+  modeQuality: 'quality',
+  modeFast: 'fast',
+  blendAdditive: 'additive',
+  blendScreen: 'screen',
+};

@@ -1,54 +1,149 @@
 // @ts-nocheck
 /**
- * Film Halation — Photoshop UXP plugin entry.
- * Phase 3：图像管线装配（硬编码参数 Apply），Phase 4 接入真实 UI。
+ * Film Halation — Photoshop UXP plugin entry（Phase 4：完整 UI）。
+ * 结构：core（纯算法）← io（宿主访问）← ui（视图）← main（装配/编排）。
  */
-import { runProbe } from './capability/probe.jsx';
-import { processHalation, createHalationParams } from './core/index.js';
-import { readDocumentPixels, writeDocumentPixels } from './io/imageAccess.js';
+import { createPanel } from './ui/panel.jsx';
+import { renderPreviewDataURL } from './io/previewRender.js';
+import { createHalationParams, processHalation } from './core/index.js';
 import { resolveDocumentTRC, decodeToLinear, encodeFromLinear } from './io/colorPipeline.js';
+import { readDocumentPixels, writeDocumentPixels } from './io/imageAccess.js';
 import { ensureEffectLayer, activateLayer } from './io/layerOps.js';
-import { runSmoke } from './smoke/smoke.jsx';
+import { STRINGS } from './ui/i18n.js';
 
 const ps = require('photoshop');
 const app = ps.app;
 
-/** Phase 3 硬编码参数（Phase 4 由 UI 接管）。 */
-const HARDCODED_PARAMS = { strength: 100 };
+/** 当前参数状态（UI 持有的单一 HalationParams 实例）。 */
+let params = createHalationParams({ strength: 50 });
+
+const panel = createPanel({
+  params,
+  onParamsChange: (partial) => onParamsChange(partial),
+  onPreview: () => schedulePreview(),
+  onApply: () => runApply(),
+});
+document.body.append(panel);
+const { img, status, applyBtn } = panel.__handles;
+
+// 文档/图层切换刷新（UXP 无直接事件，轻量轮询 activeDocument）
+let lastDocId = null;
+setInterval(() => {
+  const doc = currentDoc();
+  const id = doc ? doc.id : null;
+  if (id !== lastDocId) {
+    lastDocId = id;
+    img.removeAttribute('src');
+    if (doc) {
+      status.textContent = 'Document changed. Previewing…';
+      schedulePreview();
+    } else {
+      status.textContent = 'No active document.';
+    }
+  }
+}, 1000);
+
+function currentDoc() {
+  return app.activeDocument;
+}
+
+function resolveTRC(doc) {
+  return resolveDocumentTRC(doc);
+}
+
+/** 参数变更：更新状态 + debounce 预览（100ms）。 */
+let previewTimer = null;
+function onParamsChange(partial) {
+  try {
+    params = createHalationParams({ ...params, ...partial });
+  } catch (e) {
+    status.textContent = STRINGS.statusFailed(e.message);
+    return;
+  }
+  schedulePreview();
+}
+
+function schedulePreview() {
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(runPreview, 100);
+}
+
+/** 预览：面板内显示（降采样 + fast，不触碰文档）。 */
+async function runPreview() {
+  const doc = currentDoc();
+  if (!doc) {
+    status.textContent = 'No active document.';
+    return;
+  }
+  let trc;
+  try {
+    trc = resolveTRC(doc);
+  } catch (e) {
+    status.textContent = STRINGS.statusFailed(e.message);
+    return;
+  }
+  status.textContent = STRINGS.statusRendering;
+  try {
+    const r = await ps.core.executeAsModal(() => renderPreviewDataURL(doc, params, trc), {
+      commandName: 'film-halation-preview',
+    });
+    img.src = r.dataUrl;
+    status.textContent = STRINGS.statusPreviewed(r.ms);
+  } catch (e) {
+    status.textContent = STRINGS.statusFailed(e.message);
+  }
+}
+
+/** Apply：全分辨率 quality 渲染写回（PS 27 UXP 效果图层限制 → 临时写回源图层，可 Ctrl+Z 撤销）。 */
+async function runApply() {
+  const doc = currentDoc();
+  if (!doc) {
+    status.textContent = 'No active document.';
+    return;
+  }
+  let trc;
+  try {
+    trc = resolveTRC(doc);
+  } catch (e) {
+    status.textContent = STRINGS.statusFailed(e.message);
+    return;
+  }
+  status.textContent = STRINGS.statusRendering;
+  applyBtn.disabled = true;
+  try {
+    const r = await ps.core.executeAsModal(() => applyHalation(doc, params, { trc }), {
+      commandName: 'film-halation-apply',
+    });
+    status.textContent = r.ok ? STRINGS.statusApplied(r.applyMs) : STRINGS.statusFailed(r.error);
+  } catch (e) {
+    status.textContent = STRINGS.statusFailed(e.message);
+  } finally {
+    applyBtn.disabled = false;
+  }
+}
 
 /**
- * 对指定文档执行完整 Apply 管线（Phase 3/4 共用）。
- * 不包 executeAsModal（由调用方包裹，避免嵌套）；不吞异常：返回 { ok, error? }。
- * @param {object} [doc] 目标文档（默认活动文档）
- * @param {object} [paramsOverrides] HalationParams 覆盖
- * @param {{trc?:object,writeToSource?:boolean}} [opts] trc：显式 TRC 覆盖（默认 resolveDocumentTRC(doc)）；
- *   writeToSource：true 时直接写回源图层（冒烟用——PS 27 UXP imaging 不支持运行时新建图层，
- *   效果图层方案作为已知限制另行解决）
+ * 完整 Apply 管线（不包 executeAsModal，由调用方包裹）。
+ * @param {object} doc
+ * @param {object} params HalationParams（完整）
+ * @param {{trc?:object,writeToSource?:boolean}} [opts]
  * @returns {Promise<{ok:boolean,error?:string,applyMs?:number}>}
  */
-async function applyHalation(doc = app.activeDocument, paramsOverrides = HARDCODED_PARAMS, opts = {}) {
-  if (!doc) return { ok: false, error: 'No active document.' };
+async function applyHalation(doc, params, opts = {}) {
   try {
-    const trc = opts.trc ?? resolveDocumentTRC(doc);
-    const writeSize = doc.bitsPerChannel; // 8 | 16 | 32
+    const trc = opts.trc ?? resolveTRC(doc);
+    const writeSize = doc.bitsPerChannel;
     const t0 = Date.now();
     let step = 'read';
     try {
-      // 源图层引用必须在 modal 内获取（modal 外引用在进入后失效）
       const sourceLayer = doc.activeLayers[0];
-      // 1) 读取（32-bit 捕获全动态范围，含 HDR >1）
       const { width, height, rgb } = await readDocumentPixels(doc, { componentSize: 32 });
-      // 2) 显示编码 → 线性
       step = 'decode';
       const linear = decodeToLinear(rgb, trc);
-      // 3) 算法
       step = 'process';
-      const params = createHalationParams(paramsOverrides);
       const out = processHalation({ width, height, rgb: linear }, params);
-      // 4) 线性 → 显示编码
       step = 'encode';
       const display = encodeFromLinear(out.rgb, trc);
-      // 5) 写回：writeToSource 直接写源图层（冒烟）；否则效果图层（PS 27 UXP 已知限制）
       step = opts.writeToSource ? 'write-source' : 'layer';
       const targetLayer = opts.writeToSource ? sourceLayer : await ensureEffectLayer(doc, sourceLayer);
       if (!opts.writeToSource) {
@@ -66,46 +161,3 @@ async function applyHalation(doc = app.activeDocument, paramsOverrides = HARDCOD
     return { ok: false, error: String(e && (e.stack || e.message || e)) };
   }
 }
-
-function createPanel() {
-  const panel = document.createElement('sp-panel');
-  const heading = document.createElement('sp-heading');
-  heading.textContent = 'Film Halation';
-  const body = document.createElement('sp-body');
-  body.textContent = 'Phase 3 pipeline (hardcoded params).';
-  const applyBtn = document.createElement('sp-button');
-  applyBtn.textContent = 'Apply Halation';
-  const probeBtn = document.createElement('sp-button');
-  probeBtn.textContent = 'Run capability probe';
-  const status = document.createElement('sp-body');
-  status.textContent = 'Ready.';
-  applyBtn.addEventListener('click', async () => {
-    const r = await ps.core.executeAsModal(() => applyHalation(), { commandName: 'film-halation-apply' });
-    status.textContent = r.ok ? `Applied (${r.applyMs}ms).` : `Failed: ${r.error}`;
-  });
-  probeBtn.addEventListener('click', async () => {
-    probeBtn.disabled = true;
-    try {
-      const report = await runProbe();
-      status.textContent = 'Probe done (see console / data folder).';
-    } catch (e) {
-      status.textContent = `Probe failed: ${e}`;
-    } finally {
-      probeBtn.disabled = false;
-    }
-  });
-  panel.append(heading, body, applyBtn, probeBtn, status);
-  return panel;
-}
-
-document.body.append(createPanel());
-
-// Phase 3 临时：插件加载时自动跑真机冒烟（创建独立测试文档，完成后恢复活动文档）。
-// Phase 4 移除（冒烟改为 UI 触发/测试脚本）。
-(async () => {
-  try {
-    await runSmoke(applyHalation);
-  } catch (e) {
-    console.error('[film-halation] auto smoke failed: ' + e);
-  }
-})();
