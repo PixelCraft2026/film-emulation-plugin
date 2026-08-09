@@ -37,13 +37,13 @@ UXP Plugin (manifest.json → panel)
     │
     ├── Halation Core Engine  core/：纯算法（提取 → 扩散 → redshift → 合成），零 UXP 依赖
     │
-    └── Storage Layer      storage/：sidecar JSON serializer + 可替换 backend
+    └── Storage Layer      storage/：document-state cache serializer + 可替换 backend（PluginStorage）
 ```
 
 ## 1.3 UXP 运行环境
 
 - 插件形态：UXP panel（`manifest.json` 声明 `"type": "panel"`），运行于 Photoshop 进程内 UXP runtime。
-- 技术边界（V1 如实告知用户，PRD §2.2）：UXP 无法注册自定义 Smart Filter；以「实时预览 + 独立效果图层 + sidecar 参数回读」实现近似非破坏。
+- 技术边界（V1 如实告知用户，PRD §2.2）：UXP 无法注册自定义 Smart Filter；以「实时预览 + 独立效果图层 + PluginStorage 参数回读」实现近似非破坏。
 - 像素访问：`imaging.getPixels / putPixels`（详见 §3）。
 - 宿主能力依赖面刻意收窄：算法核心不接触任何 `photoshop.*` 模块（§6），保证可移植与可单测。
 
@@ -78,7 +78,7 @@ Photoshop 文档（原图层像素不变，PRD §2.2）
 | `core/` | 纯算法：TRC 表、指数扩散（卷积/IIR）、halation pipeline、参数契约 | 仅语言标准库 | UXP / Photoshop / DOM |
 | `io/` | imaging API 封装、位深/通道布局、tile 分块、效果图层操作、预览降采样 | `core/` | — |
 | `ui/` | 面板渲染、控件事件、参数状态、预览展示 | `core/` 参数契约、`io/` 渲染入口 | 算法细节 |
-| `storage/` | 参数 ↔ JSON 序列化、version migration、sidecar 读写 | `core/` 参数契约 | UXP 之外的宿主 |
+| `storage/` | 参数 ↔ JSON 序列化、version migration、PluginStorage cache 读写 | `core/` 参数契约 | UXP 之外的宿主 |
 | `main.js` | UXP entry，装配 io/storage/ui | 全部 | — |
 
 ---
@@ -91,7 +91,7 @@ Photoshop 文档（原图层像素不变，PRD §2.2）
 |---|---|---|---|
 | 架构 | Adobe 现行，HTML/CSS/JS + manifest，进程内 | 遗留 Chromium 内核，需 ExtendScript bridge | 原生插件（.8bi），宿主级 API |
 | 像素访问 | `imaging.getPixels/putPixels`，8/16/32-bit float | 经 ExtendScript/AM 通道，慢 | 最强（Direct access, GPU） |
-| 非破坏能力 | 无 Smart Filter；效果图层 + sidecar 近似非破坏（PRD §2.2） | 同左（也注册不了 Smart Filter） | ✅ 可注册自定义 Smart Filter（PRD §9 远期） |
+| 非破坏能力 | 无 Smart Filter；效果图层 + PluginStorage 参数回读近似非破坏（PRD §2.2） | 同左（也注册不了 Smart Filter） | ✅ 可注册自定义 Smart Filter（PRD §9 远期） |
 | 开发/分发 | npm 工具链，.ccx 分发，迭代快 | 旧工具链，Adobe 已冻结投入 | 原生编译、签名、多平台维护，成本高 |
 | 性能 | 中（CPU），可工程化达标（§10） | 低 | 最高 |
 
@@ -371,7 +371,7 @@ film-halation/
 │   │   └── preview.js         # 降采样预览渲染（§10）
 │   └── storage/
 │       ├── serializer.js      # params ↔ JSON、version migration（§9）
-│       ├── sidecar.js         # SidecarStorage（Level 1，正式方案）
+│       ├── pluginStorage.js  # PluginStorage（Level 1，document-state cache）
 │       └── backends.js        # backend 抽象（Level 2/3 预留，PRD §2.4）
 └── tests/
     ├── unit/                  # core 单测（Node）
@@ -455,7 +455,7 @@ function processHalation(input: LinearImage, params: HalationParams): LinearImag
 ## 8.3 UI 与算法解耦
 
 - **单一参数状态对象**：UI 只持有/编辑一个 `HalationParams` 实例（含默认值，`core/params.js` 提供），不接触算法实现。
-- **交互流**：控件事件 → debounce(~100ms) → `io/preview.js`（降采样 + fast 模式）→ 显示预览；`Apply` → quality 全分辨率 → `io/layerOps.js` 效果图层 + `storage/` 写 sidecar。
+- **交互流**：控件事件 → debounce(~100ms) → `io/preview.js`（降采样 + fast 模式）→ 显示预览；`Apply` → quality 全分辨率 → `io/layerOps.js` 效果图层 + `storage/` 写 document-state cache。
 - **事件订阅**：文档/图层切换、位深变化时刷新面板与预览；渲染期间禁用 Apply（进度展示）。
 - 预览/渲染的编排在 `io/`，UI 只负责触发与展示 → 算法替换不影响 UI（A/B 验证期可切换实现，见 V-4/V-5）。
 
@@ -463,11 +463,26 @@ function processHalation(input: LinearImage, params: HalationParams): LinearImag
 
 # 9. Storage Design
 
-## 9.1 正式方案：Sidecar JSON（PRD §2.4 Level 1，首选）
+## 9.1 正式方案：PluginStorage document-state cache（V1，machine-local）
 
-- 文件：与文档同目录的 `<文件名>.film.json`。
-- **不绑定 layer name**：参数权威源是 sidecar；效果图层定位按"最新效果图层 / 图层标记"（不依赖名称，规避复制/合并/导出 PSD 导致的丢失）。
-- 存储后端抽象：`SidecarStorage`（Level 1 正式）→ `LayerAnnotationStorage`（Level 2 fallback）→ `PhotoshopMetadataStorage`（Level 3 未来）；`core/` 参数契约不感知存储方式（PRD §2.4 分层）。
+> **决策（2026-08-10）**：PS UXP 无法写入文档同目录 sidecar JSON（storage 模块仅提供对话框式访问与沙箱目录，无按绝对路径的 File I/O API）。**Sidecar JSON 方案移除**，V1 采用 PluginStorage document-state cache。
+
+- **存储位置**：UXP 插件数据目录（`localFileSystem.getDataFolder()`，零权限要求、跨会话持久）：`%APPDATA%\Adobe\UXP\PluginsStorage\PHSP\<ver>\<pluginId>\PluginData\`。
+- **DocumentFingerprint（cache 键）**：由 5 个字段构成（非简单 path hash）：
+  - `pathHash`：normalized 文档路径的 hash（大小写/分隔符规范化后 FNV-1a）；
+  - `fileName`：文件名（含扩展名）；
+  - `fileSize`：文件大小（字节）；
+  - `mtimeMs`：文件修改时间（epoch ms）；
+  - `documentId`：可选 Photoshop document identifier（cloud/内部 id）。
+  加载时计算当前文档 fingerprint，与 cache 逐项比对（`pathHash`+`fileName` 主匹配；`fileSize`+`mtimeMs` 强校验，任一变化视为"文档已修改"，可触发重新关联/不自动恢复）。
+- **定位**：**machine-local document state cache**（同机器、跨会话的参数恢复缓存），非文档旁可移植文件。
+- **限制**（UI/README 如实告知）：
+  - 文档移动/改名/修改后 fingerprint 变化，可能需要重新关联（旧 cache 保留但不再自动匹配）；
+  - 不支持跨机器同步（cache 在本机插件数据目录）；
+  - 删除 cache 或换机后参数不随文档保留。
+- **不绑定 layer name**：参数权威源是 PluginStorage cache（fingerprint 键控）；效果图层定位不依赖名称。
+- **未来增强方向（Level 2/3 预留）**：Photoshop XMP metadata（参数写入 PSD 自定义 schema，随文档保存/移动，真正"随文档走"）——V1 不实现，仅保留 `StorageBackend` 抽象扩展点。
+- 存储后端抽象：`PluginStorage`（Level 1 正式，fingerprint cache）→ XMP metadata（Level 2 未来）→ 云端（Level 3 未来）；`core/` 参数契约不感知存储方式（PRD §2.4 分层）。
 
 ## 9.2 Schema（以 PRD §2.4 为准）
 
@@ -584,7 +599,7 @@ function processHalation(input: LinearImage, params: HalationParams): LinearImag
 
 - 8/16/32-bit 测试图各一全流程无错误、写回无 banding（A2）。
 - Smart Object 内部图层应用（A 类场景，PRD §2.3）；Apply 后原图层像素 hash 不变（A4）。
-- sidecar 往返：Apply → 重开 → 参数恢复一致（A5）；fast/quality 一致性（A6）。
+- PluginStorage 往返：Apply → 重开 → 参数恢复一致（A5）；fast/quality 一致性（A6）。
 - 性能基准脚本：24MP 预览/渲染计时（A3）。
 
 ---
@@ -596,7 +611,7 @@ V1.0 工程实施拆分（与 PRD §9 产品版本路线并存：本表为 V1.0 
 | Phase | 内容 | 交付物 | 验收映射 |
 |---|---|---|---|
 | **Phase 1 — core algorithm** | 脚手架（npm+TS+esbuild+test）；TRC 表；指数扩散（conv + IIR）；pipeline（extract/gating/redshift/composite）；参数契约 | `core/` 全量 + 单测 + golden 基准（纯 Node，无需 Photoshop） | T1–T8, C1–C4 |
-| **Phase 2 — UXP integration** | manifest/panel 骨架；`io/`（getPixels/putPixels、位深、profile、效果图层、tile）；`storage/`（serializer + sidecar） | 可运行的 UXP 插件（无 UI 美化）+ 真机冒烟 | A2, A4, A5, R-1/R-2 实测 |
+| **Phase 2 — UXP integration** | manifest/panel 骨架；`io/`（getPixels/putPixels、位深、profile、效果图层、tile）；`storage/`（serializer + pluginStorage） | 可运行的 UXP 插件（无 UI 美化）+ 真机冒烟 | A2, A4, A5, R-1/R-2 实测 |
 | **Phase 3 — UI** | 面板 UI（Strength + Advanced 折叠）、实时预览管线（1024 + fast）、Apply 流程、i18n 骨架 | 完整交互 UI | A1（视觉主观）、A3（预览） |
 | **Phase 4 — optimization** | 内存就地化收口、tile 兜底、worker/行并行、增量重算、性能基准脚本 | 性能达标 + 基准报告 | A3（<500ms / <5s）、A6 |
 | **Phase 5 — presets & release** | 预设 save/load、`profile` 骨架（无 UI）、文档、打包发布（.ccx） | V1.0 发布版 | A5 完整闭环、PRD §4.3 |
@@ -615,7 +630,7 @@ V1.0 工程实施拆分（与 PRD §9 产品版本路线并存：本表为 V1.0 
 | D-2 | 像素进出统一 `componentSize:32` + **显式 TRC decode**；不假设 32 = linear | §3.1/§4；用户提示词强调点 + PRD §6.2 |
 | D-3 | V1 算法 = PRD §5.2 全链路：threshold 提取（smoothstep）+ Background Gating + 指数扩散（双模式）+ redshift (1.0, 0.05, 0.02) + Center Attenuation + Secondary Glare + additive | §5；**冲突裁决**：用户提示词"spill difference 为默认" vs PRD"soft threshold 为默认" → 以 PRD 为准；spill 语义经 `Halo=max(D−k·S,0)` 保留（k=0.9） |
 | D-4 | 扩散双模式：quality=有限卷积（radius=ceil(3σ)，clamp）/ fast=双向一阶 IIR + 5σ 镜像扩展 | §5.2；PRD §8/§7.1 |
-| D-5 | 存储：**Sidecar JSON 正式方案**，schema 按 PRD §2.4（`{plugin, version, effects:{halation}}`），不绑定 layer name | §9；PRD §2.4 已决策 |
+| D-5 | 存储：**PluginStorage document-state cache 正式方案**（fingerprint 键控，schema 按 PRD §2.4 `{plugin, version, effects:{halation}}`，不绑定 layer name）；XMP metadata 为未来增强 | §9；2026-08-10 决策（UXP 无文档同目录文件 API） |
 | D-6 | Background Gating 软化宽度 `s`：V1 复用 `thresholdSoftness`（待视觉验证后可独立） | §5.1.2；PRD §5.2 未给 s 值 |
 | D-7 | `additiveScale = 2.0`（内部常量，`α = strength/100 × 2.0`） | 对标 Alcedo（amount=strength/100×2.0，源码验证）；待视觉验证 |
 | D-8 | `core/` 零 UXP 依赖、纯函数、Node 可直测；UI/io/storage 分层解耦 | §6/§7；PRD §7.4 |
@@ -677,4 +692,4 @@ V1.0 工程实施拆分（与 PRD §9 产品版本路线并存：本表为 V1.0 
 | TRC / EOTF | 色调响应曲线 / 电光转换函数（gamma 解码） |
 | IIR | 无限冲激响应递归滤波（本产品指数核的 O(N) 精确实现） |
 | Working space | Photoshop 文档工作色彩空间（sRGB / Adobe RGB / ProPhoto RGB / ACES） |
-| Sidecar | 与文档同目录的 `<文件名>.film.json` 参数文件 |
+| PluginStorage | 插件数据目录的 document-state cache（DocumentFingerprint 键控），machine-local |

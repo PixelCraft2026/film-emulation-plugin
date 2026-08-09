@@ -21,11 +21,23 @@ export function createPanel(handlers) {
   const { params, onParamsChange, onPreview, onApply } = handlers;
   const set = (partial) => { onParamsChange(partial); };
 
-  const panel = document.createElement('sp-panel');
+  // UXP 无 sp-panel 组件（退化为 div）——用普通 div 容器 + 基础样式
+  const panel = document.createElement('div');
+  panel.style.display = 'flex';
+  panel.style.flexDirection = 'column';
+  panel.style.gap = '12px';
+  panel.style.padding = '12px';
+  panel.style.overflowY = 'auto';
+  panel.style.height = '100%';
 
   // ---- Basic ----
-  const basicGroup = document.createElement('sp-group');
-  basicGroup.heading = STRINGS.basic;
+  const basicGroup = document.createElement('div');
+  basicGroup.style.display = 'flex';
+  basicGroup.style.flexDirection = 'column';
+  basicGroup.style.gap = '8px';
+  const basicHeading = document.createElement('sp-heading');
+  basicHeading.textContent = STRINGS.basic;
+  basicGroup.append(basicHeading);
   basicGroup.append(
     createSlider({
       id: 'strength',
@@ -39,10 +51,22 @@ export function createPanel(handlers) {
   );
 
   // ---- Advanced（折叠）----
-  const details = document.createElement('sp-details');
-  details.open = false;
-  const advGroup = document.createElement('sp-group');
-  advGroup.heading = STRINGS.advanced;
+  const details = document.createElement('div');
+  const advToggle = document.createElement('sp-button');
+  advToggle.variant = 'secondary';
+  advToggle.textContent = STRINGS.advanced;
+  const advBody = document.createElement('div');
+  advBody.style.display = 'none';
+  advBody.style.flexDirection = 'column';
+  advBody.style.gap = '8px';
+  advToggle.addEventListener('click', () => {
+    advBody.style.display = advBody.style.display === 'none' ? 'flex' : 'none';
+  });
+  details.append(advToggle, advBody);
+  const advGroup = document.createElement('div');
+  advGroup.style.display = 'flex';
+  advGroup.style.flexDirection = 'column';
+  advGroup.style.gap = '8px';
   advGroup.append(
     createSlider({ id: 'sigma', label: STRINGS.sigma, value: params.sigma, min: 0.5, max: 50, step: 0.5, onInput: (v) => set({ sigma: v }) }),
     createSlider({ id: 'threshold', label: STRINGS.threshold, value: params.threshold, min: 0, max: 1, step: 0.01, onInput: (v) => set({ threshold: v }) }),
@@ -77,7 +101,7 @@ export function createPanel(handlers) {
       onChange: (v) => set({ diffusionMode: v }),
     }),
   );
-  details.append(advGroup);
+  advBody.append(advGroup);
 
   // ---- Preview 图 ----
   const img = document.createElement('img');
@@ -109,6 +133,40 @@ export function createPanel(handlers) {
   panel.append(basicGroup, details, img, actions, status, hint);
 
   // 暴露给 main.jsx 的句柄
-  panel.__handles = { img, status, applyBtn };
+  const setControl = (id, value) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (id === 'blendMode' || id === 'diffusionMode') {
+      // sp-dropdown：value 只读，用 selectedIndex
+      const items = Array.from((el.querySelector('sp-menu') || { children: [] }).children || []);
+      const idx = items.findIndex((it) => it.value === value);
+      el.selectedIndex = idx >= 0 ? idx : 0;
+    } else {
+      el.value = value;
+    }
+  };
+  panel.__handles = {
+    img,
+    status,
+    applyBtn,
+    /** 参数恢复后刷新全部控件显示（不触发预览回调）。 */
+    updateParams(p) {
+      setControl('strength', p.strength);
+      setControl('sigma', p.sigma);
+      setControl('threshold', p.threshold);
+      setControl('thresholdSoftness', p.thresholdSoftness);
+      setControl('backgroundThreshold', p.backgroundThreshold);
+      setControl('redshiftR', p.redshift[0]);
+      setControl('redshiftG', p.redshift[1]);
+      setControl('redshiftB', p.redshift[2]);
+      setControl('sigmaRatioR', p.sigmaRatio[0]);
+      setControl('sigmaRatioG', p.sigmaRatio[1]);
+      setControl('sigmaRatioB', p.sigmaRatio[2]);
+      setControl('globalDiffusion', p.globalDiffusion);
+      setControl('centerAttenuation', p.centerAttenuation);
+      setControl('blendMode', p.blendMode);
+      setControl('diffusionMode', p.diffusionMode);
+    },
+  };
   return panel;
 }

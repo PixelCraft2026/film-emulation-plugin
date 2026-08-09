@@ -10,21 +10,51 @@ import { resolveDocumentTRC, decodeToLinear, encodeFromLinear } from './io/color
 import { readDocumentPixels, writeDocumentPixels } from './io/imageAccess.js';
 import { ensureEffectLayer, activateLayer } from './io/layerOps.js';
 import { STRINGS } from './ui/i18n.js';
+import { saveParamsForDoc, loadParamsForDoc } from './storage/pluginStorage.js';
 
 const ps = require('photoshop');
 const app = ps.app;
 
+
 /** 当前参数状态（UI 持有的单一 HalationParams 实例）。 */
 let params = createHalationParams({ strength: 50 });
 
-const panel = createPanel({
-  params,
-  onParamsChange: (partial) => onParamsChange(partial),
-  onPreview: () => schedulePreview(),
-  onApply: () => runApply(),
-});
-document.body.append(panel);
-const { img, status, applyBtn } = panel.__handles;
+/** 写诊断文件（错误/自检结果共用）。 */
+async function writeDiagFile(name, data) {
+  try {
+    const { localFileSystem } = require('uxp').storage;
+    const folder = await localFileSystem.getDataFolder();
+    const file = await folder.createFile(name, { overwrite: true });
+    await file.write(JSON.stringify(data, null, 2));
+  } catch (e) {
+    console.error('[film-halation] writeDiagFile failed: ' + e);
+  }
+}
+
+let panel;
+let img = null;
+let status = null;
+let applyBtn = null;
+try {
+  panel = createPanel({
+    params,
+    onParamsChange: (partial) => onParamsChange(partial),
+    onPreview: () => schedulePreview(),
+    onApply: () => runApply(),
+  });
+  document.body.append(panel);
+  ({ img, status, applyBtn } = panel.__handles);
+} catch (e) {
+  console.error('[film-halation] createPanel failed: ' + (e && (e.stack || e.message || e)));
+  writeDiagFile('ui-error.json', {
+    msg: String(e && (e.stack || e.message || e)),
+    at: new Date().toISOString(),
+  });
+  // 占位状态对象，避免后续引用崩溃
+  status = { textContent: '' };
+  img = { removeAttribute: () => {}, src: '' };
+  applyBtn = { disabled: false };
+}
 
 // 文档/图层切换刷新（UXP 无直接事件，轻量轮询 activeDocument）
 let lastDocId = null;
@@ -114,11 +144,37 @@ async function runApply() {
     const r = await ps.core.executeAsModal(() => applyHalation(doc, params, { trc }), {
       commandName: 'film-halation-apply',
     });
-    status.textContent = r.ok ? STRINGS.statusApplied(r.applyMs) : STRINGS.statusFailed(r.error);
+    if (r.ok) {
+      try {
+        await saveParamsForDoc(doc, params);
+        status.textContent = STRINGS.statusApplied(r.applyMs);
+      } catch (saveErr) {
+        console.warn('[film-halation] save params failed: ' + saveErr);
+        status.textContent = STRINGS.statusApplied(r.applyMs) + ' (params not saved)';
+      }
+    } else {
+      status.textContent = STRINGS.statusFailed(r.error);
+    }
   } catch (e) {
     status.textContent = STRINGS.statusFailed(e.message);
   } finally {
     applyBtn.disabled = false;
+  }
+}
+
+/** 从 PluginStorage 载入文档参数并刷新控件（无匹配则保持当前）。 */
+async function loadStoredParams() {
+  const doc = currentDoc();
+  if (!doc) return;
+  try {
+    const r = await loadParamsForDoc(doc);
+    if (r) {
+      params = createHalationParams(r.params);
+      panel.__handles.updateParams(params);
+      status.textContent = 'Loaded stored params.';
+    }
+  } catch (e) {
+    console.warn('[film-halation] load stored params failed: ' + e);
   }
 }
 
@@ -159,5 +215,51 @@ async function applyHalation(doc, params, opts = {}) {
   } catch (e) {
     console.error('[film-halation] apply failed: ' + (e && (e.stack || e.message || e)));
     return { ok: false, error: String(e && (e.stack || e.message || e)) };
+  }
+}
+
+// 初始化：立即载入文档参数 + A5 自检（Phase 5 临时，Phase 6 移除；独立 try 避免互相影响）
+try {
+  loadStoredParams();
+} catch (e) {
+  console.warn('[film-halation] loadStoredParams failed: ' + e);
+}
+try {
+  runA5Check();
+} catch (e) {
+  console.error('[film-halation] runA5Check threw synchronously: ' + e);
+}
+
+/** Phase 5 临时 A5 自检：PluginStorage 写读往返（UXP fs 真实能力）。 */
+async function runA5Check() {
+  const doc = currentDoc();
+  if (!doc) return;
+  const writeReport = async (report) => {
+    try {
+      const { localFileSystem } = require('uxp').storage;
+      const folder = await localFileSystem.getDataFolder();
+      const file = await folder.createFile('a5-test.json', { overwrite: true });
+      await file.write(JSON.stringify(report, null, 2));
+    } catch (e2) {
+      console.error('[film-halation] A5 report write failed: ' + e2);
+    }
+  };
+  try {
+    const p = createHalationParams({ strength: 77 });
+    const { key } = await saveParamsForDoc(doc, p);
+    const r = await loadParamsForDoc(doc);
+    const report = {
+      ts: new Date().toISOString(),
+      savedKey: key,
+      pass: !!(r && r.params.strength === 77),
+      restoredStrength: r ? r.params.strength : null,
+      docName: doc.name,
+      docPath: doc.path,
+    };
+    await writeReport(report);
+    console.log('[film-halation] A5 check: ' + JSON.stringify(report));
+  } catch (e) {
+    console.error('[film-halation] A5 check failed: ' + e);
+    await writeReport({ ts: new Date().toISOString(), pass: false, error: String(e && (e.stack || e.message || e)) });
   }
 }

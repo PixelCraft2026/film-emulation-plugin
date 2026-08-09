@@ -16,7 +16,7 @@ export function createSlider(o) {
   row.style.flexDirection = 'column';
   row.style.gap = '4px';
 
-  const label = document.createElement('sp-field-label');
+  const label = document.createElement('sp-label');
   label.textContent = o.label;
   const slider = document.createElement('sp-slider');
   slider.id = o.id;
@@ -41,13 +41,14 @@ export function createSelect(o) {
   row.style.flexDirection = 'column';
   row.style.gap = '4px';
 
-  const label = document.createElement('sp-field-label');
+  const label = document.createElement('sp-label');
   label.textContent = o.label;
   const select = document.createElement('sp-dropdown');
   select.id = o.id;
   select.style.width = '100%';
-  // sp-dropdown 用 menu 列表；简化：用原生 select 语义的 sp-menu 组合
+  // sp-dropdown 硬性要求：菜单需 slot="options"
   const menu = document.createElement('sp-menu');
+  menu.slot = 'options';
   for (const opt of o.options) {
     const item = document.createElement('sp-menu-item');
     item.value = opt.value;
@@ -55,8 +56,14 @@ export function createSelect(o) {
     menu.append(item);
   }
   select.append(menu);
-  select.value = o.value;
-  select.addEventListener('change', () => o.onChange(String(select.value)));
+  // sp-dropdown 的 value 为只读 getter——用 selectedIndex 初始化
+  const initIdx = o.options.findIndex((opt) => opt.value === o.value);
+  select.selectedIndex = initIdx >= 0 ? initIdx : 0;
+  select.addEventListener('change', () => {
+    const idx = select.selectedIndex;
+    const opt = o.options[idx];
+    o.onChange(opt ? opt.value : String(select.value));
+  });
   row.append(label, select);
   return row;
 }
