@@ -1,0 +1,17 @@
+{
+  "name": "film-halation",
+  "version": "1.0.0",
+  "description": "Photoshop UXP plugin — film halation simulation (V1.0)",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node esbuild.config.mjs",
+    "validate": "node scripts/validate-manifest.mjs",
+    "test": "node --test tests/unit",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.0"
+  }
+}
