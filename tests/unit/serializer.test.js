@@ -71,6 +71,6 @@ test('S7 toDocument shape: plugin/version/effects.halation with ordered keys', (
   assert.equal(doc.version, '1.0');
   assert.deepEqual(Object.keys(doc.effects.halation), [
     'strength', 'sigma', 'threshold', 'thresholdSoftness', 'backgroundThreshold',
-    'redshift', 'sigmaRatio', 'globalDiffusion', 'centerAttenuation', 'blendMode', 'diffusionMode',
+    'redshift', 'sigmaRatio', 'globalDiffusion', 'centerAttenuation', 'blendMode', 'diffusionMode', 'profile',
   ]);
 });

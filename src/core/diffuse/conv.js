@@ -75,6 +75,8 @@ export function blurColConv(src, dst, width, height, kernel, radius) {
   }
 }
 
+import { TRUNC_QUALITY } from '../params.js';
+
 /**
  * 分离式指数模糊：src → (水平) → temp → (垂直) → dst。
  * src/temp/dst 必须互不别名且长度 = width*height。
@@ -84,9 +86,9 @@ export function blurColConv(src, dst, width, height, kernel, radius) {
  * @param {number} width
  * @param {number} height
  * @param {number} sigma 扩散 σ（像素）
- * @param {number} [radius=ceil(3*sigma)] 截断半径
+ * @param {number} [radius=ceil(TRUNC_QUALITY*sigma)] 截断半径
  */
-export function blurExp(src, dst, temp, width, height, sigma, radius = Math.ceil(3 * sigma)) {
+export function blurExp(src, dst, temp, width, height, sigma, radius = Math.ceil(TRUNC_QUALITY * sigma)) {
   const kernel = expKernel1D(sigma, radius);
   blurRowConv(src, temp, width, height, kernel, radius);
   blurColConv(temp, dst, width, height, kernel, radius);

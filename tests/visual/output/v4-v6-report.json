@@ -23,6 +23,6 @@
     "impulseL2_quality5": 0.0009762518946349343,
     "l2_fast_vs_quality3": 0.00009573904639208269,
     "l2_fast_vs_quality5": 0.000012179541074240911,
-    "visualMaxDiff": 19
+    "visualMaxDiff": 4
   }
 }

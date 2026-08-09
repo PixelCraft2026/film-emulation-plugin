@@ -18,14 +18,15 @@
     "globalDiffusion": 0.15,
     "centerAttenuation": 0.9,
     "blendMode": "additive",
-    "diffusionMode": "quality"
+    "diffusionMode": "fast",
+    "profile": "standard"
   },
   "width": 32,
   "height": 32,
   "inputHash": "35e3b09f",
   "outputHash": {
-    "quality": "d3b50b87",
+    "quality": "b47e557d",
     "fast": "cc4dedab"
   },
-  "generatedAt": "2026-08-09T21:06:06.762Z"
+  "generatedAt": "2026-08-09T21:15:15.457Z"
 }

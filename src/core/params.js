@@ -48,6 +48,8 @@ export const DEFAULT_PARAMS = Object.freeze({
    *  默认 fast（A3 决策 2026-08-10：24MP quality 12.8s > 5s 目标，fast 3.4s 达标；
    *  quality 保留为可选高精度模式，UI 提示更慢）。 */
   diffusionMode: 'fast',
+  /** 预设骨架（PRD §4.3，V1 无 UI）：预留参数组合名称，未来 Film Stock Preset 库用。 */
+  profile: 'standard',
 });
 
 /**
@@ -56,8 +58,10 @@ export const DEFAULT_PARAMS = Object.freeze({
  */
 export const ADDITIVE_SCALE = 2.0;
 
-/** 逐通道扩散核的截断系数：quality 半径 = ceil(sigmaRatio × sigma × TRUNC_QUALITY)。 */
-export const TRUNC_QUALITY = 3;
+/** 逐通道扩散核的截断系数：quality 半径 = ceil(sigmaRatio × sigma × TRUNC_QUALITY)。
+ *  定稿 2026-08-10：3 → 5（A6 显示 5σ 下 fast/quality 一致性提升 8 倍，L2 1.22e-5；
+ *  quality 为可选高精度模式，成本可接受）。 */
+export const TRUNC_QUALITY = 5;
 /** fast 模式的镜像扩展半宽系数（IIR 边界条件）。 */
 export const TRUNC_FAST = 5;
 

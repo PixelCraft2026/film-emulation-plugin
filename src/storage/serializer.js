@@ -33,6 +33,7 @@ export const PARAM_KEY_ORDER = Object.freeze([
   'centerAttenuation',
   'blendMode',
   'diffusionMode',
+  'profile',
 ]);
 
 /**

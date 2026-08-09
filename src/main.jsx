@@ -226,48 +226,9 @@ async function applyHalation(doc, params, opts = {}) {
   }
 }
 
-// 初始化：立即载入文档参数 + A5 自检（Phase 5 临时，Phase 6 移除；独立 try 避免互相影响）
+// 初始化：载入文档参数（PluginStorage，正式功能）
 try {
   loadStoredParams();
 } catch (e) {
   console.warn('[film-halation] loadStoredParams failed: ' + e);
-}
-try {
-  runA5Check();
-} catch (e) {
-  console.error('[film-halation] runA5Check threw synchronously: ' + e);
-}
-
-/** Phase 5 临时 A5 自检：PluginStorage 写读往返（UXP fs 真实能力）。 */
-async function runA5Check() {
-  const doc = currentDoc();
-  if (!doc) return;
-  const writeReport = async (report) => {
-    try {
-      const { localFileSystem } = require('uxp').storage;
-      const folder = await localFileSystem.getDataFolder();
-      const file = await folder.createFile('a5-test.json', { overwrite: true });
-      await file.write(JSON.stringify(report, null, 2));
-    } catch (e2) {
-      console.error('[film-halation] A5 report write failed: ' + e2);
-    }
-  };
-  try {
-    const p = createHalationParams({ strength: 77 });
-    const { key } = await saveParamsForDoc(doc, p);
-    const r = await loadParamsForDoc(doc);
-    const report = {
-      ts: new Date().toISOString(),
-      savedKey: key,
-      pass: !!(r && r.params.strength === 77),
-      restoredStrength: r ? r.params.strength : null,
-      docName: doc.name,
-      docPath: doc.path,
-    };
-    await writeReport(report);
-    console.log('[film-halation] A5 check: ' + JSON.stringify(report));
-  } catch (e) {
-    console.error('[film-halation] A5 check failed: ' + e);
-    await writeReport({ ts: new Date().toISOString(), pass: false, error: String(e && (e.stack || e.message || e)) });
-  }
 }
