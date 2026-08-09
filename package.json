@@ -7,7 +7,7 @@
   "scripts": {
     "build": "node esbuild.config.mjs",
     "validate": "node scripts/validate-manifest.mjs",
-    "test": "node --test tests/unit",
+    "test": "node --test",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

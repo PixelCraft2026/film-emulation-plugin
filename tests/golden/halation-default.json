@@ -1,0 +1,31 @@
+{
+  "params": {
+    "strength": 100,
+    "sigma": 7,
+    "threshold": 0.7,
+    "thresholdSoftness": 0.1,
+    "backgroundThreshold": 0.8,
+    "redshift": [
+      1,
+      0.05,
+      0.02
+    ],
+    "sigmaRatio": [
+      1,
+      0.85,
+      0.7
+    ],
+    "globalDiffusion": 0.15,
+    "centerAttenuation": 0.9,
+    "blendMode": "additive",
+    "diffusionMode": "quality"
+  },
+  "width": 32,
+  "height": 32,
+  "inputHash": "35e3b09f",
+  "outputHash": {
+    "quality": "d3b50b87",
+    "fast": "cc4dedab"
+  },
+  "generatedAt": "2026-08-09T19:00:40.727Z"
+}
