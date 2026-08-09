@@ -8,6 +8,7 @@
     "build": "node esbuild.config.mjs",
     "validate": "node scripts/validate-manifest.mjs",
     "test": "node --test",
+    "bench": "node --expose-gc tests/bench/perf.js",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

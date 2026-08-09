@@ -4,8 +4,9 @@
  * 结构：core（纯算法）← io（宿主访问）← ui（视图）← main（装配/编排）。
  */
 import { createPanel } from './ui/panel.jsx';
-import { renderPreviewDataURL } from './io/previewRender.js';
-import { createHalationParams, processHalation } from './core/index.js';
+import { renderPreviewDataURL, renderPreviewIncremental } from './io/previewRender.js';
+import { createHalationParams, processHalation, extractStep, diffuseStep, haloStep, blendStep } from './core/index.js';
+import { processTiled } from './io/tileRender.js';
 import { resolveDocumentTRC, decodeToLinear, encodeFromLinear } from './io/colorPipeline.js';
 import { readDocumentPixels, writeDocumentPixels } from './io/imageAccess.js';
 import { ensureEffectLayer, activateLayer } from './io/layerOps.js';
@@ -98,7 +99,8 @@ function schedulePreview() {
   previewTimer = setTimeout(runPreview, 100);
 }
 
-/** 预览：面板内显示（降采样 + fast，不触碰文档）。 */
+/** 预览：面板内显示（降采样 + fast + 增量重算，不触碰文档）。 */
+let previewCache = null;
 async function runPreview() {
   const doc = currentDoc();
   if (!doc) {
@@ -114,9 +116,10 @@ async function runPreview() {
   }
   status.textContent = STRINGS.statusRendering;
   try {
-    const r = await ps.core.executeAsModal(() => renderPreviewDataURL(doc, params, trc), {
+    const r = await ps.core.executeAsModal(() => renderPreviewIncremental(doc, params, trc, previewCache), {
       commandName: 'film-halation-preview',
     });
+    previewCache = r.cache;
     img.src = r.dataUrl;
     status.textContent = STRINGS.statusPreviewed(r.ms);
   } catch (e) {
@@ -197,7 +200,12 @@ async function applyHalation(doc, params, opts = {}) {
       step = 'decode';
       const linear = decodeToLinear(rgb, trc);
       step = 'process';
-      const out = processHalation({ width, height, rgb: linear }, params);
+      // 大图用行带分块（内存兜底，quality 与整图逐位一致）；小图直接整图
+      const TILE_THRESHOLD = 16 * 1024 * 1024; // >16MP 分块
+      const out =
+        width * height > TILE_THRESHOLD
+          ? processTiled({ width, height, rgb: linear }, params)
+          : processHalation({ width, height, rgb: linear }, params);
       step = 'encode';
       const display = encodeFromLinear(out.rgb, trc);
       step = opts.writeToSource ? 'write-source' : 'layer';

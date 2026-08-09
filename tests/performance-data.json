@@ -1,0 +1,16 @@
+{
+  "size": "6000x4000 (24MP)",
+  "runs": {
+    "quality": {
+      "ms": 12708.6,
+      "peakHeapMB": 0.1,
+      "outHash": "33d00f18"
+    },
+    "fast": {
+      "ms": 3372.8,
+      "peakHeapMB": -0.8,
+      "outHash": "3c797d19"
+    }
+  },
+  "theoreticalBuffersMB": 732.4
+}

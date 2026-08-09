@@ -32,4 +32,4 @@ export { iirBlur, mirrorIndex } from './diffuse/iir.js';
 export { smoothstep, extractHighlights } from './extract.js';
 export { channelSigmas, applyRedShift } from './redshift.js';
 export { GLARE_SIGMA, computeHalo, computeSecondaryGlare, addGlare, alphaFor, blend } from './composite.js';
-export { makeBlurFn, processHalation } from './pipeline.js';
+export { makeBlurFn, processHalation, extractStep, diffuseStep, haloStep, blendStep } from './pipeline.js';

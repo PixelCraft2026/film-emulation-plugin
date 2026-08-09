@@ -44,8 +44,10 @@ export const DEFAULT_PARAMS = Object.freeze({
   centerAttenuation: 0.9,
   /** 混合模式 */
   blendMode: 'additive',
-  /** 扩散实现：quality=有限卷积 / fast=双向一阶 IIR */
-  diffusionMode: 'quality',
+  /** 扩散实现：quality=有限卷积 / fast=双向一阶 IIR。
+   *  默认 fast（A3 决策 2026-08-10：24MP quality 12.8s > 5s 目标，fast 3.4s 达标；
+   *  quality 保留为可选高精度模式，UI 提示更慢）。 */
+  diffusionMode: 'fast',
 });
 
 /**
