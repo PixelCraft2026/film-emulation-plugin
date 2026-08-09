@@ -35,14 +35,15 @@ export function makeBlurFn(params) {
  * 处理单张图像。
  * @param {{width:number,height:number,rgb:Float32Array}} input 线性 RGB ImageBuffer
  * @param {import('./params.js').DEFAULT_PARAMS} params HalationParams
+ * @param {{extraction?:string,spillMix?:number}} [options] 透传给 extractHighlights（V-5 对照用）
  * @returns {{width:number,height:number,rgb:Float32Array}}
  */
-export function processHalation(input, params) {
+export function processHalation(input, params, options = {}) {
   validateParams(params);
   const { width: w, height: h, rgb } = input;
   const n = w * h;
 
-  const { S, G } = extractHighlights(input, params);
+  const { S, G } = extractHighlights(input, params, options);
   const blurFn = makeBlurFn(params);
 
   // 逐通道扩散（σ = sigma × sigmaRatio[c]）

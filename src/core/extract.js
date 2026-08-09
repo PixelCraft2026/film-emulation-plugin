@@ -30,9 +30,12 @@ export const LUMA_B = 0.0722;
  * 提取 Y/M/S/G。
  * @param {{width:number,height:number,rgb:Float32Array}} input 线性 RGB（长度 w*h*3）
  * @param {{threshold:number,thresholdSoftness:number,backgroundThreshold:number}} params
+ * @param {{extraction?:string,spillMix?:number}} [options]
+ *   extraction: 'threshold'（默认，基于 Y）| 'spill'（基于 M，AlcedoStudio 参考）
+ *   spillMix: 0..1 中间态混合权重（extraction='spill' 时生效；0=纯 threshold，1=纯 spill）
  * @returns {{Y:Float32Array,M:Float32Array,S:Float32Array,G:Float32Array}}
  */
-export function extractHighlights(input, params) {
+export function extractHighlights(input, params, options = {}) {
   const { width: w, height: h, rgb } = input;
   const n = w * h;
   const Y = new Float32Array(n);
@@ -40,6 +43,7 @@ export function extractHighlights(input, params) {
   const S = new Float32Array(n);
   const G = new Float32Array(n);
 
+  const spillMix = options.extraction === 'spill' ? (options.spillMix ?? 1) : 0;
   const t0 = params.threshold - params.thresholdSoftness / 2;
   const t1 = params.threshold + params.thresholdSoftness / 2;
   const g0 = params.backgroundThreshold - params.thresholdSoftness;
@@ -53,7 +57,9 @@ export function extractHighlights(input, params) {
     const m = r > g ? (r > b ? r : b) : g > b ? g : b;
     Y[i] = y;
     M[i] = m;
-    S[i] = smoothstep(t0, t1, y);
+    const sThreshold = smoothstep(t0, t1, y);
+    const sSpill = smoothstep(t0, t1, m);
+    S[i] = spillMix === 0 ? sThreshold : sThreshold * (1 - spillMix) + sSpill * spillMix;
     G[i] = 1 - smoothstep(g0, g1, y < 0 ? 0 : y > 1 ? 1 : y);
   }
   return { Y, M, S, G };

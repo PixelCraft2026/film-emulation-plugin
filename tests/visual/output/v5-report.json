@@ -1,0 +1,27 @@
+{
+  "width": 256,
+  "height": 256,
+  "maskStats": {
+    "threshold": {
+      "nonZeroPixels": 45,
+      "ratio": 0.0006866455078125,
+      "mean": 0.0006270350741033326
+    },
+    "spill09": {
+      "nonZeroPixels": 135,
+      "ratio": 0.0020599365234375,
+      "mean": 0.0019166463334840955
+    },
+    "spill": {
+      "nonZeroPixels": 135,
+      "ratio": 0.0020599365234375,
+      "mean": 0.0020599365234375
+    }
+  },
+  "maskDiff": {
+    "maxDiff": 1,
+    "changedPixels": 135,
+    "ratio": 0.0020599365234375
+  },
+  "renderMaxDiff": 92
+}

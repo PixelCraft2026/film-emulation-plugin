@@ -1,0 +1,28 @@
+{
+  "v6": {
+    "sRGB": {
+      "maxErr": 4.440892098500626e-16,
+      "at": 0.954
+    },
+    "AdobeRGB": {
+      "maxErr": 1.1102230246251565e-16,
+      "at": 0.36
+    },
+    "ProPhoto": {
+      "maxErr": 1.1102230246251565e-16,
+      "at": 0.32075
+    },
+    "linear": {
+      "maxErr": 0,
+      "at": 0
+    }
+  },
+  "v4": {
+    "impulseL2_fast": 0.00096407235356079,
+    "impulseL2_quality3": 0.001059811399952844,
+    "impulseL2_quality5": 0.0009762518946349343,
+    "l2_fast_vs_quality3": 0.00009573904639208269,
+    "l2_fast_vs_quality5": 0.000012179541074240911,
+    "visualMaxDiff": 19
+  }
+}
