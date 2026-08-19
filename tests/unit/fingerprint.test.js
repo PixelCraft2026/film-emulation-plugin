@@ -41,3 +41,11 @@ test('F4 fingerprintMatches: pathHash+fileName match; different file no match', 
   const renamed = computeFingerprint({ path: 'C:\\a\\y.psd', name: 'y.psd' });
   assert.ok(!fingerprintMatches(a, renamed), 'renamed file does not match');
 });
+
+test('F5 unsaved documents use document id and do not collide', () => {
+  const a = computeFingerprint({ path: '', name: 'Untitled-1', id: 11 });
+  const b = computeFingerprint({ path: '', name: 'Untitled-1', id: 12 });
+  assert.equal(a.unsaved, true);
+  assert.notEqual(a.pathHash, b.pathHash);
+  assert.ok(!fingerprintMatches(a, b));
+});

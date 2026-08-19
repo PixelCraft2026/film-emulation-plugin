@@ -1,16 +1,64 @@
 {
-  "size": "6000x4000 (24MP)",
-  "runs": {
-    "quality": {
-      "ms": 19647.2,
-      "peakHeapMB": -0.6,
-      "outHash": "6bc6f4aa"
-    },
-    "fast": {
-      "ms": 3474.3,
-      "peakHeapMB": -0.1,
-      "outHash": "3c797d19"
-    }
+  "generatedAt": "2026-08-19T19:25:59.501Z",
+  "node": "v24.19.0",
+  "platform": "win32-x64",
+  "cpu": "Intel64 Family 6 Model 151 Stepping 2, GenuineIntel",
+  "backend": {
+    "available": true,
+    "backend": "wasm",
+    "version": 66816,
+    "error": null
   },
-  "theoreticalBuffersMB": 732.4
+  "protocol": {
+    "warmups": 2,
+    "runs": 10,
+    "size": "6000x4000",
+    "componentSize": 16
+  },
+  "apply24MP": {
+    "label": "24MP streamed fast",
+    "warmups": 2,
+    "runs": 10,
+    "samplesMs": [
+      5432.1,
+      5522.4,
+      5548.8,
+      5687.5,
+      5621.1,
+      5508.2,
+      5720.6,
+      5411.9,
+      5570.2,
+      5676.6
+    ],
+    "p50Ms": 5548.8,
+    "p95Ms": 5720.6,
+    "peakRssMB": 529.8,
+    "peakArrayBuffersMB": 310.5,
+    "checksum": 7836892,
+    "bands": 11
+  },
+  "preview1024": {
+    "label": "1024px preview fast",
+    "warmups": 2,
+    "runs": 10,
+    "samplesMs": [
+      89.9,
+      86.2,
+      96.7,
+      95.1,
+      94,
+      119.3,
+      104.4,
+      103.7,
+      93.9,
+      85.8
+    ],
+    "p50Ms": 94,
+    "p95Ms": 119.3,
+    "peakRssMB": 0,
+    "peakArrayBuffersMB": 0,
+    "checksum": 2.000941753387451,
+    "bands": 1
+  }
 }

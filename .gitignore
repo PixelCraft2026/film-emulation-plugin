@@ -5,3 +5,4 @@ dist/
 .DS_Store
 Thumbs.db
 .reasonix/
+native/film_core/target/

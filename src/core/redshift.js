@@ -5,7 +5,7 @@
  * 语义：高光 mask S 按每通道 σ = sigma × sigmaRatio[c] 扩散得到 D_c，
  * 再乘以通道增益 redshift[c]：红色保留（1.0），绿蓝大幅衰减（0.05/0.02）
  * → 高光周围呈现红色光晕（AlcedoStudio halation 参考基线）。
- * 扩散本身由调用方（pipeline）用 blurExp / iirBlur 执行；本模块只做
+ * 扩散本身由调用方（pipeline）用 gaussianBlurSep / boxBlur3 执行；本模块只做
  * σ 计算与逐通道增益合成。
  */
 

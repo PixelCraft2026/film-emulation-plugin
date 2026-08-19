@@ -5,7 +5,24 @@
  */
 
 /**
- * 按行带划分图像，带间带边缘重叠（重叠区在结果中裁掉，仅保留带中间有效区）。
+ * 按行带划分像素传输块（每块 ≤ maxPx 像素），返回 [{top, h}]。
+ * 用于 getPixels/putPixels 分块传输：UXP 对超大单次调用会静默降采样/缩放。
+ * @param {number} width
+ * @param {number} height
+ * @param {number} maxPx 每块最大像素数
+ * @returns {{top:number,h:number}[]}
+ */
+export function splitBlocks(width, height, maxPx) {
+  const blocks = [];
+  const blockH = Math.max(1, Math.floor(maxPx / width));
+  for (let top = 0; top < height; top += blockH) {
+    blocks.push({ top, h: Math.min(blockH, height - top) });
+  }
+  return blocks;
+}
+
+/**
+ * 行带分块（渲染用）：带间带边缘重叠（重叠区在结果中裁掉，仅保留带中间有效区）。
  * @param {number} width
  * @param {number} height
  * @param {number} bandHeight 每带高度（不含重叠）

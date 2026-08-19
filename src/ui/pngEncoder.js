@@ -24,10 +24,25 @@ function crc32(buf) {
   return (~c) >>> 0;
 }
 
+/** PNG chunk types are exactly four ASCII letters; avoid unavailable UXP TextEncoder. */
+function chunkTypeBytes(type) {
+  if (typeof type !== 'string' || type.length !== 4) {
+    throw new TypeError('PNG chunk type must contain exactly four ASCII letters');
+  }
+  const bytes = new Uint8Array(4);
+  for (let i = 0; i < 4; i++) {
+    const code = type.charCodeAt(i);
+    const isAsciiLetter = (code >= 0x41 && code <= 0x5a) || (code >= 0x61 && code <= 0x7a);
+    if (!isAsciiLetter) throw new TypeError('PNG chunk type must contain only ASCII letters');
+    bytes[i] = code;
+  }
+  return bytes;
+}
+
 function chunk(type, data) {
   const len = new Uint8Array(4);
   new DataView(len.buffer).setUint32(0, data.length);
-  const typeBytes = new TextEncoder().encode(type);
+  const typeBytes = chunkTypeBytes(type);
   const crcBuf = new Uint8Array(typeBytes.length + data.length);
   crcBuf.set(typeBytes, 0);
   crcBuf.set(data, typeBytes.length);
@@ -37,7 +52,7 @@ function chunk(type, data) {
   out.set(len, 0);
   out.set(typeBytes, 4);
   out.set(data, 8);
-  out.set(crc, 8 + typeBytes.length + data.length);
+  out.set(crc, 4 + typeBytes.length + data.length);
   return out;
 }
 

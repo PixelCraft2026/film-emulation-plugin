@@ -2,9 +2,14 @@
   "params": {
     "strength": 100,
     "sigma": 7,
+    "sigmaUnits": "pixels",
     "threshold": 0.7,
     "thresholdSoftness": 0.1,
+    "sourceSoftness": 0.1,
+    "backgroundSoftness": 0.1,
+    "smoothness": 0.6666666666666666,
     "backgroundThreshold": 0.8,
+    "thresholdUnits": "linear",
     "redshift": [
       1,
       0.05,
@@ -19,14 +24,17 @@
     "centerAttenuation": 0.9,
     "blendMode": "additive",
     "diffusionMode": "fast",
+    "extraction": "threshold",
+    "spillMix": 0.5,
+    "rolloff": 0,
     "profile": "standard"
   },
   "width": 32,
   "height": 32,
   "inputHash": "35e3b09f",
   "outputHash": {
-    "quality": "b47e557d",
-    "fast": "cc4dedab"
+    "quality": "5e89c45c",
+    "fast": "1155f81a"
   },
-  "generatedAt": "2026-08-09T21:15:15.457Z"
+  "generatedAt": "2026-08-19T15:25:37.651Z"
 }

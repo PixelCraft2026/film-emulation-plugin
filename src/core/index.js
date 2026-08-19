@@ -10,7 +10,7 @@
  *  - createHalationParams(overrides?) -> HalationParams        (params.js)
  *  - processHalation(input, params) -> { rgb, stats }          (pipeline.js)
  *  - decodeTRC / encodeTRC / trcNameForProfile                 (color/trc.js)
- *  - gaussianBlurConv / iirBlur                                 (diffuse/*)
+ *  - gaussianBlurSep / boxBlur3                                (diffuse/*)
  *  - extractHighlights / redShift / compositeHalo               (extract/redshift/composite)
  *
  * 像素约定（TDD §5）：ImageBuffer = { width: number, height: number, rgb: Float32Array }
@@ -25,11 +25,24 @@ export {
   ADDITIVE_SCALE,
   BLEND_MODES,
   DIFFUSION_MODES,
+  EXTRACTION_MODES,
+  THRESHOLD_UNITS,
+  SIGMA_UNITS,
+  MIDDLE_GRAY,
+  thresholdLinear,
+  sigmaPxFor,
+  resolveSigmaParams,
 } from './params.js';
 export { TRCS, getTRC } from './color/trc.js';
-export { expKernel1D, blurRowConv, blurColConv, blurExp } from './diffuse/conv.js';
-export { iirBlur, mirrorIndex } from './diffuse/iir.js';
+export { SPACE_TO_SRGB, SRGB_TO_SPACE, applyMatrix3 } from './color/primaries.js';
+export { gaussianKernel1D, blurRowConv, blurColConv, gaussianBlurSep } from './diffuse/conv.js';
+export { boxRadiusForSigma, boxBlurOnce, boxBlur3 } from './diffuse/box.js';
+export { vvCoef, vvGauss } from './diffuse/vv.js';
+export { boxDownsample, bilinearUpsample } from './diffuse/resample.js';
 export { smoothstep, extractHighlights } from './extract.js';
 export { channelSigmas, applyRedShift } from './redshift.js';
-export { GLARE_SIGMA, computeHalo, computeSecondaryGlare, addGlare, alphaFor, blend } from './composite.js';
-export { makeBlurFn, processHalation, extractStep, diffuseStep, haloStep, blendStep } from './pipeline.js';
+export { computeHalo, alphaFor, blend, screenGain } from './composite.js';
+export { makeBlurFn, processHalation, extractStep, diffuseStep, haloStep, blendStep, lowResScale, lobeScale, psfLobesFor, LOWRES_MIN_SIGMA, LOWRES_MAX_SCALE, PSF_LOBES } from './pipeline.js';
+export { ENGINE_VERSION, EFFECT_ORDER, processFilm } from './film.js';
+export { installWasmModule, tryWasmBoxBlur, tryWasmHalation, getWasmBackendStatus, resetWasmBackend } from './wasmBackend.js';
+export { blueNoise, BLUE_NOISE_SIZE } from './dither.js';

@@ -35,13 +35,18 @@ function normalizePath(p) {
  * @returns {{pathHash:string,fileName:string,fileSize:number|null,mtimeMs:number|null,documentId:number|null}}
  */
 export function computeFingerprint(doc) {
-  const path = doc.path || '';
+  const savedPath = normalizePath(doc.path || '');
+  const fileName = doc.name || '';
+  const documentId = doc.id ?? null;
+  // 未保存文档没有路径；把当前 document id 纳入虚拟路径，避免所有 Untitled 文档碰撞。
+  const identity = savedPath || `unsaved://${documentId ?? 'unknown'}/${String(fileName).toLowerCase()}`;
   return {
-    pathHash: fnv1a(normalizePath(path)),
-    fileName: doc.name || '',
+    pathHash: fnv1a(identity),
+    fileName,
     fileSize: null, // UXP 无 stat API；预留
     mtimeMs: null, // 预留
-    documentId: doc.id ?? null,
+    documentId,
+    unsaved: !savedPath,
   };
 }
 
@@ -52,7 +57,9 @@ export function fingerprintKey(fp) {
 
 /** 主匹配：pathHash + fileName 一致（文档未移动/改名）。 */
 export function fingerprintMatches(a, b) {
-  return a.pathHash === b.pathHash && a.fileName === b.fileName;
+  if (!a || !b || a.pathHash !== b.pathHash || a.fileName !== b.fileName) return false;
+  if (a.unsaved || b.unsaved) return a.documentId === b.documentId;
+  return true;
 }
 
 /**
@@ -123,10 +130,14 @@ export const pluginStorage = new PluginStorage();
  * @param {object} params HalationParams
  * @returns {Promise<{key:string,fingerprint:object}>}
  */
-export async function saveParamsForDoc(doc, params) {
+export async function saveParamsForDoc(doc, params, state = {}) {
   const fp = computeFingerprint(doc);
   const key = fingerprintKey(fp);
-  await pluginStorage.save(key, serializeParams(params));
+  await pluginStorage.save(key, serializeParams(params, {
+    format: state.format,
+    bindings: state.bindings,
+    documentFingerprint: fp,
+  }));
   return { key, fingerprint: fp };
 }
 
@@ -137,20 +148,13 @@ export async function saveParamsForDoc(doc, params) {
  */
 export async function loadParamsForDoc(doc) {
   const fp = computeFingerprint(doc);
-  const names = await pluginStorage.listNames();
-  for (const name of names) {
-    const text = await pluginStorage.load(name);
-    try {
-      const { params, version } = parseDocument(text);
-      // 键内 fingerprint 校验（路径 hash 一致性）——cache 文件按 key 命名，key 含 pathHash
-      if (name.startsWith(`doc-${fp.pathHash}-`)) {
-        return { params, version, key: name };
-      }
-    } catch {
-      // 单个 cache 损坏不影响其他
-    }
-  }
-  return null;
+  const key = fingerprintKey(fp);
+  if (!(await pluginStorage.exists(key))) return null;
+  const text = await pluginStorage.load(key);
+  const { params, version, document } = parseDocument(text);
+  const storedFingerprint = document.documentFingerprint;
+  if (storedFingerprint && !fingerprintMatches(storedFingerprint, fp)) return null;
+  return { params, version, key, document, bindings: document.bindings, format: document.format };
 }
 
 /** 供 Node 测试：纯 fingerprint 计算（不触碰 UXP）。 */

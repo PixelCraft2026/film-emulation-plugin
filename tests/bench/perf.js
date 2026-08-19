@@ -1,74 +1,133 @@
-/**
- * Phase 6 性能基准（Node 侧，A3/V-3 前置验证）：
- *  - 24MP（6000×4000）processHalation 计时（quality / fast，A3 渲染 <5s 目标）
- *  - 峰值内存测量（--expose-gc 运行，V-3：≤3 份 3n 全分辨率缓冲）
- * 运行：npm run bench（= node --expose-gc tests/bench/perf.js）
- */
-import { processHalation, createHalationParams } from '../../src/core/index.js';
+/** V1.5 reproducible benchmark: 2 warmups + 10 measured runs by default. */
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import {
+  createHalationParams,
+  installWasmModule,
+  getWasmBackendStatus,
+  processHalation,
+} from '../../src/core/index.js';
+import { processTiledWithTrc } from '../../src/io/tileRender.js';
+import { streamGeometry } from '../../src/io/streamGeometry.js';
 
-const W = 6000;
-const H = 4000;
-const N = W * H;
+const WIDTH = 6000;
+const HEIGHT = 4000;
+const WARMUPS = Number(process.env.FILM_BENCH_WARMUPS ?? 2);
+const RUNS = Number(process.env.FILM_BENCH_RUNS ?? 10);
+const LINEAR_TRC = { decode: (value) => value, encode: (value) => value, baseKey: 'sRGB' };
+const wasmPath = fileURLToPath(new URL('../../assets/film_core.wasm', import.meta.url));
+if (existsSync(wasmPath)) await installWasmModule(readFileSync(wasmPath));
 
-function fnv1a(bytes) {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < bytes.length; i++) {
-    h ^= bytes[i];
-    h = Math.imul(h, 0x01000193);
-  }
-  return (h >>> 0).toString(16);
+function percentile(values, p) {
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * p) - 1))];
 }
 
-function buildInput() {
-  const rgb = new Float32Array(N * 3);
-  // 确定性图案：暗背景 + 若干高光点（含 HDR）
-  for (let i = 0; i < N; i++) {
-    const v = ((i * 2654435761) >>> 8) / 0xffffff * 0.05;
-    rgb[i * 3] = v;
-    rgb[i * 3 + 1] = v * 0.9;
-    rgb[i * 3 + 2] = v * 0.8;
+function memoryMB() {
+  const usage = process.memoryUsage();
+  return {
+    rss: usage.rss / 1048576,
+    arrayBuffers: usage.arrayBuffers / 1048576,
+  };
+}
+
+function makeBand(width, start, end) {
+  const height = end - start;
+  const rgb = new Float32Array(width * height * 3);
+  for (let y = 0; y < height; y++) {
+    const gy = start + y;
+    for (let x = 0; x < width; x++) {
+      const i = gy * width + x;
+      const p = (y * width + x) * 3;
+      const value = (((i * 2654435761) >>> 8) / 0xffffff) * 0.05;
+      rgb[p] = value;
+      rgb[p + 1] = value * 0.9;
+      rgb[p + 2] = value * 0.8;
+    }
   }
   for (let k = 0; k < 200; k++) {
-    const x = (k * 137) % W;
-    const y = (k * 229) % H;
-    const p = (y * W + x) * 3;
-    rgb[p] = 2.0;
+    const x = (k * 137) % width;
+    const gy = (k * 229) % HEIGHT;
+    if (gy < start || gy >= end) continue;
+    const p = ((gy - start) * width + x) * 3;
+    rgb[p] = 2;
     rgb[p + 1] = 1.5;
-    rgb[p + 2] = 1.0;
+    rgb[p + 2] = 1;
   }
-  return { width: W, height: H, rgb };
+  return { width, height, rgb };
 }
 
-function memMB() {
-  if (global.gc) global.gc();
-  return process.memoryUsage().heapUsed / (1024 * 1024);
+function render24MP(params) {
+  const geometry = streamGeometry(WIDTH, HEIGHT, params);
+  let checksum = 0;
+  let peak = memoryMB();
+  for (const band of geometry.bands) {
+    const source = makeBand(WIDTH, band.start, band.end);
+    const result = processTiledWithTrc(source, geometry.params, LINEAR_TRC, { tileThreshold: Number.MAX_SAFE_INTEGER });
+    const row0 = band.y0 - band.start;
+    const row1 = band.y1 - band.start;
+    for (let y = row0; y < row1; y += 17) {
+      const p = (y * WIDTH + ((y * 101) % WIDTH)) * 3;
+      checksum = (checksum + Math.round(result.rgb[p] * 1e6)) >>> 0;
+    }
+    const current = memoryMB();
+    peak = { rss: Math.max(peak.rss, current.rss), arrayBuffers: Math.max(peak.arrayBuffers, current.arrayBuffers) };
+  }
+  return { checksum, peak, bands: geometry.bands.length };
 }
 
-const report = { size: `${W}x${H} (24MP)`, runs: {} };
-const input = buildInput();
-console.log('input built, bytes=', input.rgb.byteLength, `(${input.rgb.byteLength / 1024 / 1024} MB)`);
+function renderPreview(params) {
+  const width = 1024;
+  const height = 683;
+  const source = makeBand(width, 0, height);
+  const result = processHalation(source, params);
+  return result.rgb[0];
+}
 
-for (const mode of ['quality', 'fast']) {
-  const params = createHalationParams({ strength: 100, diffusionMode: mode });
-  const baseMem = memMB();
-  const t0 = performance.now();
-  const out = processHalation(input, params);
-  const t1 = performance.now();
-  const peakMem = memMB();
-  report.runs[mode] = {
-    ms: Math.round((t1 - t0) * 10) / 10,
-    peakHeapMB: Math.round((peakMem - baseMem) * 10) / 10,
-    outHash: fnv1a(new Uint8Array(out.rgb.buffer)),
+async function measure(label, render, warmups = WARMUPS, runs = RUNS) {
+  for (let i = 0; i < warmups; i++) render();
+  const timings = [];
+  let peak = { rss: 0, arrayBuffers: 0 };
+  let checksum = 0;
+  let bands = 1;
+  for (let i = 0; i < runs; i++) {
+    if (global.gc) global.gc();
+    const started = performance.now();
+    const result = render();
+    timings.push(performance.now() - started);
+    checksum = typeof result === 'number' ? result : result.checksum;
+    bands = typeof result === 'number' ? 1 : result.bands;
+    if (result.peak) peak = { rss: Math.max(peak.rss, result.peak.rss), arrayBuffers: Math.max(peak.arrayBuffers, result.peak.arrayBuffers) };
+  }
+  const summary = {
+    label,
+    warmups,
+    runs,
+    samplesMs: timings.map((value) => Math.round(value * 10) / 10),
+    p50Ms: Math.round(percentile(timings, 0.5) * 10) / 10,
+    p95Ms: Math.round(percentile(timings, 0.95) * 10) / 10,
+    peakRssMB: Math.round(peak.rss * 10) / 10,
+    peakArrayBuffersMB: Math.round(peak.arrayBuffers * 10) / 10,
+    checksum,
+    bands,
   };
-  console.log(`${mode}: ${report.runs[mode].ms}ms, Δheap=${report.runs[mode].peakHeapMB}MB, hash=${report.runs[mode].outHash}`);
+  console.log(`${label}: P50=${summary.p50Ms}ms P95=${summary.p95Ms}ms peakRSS=${summary.peakRssMB}MB`);
+  return summary;
 }
 
-// 理论缓冲：S/G/D/temp/out = 3n*2 + n*2 = 8n 通道 = 96MB @Float32
-const theoreticalMB = (3 * N * 2 + N * 2) * 4 / (1024 * 1024);
-report.theoreticalBuffersMB = Math.round(theoreticalMB * 10) / 10;
-console.log(`theoretical buffer working set ≈ ${report.theoreticalBuffersMB} MB (S,G,D,temp,out)`);
+const defaultParams = createHalationParams({ strength: 100, diffusionMode: 'fast' });
+const previewParams = createHalationParams({ ...defaultParams, sigma: defaultParams.sigma * (1024 / WIDTH) });
+const report = {
+  generatedAt: new Date().toISOString(),
+  node: process.version,
+  platform: `${process.platform}-${process.arch}`,
+  cpu: process.env.PROCESSOR_IDENTIFIER ?? 'unknown',
+  backend: getWasmBackendStatus(),
+  protocol: { warmups: WARMUPS, runs: RUNS, size: `${WIDTH}x${HEIGHT}`, componentSize: 16 },
+  apply24MP: await measure('24MP streamed fast', () => render24MP(defaultParams)),
+  preview1024: await measure('1024px preview fast', () => renderPreview(previewParams)),
+};
 
-const jsonPath = new URL('../performance-data.json', import.meta.url);
-const { writeFileSync } = await import('node:fs');
-writeFileSync(jsonPath, JSON.stringify(report, null, 2) + '\n', 'utf8');
-console.log(`report: ${jsonPath.pathname}`);
+const out = new URL('../performance-data.json', import.meta.url);
+writeFileSync(out, JSON.stringify(report, null, 2) + '\n', 'utf8');
+console.log(`report: ${out.pathname}`);

@@ -61,3 +61,28 @@ export function downsampleBox(src, w, h, dw, dh) {
   }
   return out;
 }
+
+/** 单通道面积平均降采样（alpha/mask）。 */
+export function downsamplePlane(src, w, h, dw, dh) {
+  const out = new Float32Array(dw * dh);
+  const sx = w / dw;
+  const sy = h / dh;
+  for (let y = 0; y < dh; y++) {
+    const y0 = Math.floor(y * sy);
+    const y1 = Math.min(h, Math.ceil((y + 1) * sy));
+    for (let x = 0; x < dw; x++) {
+      const x0 = Math.floor(x * sx);
+      const x1 = Math.min(w, Math.ceil((x + 1) * sx));
+      let sum = 0;
+      let count = 0;
+      for (let yy = y0; yy < y1; yy++) {
+        for (let xx = x0; xx < x1; xx++) {
+          sum += src[yy * w + xx];
+          count++;
+        }
+      }
+      out[y * dw + x] = count ? sum / count : 0;
+    }
+  }
+  return out;
+}

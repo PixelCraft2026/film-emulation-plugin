@@ -14,6 +14,7 @@ const CCX = join(OUT_DIR, 'FilmHalation.ccx');
 const STAGE = join(OUT_DIR, 'ccx-stage');
 
 // 1) build（确保最新 bundle；直接用 node 跑 esbuild 配置，避免 .cmd spawn 问题）
+execFileSync('node', [join(ROOT, 'scripts', 'build-wasm.mjs')], { cwd: ROOT, stdio: 'inherit' });
 execFileSync('node', [join(ROOT, 'esbuild.config.mjs')], { cwd: ROOT, stdio: 'inherit' });
 
 // 2) 组装 stage：manifest.json + index.html + dist/main.js
@@ -24,6 +25,7 @@ copy(join(ROOT, 'manifest.json'), STAGE);
 copy(join(ROOT, 'index.html'), STAGE);
 copy(join(OUT_DIR, 'main.js'), join(STAGE, 'dist'));
 copy(join(OUT_DIR, 'main.js.map'), join(STAGE, 'dist'));
+copy(join(OUT_DIR, 'film_core.wasm'), join(STAGE, 'dist'));
 
 // 3) 压缩为 zip，再重命名 .ccx（Compress-Archive 只接受 .zip 扩展名）
 rmSync(CCX, { force: true });

@@ -1,77 +1,39 @@
-# 验收报告（Phase 7，V1.0 发布前）
+# V1.5 验收状态
 
-**日期**：2026-08-10
-**范围**：PRD §3.3 验收标准 A1–A6 逐项判定（最终用户视觉确认项已标注）
+更新日期：2026-08-20
+规则：Node 自动测试通过不等于 Photoshop 实机通过。未完成项保持 Pending，不以推测数据放行。
 
----
+## 自动门禁
 
-## A1 — 夜景红晕 / 暗侧 / 无整图红雾
-
-| 判据 | 证据 | 判定 |
+| 门禁 | 当前要求 | 状态 |
 |---|---|---|
-| 高光周围红色光晕 | T4（impulse 红晕存在 R>B 且衰减）+ `tests/visual/output/v1-night-rendered.png`（灯周 R 主导） | ✅ |
-| 暗侧保持 | T3（暗常量图不变）+ V-1 判据（距灯 >22px 无污染） | ✅ |
-| 无整图红雾 | threshold 提取 S 非零像素仅 0.07%（V-5）+ G gate | ✅ |
-| 主观观感 | 渲染样张（`tests/visual/output/*.png`） | ⏳ 用户视觉确认 |
+| Unit | 全部通过；含 alpha、spill、HDR screen、schema v2、bindings、A6 | 已实现，运行发布门禁时刷新数量 |
+| Typecheck | `tsc --noEmit` 零错误 | 已实现 |
+| Build | UXP bundle 生成 | 已实现；受控环境可能需要允许 esbuild 子进程读取工作区 |
+| WASM | Rust release build；JS/WASM blur 与完整 Fast parity | 已实现并自动测试 |
+| Manifest | 1.5.0 / PS 23.3 / manifest v4 | 已实现；最终门禁重跑 validate |
+| Package | CCX 含 `dist/film_core.wasm` | 已实现；最终门禁重建并校验 |
 
-## A2 — 8/16/32-bit 无 banding
+## A1–A6
 
-| 判据 | 证据 | 判定 |
-|---|---|---|
-| 三 bit 深度全流程 | 真机冒烟（smoke-test.md）：8/16/32 ok，applyMs 30–117ms | ✅ |
-| 精度 | V-6：四种 TRC 往返误差 <5e-16（远优于 8-bit 的 1/255≈3.9e-3） | ✅ |
-| 写回量化 | imageAccess 按 `doc.bitsPerChannel` 量化（8/255、16/32768、32 直通） | ✅ |
-| banding 视觉 | 8/16-bit 梯度样张目测 | ⏳ 用户真实样张确认 |
+| 项 | 自动证据 | Photoshop 实机证据 | 判定 |
+|---|---|---|---|
+| A1 Halation 形态 | 暗常量恒等、点源红色衰减、光谱泄漏测试、视觉 golden | 白炽灯、蓝 LED、日光反光、肤色 corpus | Pending visual |
+| A2 位深/透明度 | alpha 保留且透明 RGB 不发光；量化路径实现 | 8/16/32 位、透明/半透明、四工作空间 | Pending host |
+| A3 性能 | Node 2+10：24MP P95=5642.4ms、RSS=529.9MB；1024px P95=100.6ms | 24MP 16 位 Apply P95≤2s；1024 preview P95≤200ms；32 位/内存另报 | **Apply 未通过** / host pending |
+| A4 非破坏 | 写入编排只接受不同 target binding；严格 binding 单测 | Preview/Apply/重开/切文档源 hash 不变；重复 Apply 不叠加 | Pending host |
+| A5 恢复 | v1→v2、往返、未来 schema 拒绝、Untitled 防碰撞 | 保存、重开、重命名/歧义、手动副本回退 | Pending host |
+| A6 一致性 | Fast/Quality 同双瓣 PSF，RMS≤1e-4、SSIM≥0.9995 | 视觉 corpus 99.9% 像素≤1 code value | Automatic pass / visual pending |
 
-## A3 — 预览 <500ms / 渲染 <5s @24MP
+## 必测 Photoshop 场景
 
-| 判据 | 证据 | 判定 |
-|---|---|---|
-| 渲染 <5s | **fast 3.47s**（bench，A3 决策：Apply 默认 fast） | ✅ |
-| quality 模式 | 19.6s（5σ 核；可选高精度，UI 提示更慢） | ℹ️ 记录（非默认） |
-| 预览 <500ms | fast + 1024 降采样（Node 侧 <200ms 量级） | ⏳ 真机面板计时待确认 |
-| 内存 | V-3：峰值 ≈3 份 3n（732MB @24MP 理论）；tile 兜底（>16MP 自动，quality L2=0） | ✅ |
-
-## A4 — 原图层 hash 不变
-
-| 判据 | 证据 | 判定 |
-|---|---|---|
-| 源图层不变 | **部分受阻**：PS 27 UXP imaging 无法访问运行时新建图层 id（getPixels/putPixels 均 Unknown layer/invalid target sheet，详见 smoke-test.md §3.1） | ⚠️ 受阻 |
-| 临时方案 | Apply 写回源图层（可 Ctrl+Z 撤销）；冒烟 writeToSource 模式 | ℹ️ 替代 |
-| 正式验收 | 待效果图层方案（batchPlay 写像素 / PS 更新 / 用户复制图层工作流） | 阻塞项 |
-
-## A5 — 参数往返恢复一致
-
-| 判据 | 证据 | 判定 |
-|---|---|---|
-| Apply→重开→恢复 | PluginStorage 自检 PASS（strength 77 保存→载入一致，真机 PS 27.1.0） | ✅ |
-| 确定性序列化 | S1（serialize(parse(json))===json）+ 键序规范化 | ✅ |
-| 限制 | machine-local；文档移动后需重新关联（fingerprint） | 记录 |
-
-## A6 — fast/quality 数值一致性（0–3σ 内 L2 < 1e-4）
-
-| 判据 | 证据 | 判定 |
-|---|---|---|
-| quality 3σ 口径 | L2 = 9.57e-5 < 1e-4 | ✅ |
-| quality 5σ 口径（V1 定稿） | L2 = 1.22e-5（8 倍余量） | ✅ |
-| tile 一致性 | quality L2=0；fast 3.4e-6 | ✅ |
-
----
-
-## 回归基线
-
-- 测试：**26/26 pass，0 fail**（T1–T8、C1–C4、S1–S7、F1–F4、tile×2）
-- golden：`tests/golden/halation-default.json`（quality=b47e557d, fast=cc4dedab，与当前实现一致）
-- 构建：esbuild 51.7kb + typecheck 零错误
-
-## 已知限制（发布说明）
-
-1. **A4 受阻**：效果图层运行时创建在 PS 27 UXP 不可用（imaging 限制）；Apply 临时写回源图层（Ctrl+Z 可撤销）。
-2. 文档需 sRGB / Adobe RGB (1998) / ProPhoto profile（未知 profile 拒绝）。
-3. 参数缓存 machine-local（PluginStorage，文档移动需重新关联）。
-4. quality 模式 24MP 约 20s（可选高精度）。
-5. UXP 无 Web Worker（并行降级为主线程分块）。
+1. 选中正常像素层首次 Apply：创建唯一命名副本，源 hash 不变。
+2. 运行时复制不可寻址：无 putPixels，显示手动复制指引。
+3. 绑定后连续调参：只更新 target，每次都从 source 读取。
+4. 重开 PSD：恢复参数与 source/target；绑定歧义时阻止。
+5. 8/16/32 位；透明棋盘、半透明边缘；sRGB/Adobe RGB/ProPhoto/Display P3 或 Rec.2020。
+6. 24MP 16 位默认参数：2 次预热、10 次计时，记录 P50/P95 和峰值内存。
 
 ## 发布判定
 
-**V1.0 可发布（功能完整），但 A4 记为受限项**——若 A4 为硬性验收，需先解决效果图层方案（见 smoke-test.md §3.1 候选路线）。
+当前实现不得标记 release-ready，直到本文件所有 Pending host/benchmark 项由真实 Photoshop 记录补齐。V1.6 功能开发在该门禁之前冻结。

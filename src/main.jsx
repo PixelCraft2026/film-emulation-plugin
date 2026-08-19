@@ -1,234 +1,317 @@
 // @ts-nocheck
-/**
- * Film Halation — Photoshop UXP plugin entry（Phase 4：完整 UI）。
- * 结构：core（纯算法）← io（宿主访问）← ui（视图）← main（装配/编排）。
- */
+/** Film Halation V1.5 — 非破坏性 UXP 编排。 */
 import { createPanel } from './ui/panel.jsx';
-import { renderPreviewDataURL, renderPreviewIncremental } from './io/previewRender.js';
-import { createHalationParams, processHalation, extractStep, diffuseStep, haloStep, blendStep } from './core/index.js';
-import { processTiled } from './io/tileRender.js';
-import { resolveDocumentTRC, decodeToLinear, encodeFromLinear } from './io/colorPipeline.js';
-import { readDocumentPixels, writeDocumentPixels } from './io/imageAccess.js';
-import { ensureEffectLayer, activateLayer } from './io/layerOps.js';
+import { renderPreviewIncremental } from './io/previewRender.js';
+import { computePreviewScale } from './io/preview.js';
+import { createHalationParams } from './core/index.js';
+import { renderDocumentToLayer } from './io/streamRender.js';
+import { resolveDocumentTRC, resolvePixelTRC, standardProfileName } from './io/colorPipeline.js';
+import { readDocumentPixels } from './io/imageAccess.js';
+import {
+  EFFECT_LAYER_NAME,
+  ensureEffectLayer,
+  resolveTargetLayer,
+  resolveLayerBinding,
+  resolvePreviewSourceLayer,
+  createLayerBinding,
+  noTargetLayerMessage,
+  isPixelLayer,
+  unreadableLayerMessage,
+  layerPixelBounds,
+  unlockPixelLayer,
+  resolveApplyTarget,
+} from './io/layerOps.js';
 import { STRINGS } from './ui/i18n.js';
 import { saveParamsForDoc, loadParamsForDoc } from './storage/pluginStorage.js';
+import { loadBundledWasm } from './io/wasmRuntime.js';
 
 const ps = require('photoshop');
 const app = ps.app;
 
+loadBundledWasm().then((wasm) => {
+  console.log(`[film-halation] compute backend: ${wasm.backend}${wasm.error ? ` (${wasm.error})` : ''}`);
+});
 
-/** 当前参数状态（UI 持有的单一 HalationParams 实例）。 */
 let params = createHalationParams({ strength: 50 });
+let documentState = {
+  format: { gauge: '35mm', iso: 250 },
+  bindings: { sourceLayer: null, targetLayer: null },
+};
 
-/** 写诊断文件（错误/自检结果共用）。 */
 async function writeDiagFile(name, data) {
   try {
     const { localFileSystem } = require('uxp').storage;
     const folder = await localFileSystem.getDataFolder();
     const file = await folder.createFile(name, { overwrite: true });
     await file.write(JSON.stringify(data, null, 2));
-  } catch (e) {
-    console.error('[film-halation] writeDiagFile failed: ' + e);
+  } catch (error) {
+    console.error('[film-halation] diagnostic write failed: ' + error);
   }
 }
 
 let panel;
-let img = null;
-let status = null;
-let applyBtn = null;
+let img;
+let status;
+let applyBtn;
 try {
   panel = createPanel({
     params,
-    onParamsChange: (partial) => onParamsChange(partial),
-    onPreview: () => schedulePreview(),
-    onApply: () => runApply(),
+    onParamsChange,
+    onApply: runApply,
+    onRebind: runRebind,
   });
   document.body.append(panel);
   ({ img, status, applyBtn } = panel.__handles);
-} catch (e) {
-  console.error('[film-halation] createPanel failed: ' + (e && (e.stack || e.message || e)));
-  writeDiagFile('ui-error.json', {
-    msg: String(e && (e.stack || e.message || e)),
-    at: new Date().toISOString(),
-  });
-  // 占位状态对象，避免后续引用崩溃
+} catch (error) {
+  console.error('[film-halation] panel creation failed: ' + (error && (error.stack || error.message || error)));
+  writeDiagFile('ui-error.json', { message: String(error), at: new Date().toISOString() });
   status = { textContent: '' };
-  img = { removeAttribute: () => {}, src: '' };
+  img = { removeAttribute() {}, src: '' };
   applyBtn = { disabled: false };
 }
 
-// 文档/图层切换刷新（UXP 无直接事件，轻量轮询 activeDocument）
-let lastDocId = null;
-setInterval(() => {
-  const doc = currentDoc();
-  const id = doc ? doc.id : null;
-  if (id !== lastDocId) {
-    lastDocId = id;
-    img.removeAttribute('src');
-    if (doc) {
-      status.textContent = 'Document changed. Previewing…';
-      schedulePreview();
-    } else {
-      status.textContent = 'No active document.';
-    }
-  }
-}, 1000);
+let taskChain = Promise.resolve();
+function enqueueTask(fn) {
+  const result = taskChain.then(fn);
+  taskChain = result.catch((error) => console.warn('[film-halation] queued task failed: ' + error));
+  return result;
+}
 
 function currentDoc() {
   return app.activeDocument;
 }
 
-function resolveTRC(doc) {
-  return resolveDocumentTRC(doc);
-}
+let lastDocId = null;
+setInterval(() => {
+  const doc = currentDoc();
+  const id = doc ? doc.id : null;
+  if (id === lastDocId) return;
+  lastDocId = id;
+  img.removeAttribute('src');
+  previewCache = null;
+  documentState = { format: { gauge: '35mm', iso: 250 }, bindings: { sourceLayer: null, targetLayer: null } };
+  if (!doc) {
+    status.textContent = 'No active document.';
+    return;
+  }
+  status.textContent = 'Document changed. Loading Film Halation state…';
+  loadStoredParams(doc, id);
+}, 750);
 
-/** 参数变更：更新状态 + debounce 预览（100ms）。 */
-let previewTimer = null;
 function onParamsChange(partial) {
   try {
     params = createHalationParams({ ...params, ...partial });
-  } catch (e) {
-    status.textContent = STRINGS.statusFailed(e.message);
+  } catch (error) {
+    status.textContent = STRINGS.statusFailed(error.message);
     return;
   }
   schedulePreview();
 }
 
+let panelTimer = null;
 function schedulePreview() {
-  clearTimeout(previewTimer);
-  previewTimer = setTimeout(runPreview, 100);
+  clearTimeout(panelTimer);
+  panelTimer = setTimeout(() => enqueueTask(runPanelPreview), 80);
 }
 
-/** 预览：面板内显示（降采样 + fast + 增量重算，不触碰文档）。 */
 let previewCache = null;
-async function runPreview() {
-  const doc = currentDoc();
-  if (!doc) {
-    status.textContent = 'No active document.';
-    return;
+async function boundPreviewSource(doc) {
+  const binding = documentState.bindings.sourceLayer;
+  const sourceLayer = resolvePreviewSourceLayer(doc, binding);
+  if (!sourceLayer) {
+    if (binding) throw new Error('The saved source binding is missing or ambiguous. Select the original pixel layer and click Rebind Source.');
+    throw new Error(noTargetLayerMessage(doc));
   }
-  let trc;
+  if (!isPixelLayer(sourceLayer)) throw new Error(unreadableLayerMessage(sourceLayer));
+  const bounds = layerPixelBounds(sourceLayer) ?? { left: 0, top: 0, right: doc.width, bottom: doc.height };
+  const scale = computePreviewScale(bounds.right - bounds.left, bounds.bottom - bounds.top);
+  const readOptions = {
+    layerID: sourceLayer.id,
+    layerName: sourceLayer.name,
+    bounds,
+    // Let Photoshop's ICC engine convert the document thumbnail to sRGB.
+    // The panel PNG is untagged and is displayed as sRGB by UXP.
+    colorProfile: standardProfileName('sRGB'),
+  };
+  let source;
   try {
-    trc = resolveTRC(doc);
-  } catch (e) {
-    status.textContent = STRINGS.statusFailed(e.message);
-    return;
-  }
-  status.textContent = STRINGS.statusRendering;
-  try {
-    const r = await ps.core.executeAsModal(() => renderPreviewIncremental(doc, params, trc, previewCache), {
-      commandName: 'film-halation-preview',
+    source = await readDocumentPixels(doc, {
+      ...readOptions,
+      componentSize: 8,
+      targetSize: {
+        width: Math.max(1, Math.round((bounds.right - bounds.left) * scale)),
+        height: Math.max(1, Math.round((bounds.bottom - bounds.top) * scale)),
+      },
     });
-    previewCache = r.cache;
-    img.src = r.dataUrl;
-    status.textContent = STRINGS.statusPreviewed(r.ms);
-  } catch (e) {
-    status.textContent = STRINGS.statusFailed(e.message);
+  } catch (error) {
+    console.warn('[film-halation] preview targetSize read failed; retrying full resolution inside modal scope: ' + (error?.message || error));
+    source = await readDocumentPixels(doc, { ...readOptions, componentSize: 32 });
+  }
+  source.cacheKey = `${doc.id}:${sourceLayer.id}:${bounds.left},${bounds.top},${bounds.right},${bounds.bottom}`;
+  return source;
+}
+
+async function runPanelPreview() {
+  const doc = currentDoc();
+  if (!doc) return;
+  try {
+    const source = await ps.core.executeAsModal(async () => boundPreviewSource(doc), {
+      commandName: 'film-halation-read-preview',
+    });
+    const trc = resolvePixelTRC(doc, source.colorProfile);
+    const result = await renderPreviewIncremental(doc, params, trc, previewCache, source);
+    previewCache = result.cache;
+    img.src = result.dataUrl;
+    status.textContent = STRINGS.statusPreviewed(result.ms);
+  } catch (error) {
+    status.textContent = STRINGS.statusFailed(error.message || error);
   }
 }
 
-/** Apply：全分辨率 quality 渲染写回（PS 27 UXP 效果图层限制 → 临时写回源图层，可 Ctrl+Z 撤销）。 */
 async function runApply() {
   const doc = currentDoc();
   if (!doc) {
     status.textContent = 'No active document.';
     return;
   }
-  let trc;
-  try {
-    trc = resolveTRC(doc);
-  } catch (e) {
-    status.textContent = STRINGS.statusFailed(e.message);
-    return;
-  }
   status.textContent = STRINGS.statusRendering;
   applyBtn.disabled = true;
   try {
-    const r = await ps.core.executeAsModal(() => applyHalation(doc, params, { trc }), {
-      commandName: 'film-halation-apply',
-    });
-    if (r.ok) {
-      try {
-        await saveParamsForDoc(doc, params);
-        status.textContent = STRINGS.statusApplied(r.applyMs);
-      } catch (saveErr) {
-        console.warn('[film-halation] save params failed: ' + saveErr);
-        status.textContent = STRINGS.statusApplied(r.applyMs) + ' (params not saved)';
-      }
-    } else {
-      status.textContent = STRINGS.statusFailed(r.error);
+    const result = await enqueueTask(() => ps.core.executeAsModal(
+      async () => renderToSafeCopy(doc, params, { allowCreate: true }),
+      { commandName: 'film-halation-apply-safe-copy' },
+    ));
+    if (result.bindings) documentState.bindings = result.bindings;
+    // 即使效果层创建或写入失败，也保存已经确认的源绑定，便于安全重试。
+    await saveParamsForDoc(doc, params, documentState);
+    if (!result.ok) {
+      status.textContent = STRINGS.statusFailed(result.error);
+      return;
     }
-  } catch (e) {
-    status.textContent = STRINGS.statusFailed(e.message);
+    previewCache = null;
+    status.textContent = STRINGS.statusApplied(result.applyMs);
+  } catch (error) {
+    status.textContent = STRINGS.statusFailed(error.message || error);
   } finally {
     applyBtn.disabled = false;
   }
 }
 
-/** 从 PluginStorage 载入文档参数并刷新控件（无匹配则保持当前）。 */
-async function loadStoredParams() {
+async function runRebind() {
   const doc = currentDoc();
+  const selected = resolveTargetLayer(doc);
+  if (!doc || !selected) {
+    status.textContent = STRINGS.statusFailed(noTargetLayerMessage(doc));
+    return;
+  }
+  let selectedName = '';
+  try { selectedName = String(selected.name || ''); } catch (error) { /* ignore */ }
+  if (!isPixelLayer(selected)) {
+    status.textContent = STRINGS.statusFailed(unreadableLayerMessage(selected));
+    return;
+  }
+  if (selectedName.startsWith(EFFECT_LAYER_NAME)) {
+    status.textContent = STRINGS.statusFailed('Select the original pixel layer, not a Film Halation effect copy.');
+    return;
+  }
+  documentState.bindings = {
+    sourceLayer: createLayerBinding(selected, `source-${doc.id}`),
+    targetLayer: null,
+  };
+  previewCache = null;
+  await saveParamsForDoc(doc, params, documentState);
+  status.textContent = STRINGS.statusRebound;
+  enqueueTask(runPanelPreview);
+}
+
+async function renderToSafeCopy(doc, renderParams, options) {
+  const started = Date.now();
+  let sourceLayer = resolveLayerBinding(doc, documentState.bindings.sourceLayer);
+  if (!sourceLayer) {
+    if (documentState.bindings.sourceLayer) {
+      return { ok: false, error: 'The saved source binding is missing or ambiguous. Select the original pixel layer and click Rebind Source.' };
+    }
+    const selected = resolveTargetLayer(doc);
+    if (!selected) return { ok: false, error: noTargetLayerMessage(doc) };
+    let selectedName = '';
+    try { selectedName = String(selected.name || ''); } catch (error) { /* ignore */ }
+    if (selectedName.startsWith(EFFECT_LAYER_NAME)) {
+      return { ok: false, error: 'The selected layer looks like an effect copy, but its source binding is missing. Select the original pixel layer and retry.' };
+    }
+    if (!isPixelLayer(selected)) return { ok: false, error: unreadableLayerMessage(selected) };
+    sourceLayer = selected;
+  }
+  const sourceBinding = createLayerBinding(sourceLayer);
+  const savedTargetBinding = documentState.bindings.targetLayer;
+  const { target: savedTarget, legacyTarget, recreate } = resolveApplyTarget(doc, savedTargetBinding);
+  let targetLayer = savedTarget;
+  if (recreate) console.warn('[film-halation] saved effect target is stale or legacy; creating a new isolated pixel target');
+  if (!targetLayer && !options.allowCreate) return { ok: false, error: 'Safe preview target is not available.' };
+  try {
+    // Never reuse a stale binding token as a layer name; ensureEffectLayer
+    // generates a new unique token when a replacement is required.
+    targetLayer = targetLayer || await ensureEffectLayer(doc, sourceLayer, null);
+  } catch (error) {
+    return {
+      ok: false,
+      error: error.message || String(error),
+      bindings: { sourceLayer: sourceBinding, targetLayer: null },
+    };
+  }
+  if (targetLayer === sourceLayer) {
+    return { ok: false, error: 'Safety check failed: source and target resolve to the same layer. Nothing was written.' };
+  }
+
+  unlockPixelLayer(targetLayer);
+  const targetBinding = createLayerBinding(targetLayer, 'render-target-v1');
+  const sourceBounds = layerPixelBounds(sourceLayer) ?? { left: 0, top: 0, right: doc.width, bottom: doc.height };
+  try {
+    const targetBounds = layerPixelBounds(targetLayer) ?? sourceBounds;
+    const trc = resolveDocumentTRC(doc);
+    await renderDocumentToLayer(doc, sourceLayer, targetLayer, sourceBounds, targetBounds, renderParams, trc, {
+      componentSize: doc.bitsPerChannel,
+      seed: 0x46534c4d,
+      signal: options.signal,
+    });
+    if (legacyTarget && legacyTarget !== targetLayer) {
+      try { legacyTarget.visible = false; } catch (error) { /* old failed target may be protected */ }
+    }
+    return {
+      ok: true,
+      applyMs: Date.now() - started,
+      bindings: { sourceLayer: sourceBinding, targetLayer: targetBinding },
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: `Safe-copy render failed; the source was not modified. ${error.message || error}`,
+      bindings: { sourceLayer: sourceBinding, targetLayer: targetBinding },
+    };
+  }
+}
+
+async function loadStoredParams(doc, expectedId = doc?.id) {
   if (!doc) return;
   try {
-    const r = await loadParamsForDoc(doc);
-    if (r) {
-      params = createHalationParams(r.params);
-      panel.__handles.updateParams(params);
-      status.textContent = 'Loaded stored params.';
+    const stored = await loadParamsForDoc(doc);
+    if (!stored || currentDoc()?.id !== expectedId) {
+      status.textContent = 'Ready. Select a pixel layer and adjust a slider.';
+      return;
     }
-  } catch (e) {
-    console.warn('[film-halation] load stored params failed: ' + e);
+    params = createHalationParams(stored.params);
+    documentState = {
+      format: stored.format || { gauge: '35mm', iso: 250 },
+      bindings: stored.bindings || { sourceLayer: null, targetLayer: null },
+    };
+    panel.__handles.updateParams(params);
+    status.textContent = 'Loaded Film Halation v2 state. Adjust a slider to preview.';
+  } catch (error) {
+    console.warn('[film-halation] state load failed: ' + error);
+    status.textContent = STRINGS.statusFailed('Stored settings could not be loaded.');
   }
 }
 
-/**
- * 完整 Apply 管线（不包 executeAsModal，由调用方包裹）。
- * @param {object} doc
- * @param {object} params HalationParams（完整）
- * @param {{trc?:object,writeToSource?:boolean}} [opts]
- * @returns {Promise<{ok:boolean,error?:string,applyMs?:number}>}
- */
-async function applyHalation(doc, params, opts = {}) {
-  try {
-    const trc = opts.trc ?? resolveTRC(doc);
-    const writeSize = doc.bitsPerChannel;
-    const t0 = Date.now();
-    let step = 'read';
-    try {
-      const sourceLayer = doc.activeLayers[0];
-      const { width, height, rgb } = await readDocumentPixels(doc, { componentSize: 32 });
-      step = 'decode';
-      const linear = decodeToLinear(rgb, trc);
-      step = 'process';
-      // 大图用行带分块（内存兜底，quality 与整图逐位一致）；小图直接整图
-      const TILE_THRESHOLD = 16 * 1024 * 1024; // >16MP 分块
-      const out =
-        width * height > TILE_THRESHOLD
-          ? processTiled({ width, height, rgb: linear }, params)
-          : processHalation({ width, height, rgb: linear }, params);
-      step = 'encode';
-      const display = encodeFromLinear(out.rgb, trc);
-      step = opts.writeToSource ? 'write-source' : 'layer';
-      const targetLayer = opts.writeToSource ? sourceLayer : await ensureEffectLayer(doc, sourceLayer);
-      if (!opts.writeToSource) {
-        step = 'activate';
-        activateLayer(doc, targetLayer);
-      }
-      step = 'write';
-      await writeDocumentPixels(doc, { width, height, rgb: display }, { componentSize: writeSize, layerID: targetLayer.id });
-    } catch (e2) {
-      throw new Error(`[step:${step}] ${e2.message || e2}`);
-    }
-    return { ok: true, applyMs: Date.now() - t0 };
-  } catch (e) {
-    console.error('[film-halation] apply failed: ' + (e && (e.stack || e.message || e)));
-    return { ok: false, error: String(e && (e.stack || e.message || e)) };
-  }
-}
-
-// 初始化：载入文档参数（PluginStorage，正式功能）
-try {
-  loadStoredParams();
-} catch (e) {
-  console.warn('[film-halation] loadStoredParams failed: ' + e);
+const initialDocument = currentDoc();
+if (initialDocument) {
+  loadStoredParams(initialDocument).catch((error) => console.warn('[film-halation] initial load failed: ' + error));
 }

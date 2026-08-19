@@ -33,22 +33,13 @@
 
 > ⏳ 标记项为**需用户视觉确认**（合成样张的客观判据已由数值保证，主观观感留待用户查看渲染 PNG）。
 
-## 2. V-4：IIR(fast) vs conv(quality) 对照（A6 口径）
+## 2. V-4：Fast vs Quality 对照（V1.5 A6 口径）
 
-**数值（0..3σ 区域，脉冲响应 L2）**：
+V1.5 已废弃旧的单指数/IIR 比较。Fast 与 Quality 现在共享相同的 core/tail 双高斯 PSF、通道比例和权重，只允许高斯数值实现及多尺度精度不同。
 
-| 指标 | 值 | 判定 |
-|---|---|---|
-| L2 fast vs quality(3σ 截断) | **9.57e-5** | ✅ < 1e-4（A6 达成） |
-| L2 fast vs quality(5σ 截断) | 1.22e-5 | 一致性提升 8 倍 |
-| fast 脉冲 L2（能量参考） | 9.64e-4 | — |
-| quality(3σ) 脉冲 L2 | 1.06e-3 | — |
+自动回归位于 `tests/unit/lowres.test.js`：完整输出线性 RMS≤`1e-4`、SSIM≥`0.9995`；WASM 与 JavaScript Fast 完整链路另在 `tests/unit/wasm.test.js` 做 RMS/最大误差比较。旧版 2026-08-10 的 IIR 数值与差异图不再作为 V1.5 验收证据。
 
-**视觉**：v1-night 双模式渲染 max per-channel diff = **19/255（7.5%）**，差异集中在灯周；diff20x 图已生成（`tests/visual/output/v1-night-diff20x.png`）。
-
-**结论**：
-- A6 在质量半径 3σ（当前默认）即达成；**建议 Phase 7 将质量半径提至 5σ**（`TRUNC_QUALITY`）以 8 倍收紧 fast/quality 一致性，代价是卷积成本约 ×2.3（radius 21→35），预览仍可用 fast。
-- fast/quality 视觉差异（7.5% max）在可接受范围，两者数学同源（exp 核）。
+视觉 corpus 的 99.9% 8 位显示像素差≤1 code value 仍待 Photoshop 实机金图验证。
 
 ## 3. V-5：threshold vs spill 提取 A/B（R-5）
 
@@ -80,8 +71,8 @@
 2. **主观视觉判断**：查看 `tests/visual/output/*.png`，反馈：红晕是否可见/过度、暗侧是否干净、默认参数手感（strength=100 的强度、sigma=7 的扩散范围）。
 3. **提取方式偏好**：threshold vs spill 渲染对比（v1-night-threshold.png / v1-night-spill.png）选择默认。
 
-## 6. 对默认值的调整建议（供 Phase 7 定稿）
+## 6. V1.5 待确认项
 
-- 质量扩散半径 3σ → 5σ（A6 一致性 8 倍提升，成本可接受）。
-- 默认提取方式待用户 A/B 反馈后定（threshold / spill / 中间态）。
-- 其余默认参数（threshold=0.7、backgroundThreshold=0.8、redshift=(1,0.05,0.02)、sigmaRatio=(1,0.85,0.7)）当前数值验证无异常，保持待视觉确认。
+- 对白炽灯、蓝 LED、日光反光、肤色中间调和透明边缘重建固定金图。
+- 确认 Source Softness、Background Softness 与 Smoothness 的默认手感。
+- threshold 为默认提取；spill 作为饱和光源选项，继续用真实素材核验。

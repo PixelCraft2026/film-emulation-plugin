@@ -40,37 +40,60 @@ test('S3 key order is normalized (insertion order independent)', () => {
 
 test('S4 missing fields filled with defaults on parse', () => {
   const doc = { plugin: 'FilmLab', version: '1.0', effects: { halation: { strength: 25 } } };
-  const { params, version } = normalizeDocument(doc);
+  const { params, version, document } = normalizeDocument(doc);
   assert.equal(params.strength, 25);
   assert.equal(params.sigma, 7.0, 'default sigma filled');
-  assert.equal(version, '1.0');
+  assert.equal(version, '2');
+  assert.equal(document.schemaVersion, 2);
+  assert.equal(document.graph[0].type, 'halation');
 });
 
 test('S5 invalid documents rejected', () => {
   assert.throws(() => normalizeDocument(null), /not an object/);
-  assert.throws(() => normalizeDocument({ plugin: 'Other' }), /plugin/);
-  assert.throws(() => normalizeDocument({ plugin: 'FilmLab', effects: {} }), /effects\.halation/);
+  assert.throws(() => normalizeDocument({ plugin: 'Other' }), /Unsupported sidecar schema/);
+  assert.throws(() => normalizeDocument({ plugin: 'FilmLab', effects: {} }), /Unsupported sidecar schema/);
   assert.throws(() => parseDocument('{bad json'), /Invalid sidecar JSON/);
   assert.throws(() => parseDocument('{"plugin":"FilmLab","version":"1.0","effects":{"halation":{"strength":-5}}}'), /strength/);
 });
 
-test('S6 version migration: unknown version tagged to latest (empty chain for v1.0)', () => {
+test('S6 version migration: v1 becomes graph v2; future versions are rejected', () => {
   const old = { plugin: 'FilmLab', version: '0.9', effects: { halation: { strength: 10 } } };
   const migrated = migrateDocument(old);
-  assert.equal(migrated.version, SCHEMA_VERSION);
+  assert.equal(migrated.schemaVersion, SCHEMA_VERSION);
+  assert.equal(migrated.graph[0].type, 'halation');
   const { params } = normalizeDocument(migrated);
   assert.equal(params.strength, 10);
-  // 当前最新版本文档迁移为幂等
-  assert.equal(migrateDocument({ ...old, version: SCHEMA_VERSION }).version, SCHEMA_VERSION);
+  assert.equal(migrateDocument(migrated), migrated, '当前 schema 幂等');
+  assert.throws(
+    () => migrateDocument({ ...migrated, schemaVersion: SCHEMA_VERSION + 1 }),
+    /newer than supported/,
+  );
 });
 
-test('S7 toDocument shape: plugin/version/effects.halation with ordered keys', () => {
+test('S7 toDocument shape: FilmHalation schema v2 graph + bindings', () => {
   const params = createHalationParams({});
-  const doc = toDocument(params);
-  assert.equal(doc.plugin, 'FilmLab');
-  assert.equal(doc.version, '1.0');
-  assert.deepEqual(Object.keys(doc.effects.halation), [
-    'strength', 'sigma', 'threshold', 'thresholdSoftness', 'backgroundThreshold',
-    'redshift', 'sigmaRatio', 'globalDiffusion', 'centerAttenuation', 'blendMode', 'diffusionMode', 'profile',
+  const doc = toDocument(params, {
+    bindings: {
+      sourceLayer: { id: 1, name: 'Source', token: '' },
+      targetLayer: { id: 2, name: 'Film Halation [x]', token: 'x' },
+    },
+  });
+  assert.equal(doc.plugin, 'FilmHalation');
+  assert.equal(doc.schemaVersion, 2);
+  assert.equal(doc.engineVersion, '1.5.0');
+  assert.deepEqual(doc.format, { gauge: '35mm', iso: 250 });
+  assert.equal(doc.graph[0].id, 'halation-main');
+  assert.equal(doc.bindings.sourceLayer.id, 1);
+  assert.deepEqual(Object.keys(doc.graph[0].params), [
+    'strength', 'sigma', 'sigmaUnits', 'threshold', 'thresholdUnits', 'thresholdSoftness',
+    'sourceSoftness', 'backgroundSoftness', 'smoothness', 'backgroundThreshold',
+    'redshift', 'sigmaRatio', 'globalDiffusion', 'centerAttenuation', 'blendMode', 'diffusionMode',
+    'extraction', 'spillMix', 'rolloff', 'profile',
   ]);
+});
+
+test('S8 current schema rejects unknown effect nodes instead of silently dropping them', () => {
+  const doc = toDocument(createHalationParams({}));
+  doc.graph.push({ id: 'future', type: 'grain', enabled: true, params: {} });
+  assert.throws(() => normalizeDocument(doc), /Unsupported effect node type/);
 });

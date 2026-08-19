@@ -1,0 +1,71 @@
+# Film Halation V1.5 架构图
+
+## 分层
+
+```mermaid
+flowchart TB
+    PS["Photoshop 23.3+ / UXP<br/>app · core · imaging · action"]
+    MAIN["main.jsx<br/>文档状态 · 预览调度 · 安全 Apply"]
+    UI["ui/<br/>参数控件 · 1024px 面板预览"]
+    IO["io/<br/>RGBA · targetSize · TRC/primaries · 行带渲染"]
+    CORE["core/<br/>processFilm · processHalation · dual-PSF"]
+    WASM["film_core.wasm<br/>完整 Fast 链与 blur ABI"]
+    JS["纯 JavaScript 回退<br/>同参数、同 PSF"]
+    STORE["storage/<br/>schema v2 · graph · strict bindings"]
+    TARGET["复制的效果像素层"]
+    SOURCE["绑定源像素层（只读）"]
+
+    PS --> MAIN
+    MAIN --> UI
+    MAIN --> IO
+    MAIN --> STORE
+    SOURCE -->|getPixels RGBA| IO
+    IO --> CORE
+    CORE -->|Fast compact| WASM
+    CORE -->|加载/执行失败| JS
+    IO -->|一次 putPixels| TARGET
+```
+
+## Halation 权威链
+
+```mermaid
+flowchart LR
+    A["已调色显示编码 RGBA"] --> B["TRC decode + primaries → 线性 sRGB"]
+    B --> C["光源提取<br/>Source Softness · alpha"]
+    C --> D["红/绿/蓝感光源场<br/>蓝→红贡献受限"]
+    D --> E["双尺度 PSF<br/>core 全分辨率 · tail 1/2–1/8"]
+    B --> F["Background Softness<br/>局部暗侧门控"]
+    E --> G["局部 Halation"]
+    F --> G
+    D --> H["宽半径红层 Global Diffusion<br/>独立中间调门控"]
+    G --> I["HDR-safe additive / screen"]
+    H --> I
+    I --> J["逆 primaries + TRC encode"]
+    J --> K["输出 knee · 8/16-bit 蓝噪声抖动<br/>32-bit 不量化 · alpha 原样复制"]
+```
+
+## Apply 与恢复
+
+```mermaid
+sequenceDiagram
+    participant U as 用户
+    participant M as main.jsx
+    participant B as schema v2 bindings
+    participant I as Imaging API
+    participant C as core/WASM
+
+    U->>M: 选择 source 并点击 Apply
+    M->>M: createLayer 创建空白像素 target
+    alt target 创建或寻址失败
+        M-->>U: 中止；不写 source
+    else target 可寻址
+        M->>I: 从 source 按行带读取 RGBA
+        I->>C: 从原始 source 渲染
+        C-->>I: 量化后的 RGBA，alpha 不变
+        I->>I: 一次 putPixels 到 target
+        M->>B: 保存 document/source/target 指纹
+    end
+    U->>M: 重开或修改参数
+    M->>B: 严格解析 id/指纹；歧义则要求重新绑定
+    M->>I: 再次从 source 渲染 target
+```

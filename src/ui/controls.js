@@ -12,19 +12,27 @@
  */
 export function createSlider(o) {
   const row = document.createElement('div');
+  // 一行式：label 固定宽 + 滑块自适应（紧凑布局；label 过长省略，title 显示全名）
   row.style.display = 'flex';
-  row.style.flexDirection = 'column';
-  row.style.gap = '4px';
+  row.style.alignItems = 'center';
+  row.style.gap = '6px';
 
   const label = document.createElement('sp-label');
   label.textContent = o.label;
+  label.title = o.label;
+  label.style.flexShrink = '0';
+  label.style.width = '110px';
+  label.style.overflow = 'hidden';
+  label.style.whiteSpace = 'nowrap';
+  label.style.textOverflow = 'ellipsis';
   const slider = document.createElement('sp-slider');
   slider.id = o.id;
   slider.min = o.min;
   slider.max = o.max;
   slider.step = o.step;
   slider.value = o.value;
-  slider.style.width = '100%';
+  slider.style.flex = '1';
+  slider.style.minWidth = '0';
   slider.addEventListener('input', () => o.onInput(Number(slider.value)));
   row.append(label, slider);
   return row;
@@ -37,15 +45,23 @@ export function createSlider(o) {
  */
 export function createSelect(o) {
   const row = document.createElement('div');
+  // 一行式：label 固定宽 + 下拉自适应
   row.style.display = 'flex';
-  row.style.flexDirection = 'column';
-  row.style.gap = '4px';
+  row.style.alignItems = 'center';
+  row.style.gap = '6px';
 
   const label = document.createElement('sp-label');
   label.textContent = o.label;
+  label.title = o.label;
+  label.style.flexShrink = '0';
+  label.style.width = '110px';
+  label.style.overflow = 'hidden';
+  label.style.whiteSpace = 'nowrap';
+  label.style.textOverflow = 'ellipsis';
   const select = document.createElement('sp-dropdown');
   select.id = o.id;
-  select.style.width = '100%';
+  select.style.flex = '1';
+  select.style.minWidth = '0';
   // sp-dropdown 硬性要求：菜单需 slot="options"
   const menu = document.createElement('sp-menu');
   menu.slot = 'options';
