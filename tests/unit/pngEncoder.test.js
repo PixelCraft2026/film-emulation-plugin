@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { PNG } from 'pngjs';
-import { encodePNG, floatRgbaToPng, pngToDataUrl } from '../../src/ui/pngEncoder.js';
+import { encodePNG, floatRgbaToPng, floatRgbToPng, pngToDataUrl } from '../../src/ui/pngEncoder.js';
 
 function asciiAt(bytes, offset, length) {
   let value = '';
@@ -36,4 +36,13 @@ test('float preview conversion clamps channels and produces a PNG data URL', () 
   const url = pngToDataUrl(png);
   assert.match(url, /^data:image\/png;base64,/);
   assert.ok(url.length > 50);
+});
+
+test('opaque RGB preview omits the redundant alpha channel while transparent input preserves it', () => {
+  const rgb = new Float32Array([1, 0.25, 0, 0, 0.5, 1]);
+  const opaque = floatRgbToPng(2, 1, rgb, new Float32Array([1, 1]));
+  const transparent = floatRgbToPng(2, 1, rgb, new Float32Array([1, 0.5]));
+  assert.ok(opaque.length < transparent.length);
+  assert.deepEqual(Array.from(PNG.sync.read(Buffer.from(opaque)).data), [255, 64, 0, 255, 0, 128, 255, 255]);
+  assert.deepEqual(Array.from(PNG.sync.read(Buffer.from(transparent)).data), [255, 64, 0, 255, 0, 128, 255, 128]);
 });

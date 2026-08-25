@@ -10,7 +10,10 @@
  * 本层职责：像素搬运 + 位深归一化到显示编码 float（0..1，32-bit 可 >1 HDR）。
  * TRC decode/encode 由 io/colorPipeline 负责（本层不假设位深与 TRC 绑定）。
  */
-const ps = require('photoshop');
+// Keep pure preview transforms importable in Node tests. Host functions below
+// still fail naturally if called without Photoshop, while UXP resolves the
+// external module through its synchronous require implementation.
+const ps = typeof require === 'function' ? require('photoshop') : null;
 import { resolveDocumentTRC, standardProfileName, matchProfileName } from './colorPipeline.js';
 import { resolveTargetLayer, noTargetLayerMessage, isPixelLayer, unreadableLayerMessage, layerPixelBounds, findLayerByIdRecursive, resolveLayerBinding, unlockPixelLayer } from './layerOps.js';
 import { splitBlocks } from './tiles.js';

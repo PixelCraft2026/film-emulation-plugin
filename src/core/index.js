@@ -65,6 +65,52 @@ export {
 export { channelSigmas, applyRedShift } from './redshift.js';
 export { computeHalo, alphaFor, blend, screenGain } from './composite.js';
 export { makeBlurFn, processHalation, extractStep, diffuseStep, haloStep, blendStep, lowResScale, lobeScale, psfLobesFor, LOWRES_MIN_SIGMA, LOWRES_MAX_SCALE, PSF_LOBES, LOCAL_GATE_RELIEF_GAIN } from './pipeline.js';
-export { ENGINE_VERSION, EFFECT_ORDER, processFilm } from './film.js';
-export { installWasmModule, tryWasmBoxBlur, tryWasmMaxFilter, tryWasmHalation, getWasmBackendStatus, resetWasmBackend } from './wasmBackend.js';
+export { ENGINE_VERSION, FILM_GRAPH_VERSION, EFFECT_ORDER, processFilm, processFilmStages } from './film.js';
+export {
+  installWasmModule,
+  tryWasmBoxBlur,
+  tryWasmGaussianBlur,
+  tryWasmMaxFilter,
+  tryWasmHashField,
+  tryWasmHashBlurField,
+  tryWasmApplyGrain,
+  tryWasmHalation,
+  getWasmBackendStatus,
+  resetWasmBackend,
+} from './wasmBackend.js';
 export { blueNoise, BLUE_NOISE_SIZE } from './dither.js';
+export {
+  FORMAT_PROFILES,
+  DEFAULT_FILM_FORMAT,
+  GAUGES,
+  normalizeFilmFormat,
+  resolveFilmFormat,
+  pixelsPerMm,
+  pixelsPerMicron,
+  physicalMicronsToPixels,
+} from './format.js';
+export { fmix32, fnv1aUtf8, hash32, uniformFromHash, gaussianApprox, deriveSeed, SEED_GOLDEN_RATIO } from './seed.js';
+export {
+  FILM_RESOLUTION_DEFAULTS,
+  createFilmResolutionParams,
+  validateFilmResolutionParams,
+  filmResolutionTarget,
+  filmResolutionSupport,
+  processFilmResolution,
+  gaussianVarianceScale,
+} from './resolution.js';
+export {
+  GRAIN_DEFAULTS,
+  createGrainParams,
+  validateGrainParams,
+  processGrain,
+  grainSupport,
+} from './grain.js';
+export {
+  FILM_EFFECT_REGISTRY,
+  getEffectDefinition,
+  validateEffectNode,
+  normalizeEffectGraph,
+  createDefaultEffectGraph,
+  graphMinimumEngineVersion,
+} from './effectRegistry.js';

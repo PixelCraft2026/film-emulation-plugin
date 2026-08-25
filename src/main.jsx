@@ -2,9 +2,9 @@
 /** Film Halation V1.5 — 非破坏性 UXP 编排。 */
 import { createPanel } from './ui/panel.jsx';
 import { renderPreviewIncremental } from './io/previewRender.js';
-import { PREVIEW_MAX_EDGE, PREVIEW_EFFECT_MAX_EDGE, computePreviewScale } from './io/preview.js';
-import { createHalationParams, createHalationPreset } from './core/index.js';
-import { renderDocumentToLayer } from './io/streamRender.js';
+import { PREVIEW_MAX_EDGE, PREVIEW_EFFECT_MAX_EDGE, computePreviewScale, downsampleBox, downsamplePlane } from './io/preview.js';
+import { createHalationParams, createHalationPreset, createDefaultEffectGraph, createFilmResolutionParams, createGrainParams, deriveSeed, fmix32, SEED_GOLDEN_RATIO, normalizeFilmFormat } from './core/index.js';
+import { renderDocumentToLayer, renderFilmDocumentToLayer, streamGeometry, streamFilmGeometry } from './io/streamRender.js';
 import { resolveDocumentTRC, resolvePixelTRC, standardProfileName } from './io/colorPipeline.js';
 import { readDocumentPixels } from './io/imageAccess.js';
 import { documentComponentSize } from './io/bitDepth.js';
@@ -23,6 +23,7 @@ import {
   resolveApplyTarget,
 } from './io/layerOps.js';
 import { STRINGS } from './ui/i18n.js';
+import { floatRgbToPng, pngToDataUrl } from './ui/pngEncoder.js';
 import {
   saveParamsForDoc,
   loadParamsForDoc,
@@ -36,16 +37,44 @@ const ps = require('photoshop');
 const app = ps.app;
 const BUILD_PLUGIN_ID = __FILM_PLUGIN_ID__;
 const MIGRATION_ROLE = __FILM_MIGRATION_ROLE__;
+const FEATURE_LEVEL = __FILM_FEATURE_LEVEL__;
+const IS_CURRENT_BUILD = FEATURE_LEVEL === 'current';
 
 loadBundledWasm().then((wasm) => {
-  console.log(`[${BUILD_PLUGIN_ID}] compute backend: ${wasm.backend}${wasm.error ? ` (${wasm.error})` : ''}`);
+  console.log(`[${BUILD_PLUGIN_ID}] feature=${FEATURE_LEVEL} compute backend: ${wasm.backend}${wasm.error ? ` (${wasm.error})` : ''}`);
 });
 
 let params = createHalationPreset('tungsten-800');
+function createRuntimeDocument(halationParams, seed = 0x4f1bbcdc) {
+  return {
+    format: { gauge: '35mm', iso: 250 },
+    graph: IS_CURRENT_BUILD
+      ? createDefaultEffectGraph(halationParams, seed)
+      : [{ id: 'halation-main', type: 'halation', enabled: true, params: createHalationParams(halationParams) }],
+  };
+}
+let filmDocument = createRuntimeDocument(params);
 let documentState = {
   format: { gauge: '35mm', iso: 250 },
   bindings: { sourceLayer: null, targetLayer: null },
 };
+
+function randomSeed(fingerprint = '') {
+  const values = new Uint32Array(1);
+  if (globalThis.crypto?.getRandomValues) {
+    globalThis.crypto.getRandomValues(values);
+    return values[0] >>> 0;
+  }
+  return deriveSeed(0x4f1bbcdc, fingerprint, 'grain-main');
+}
+
+function setHalationParams(next) {
+  params = createHalationParams(next);
+  filmDocument = {
+    ...filmDocument,
+    graph: filmDocument.graph.map((node) => node.type === 'halation' ? { ...node, params } : node),
+  };
+}
 
 async function writeDiagFile(name, data) {
   try {
@@ -66,7 +95,13 @@ let migrationBtn;
 try {
   panel = createPanel({
     params,
+    graph: filmDocument.graph,
+    format: filmDocument.format,
+    featureLevel: FEATURE_LEVEL,
     onParamsChange,
+    onGraphChange,
+    onFormatChange,
+    onRandomizeGrain,
     onApply: runApply,
     onRebind: runRebind,
     migrationRole: MIGRATION_ROLE,
@@ -91,6 +126,72 @@ function enqueueTask(fn) {
   return result;
 }
 
+let previewObjectUrl = null;
+function supportsPreviewObjectUrl() {
+  return typeof Blob === 'function'
+    && typeof URL !== 'undefined'
+    && typeof URL.createObjectURL === 'function'
+    && typeof URL.revokeObjectURL === 'function';
+}
+
+function releasePreviewObjectUrl() {
+  if (!previewObjectUrl) return;
+  try { URL.revokeObjectURL(previewObjectUrl); } catch (error) { /* host cleanup is best-effort */ }
+  previewObjectUrl = null;
+}
+
+function clearPreviewImage() {
+  img.removeAttribute('src');
+  releasePreviewObjectUrl();
+}
+
+function publishPreviewImage(result, requestId) {
+  if (supportsPreviewObjectUrl()) {
+    try {
+      const nextUrl = URL.createObjectURL(new Blob([result.png], { type: 'image/png' }));
+      const previousUrl = previewObjectUrl;
+      previewObjectUrl = nextUrl;
+      img.onerror = () => {
+        if (previewObjectUrl !== nextUrl || requestId !== previewRequestId) return;
+        try { URL.revokeObjectURL(nextUrl); } catch (error) { /* ignore */ }
+        previewObjectUrl = null;
+        img.onerror = null;
+        img.src = result.dataUrl || pngToDataUrl(result.png);
+      };
+      img.src = nextUrl;
+      if (previousUrl) {
+        try { URL.revokeObjectURL(previousUrl); } catch (error) { /* ignore */ }
+      }
+      return 'blob';
+    } catch (error) {
+      console.warn('[film-halation] Blob preview URL unavailable; using data URL fallback: ' + (error?.message || error));
+    }
+  }
+  releasePreviewObjectUrl();
+  img.onerror = null;
+  img.src = result.dataUrl || pngToDataUrl(result.png);
+  return 'data';
+}
+
+function immediateSourcePreviewPng(source) {
+  const scale = computePreviewScale(source.width, source.height, PREVIEW_MAX_EDGE);
+  if (scale >= 1) return floatRgbToPng(source.width, source.height, source.rgb, source.alpha);
+  const width = Math.max(1, Math.round(source.width * scale));
+  const height = Math.max(1, Math.round(source.height * scale));
+  return floatRgbToPng(
+    width,
+    height,
+    downsampleBox(source.rgb, source.width, source.height, width, height),
+    source.alpha ? downsamplePlane(source.alpha, source.width, source.height, width, height) : undefined,
+  );
+}
+
+function createPreviewAbortController() {
+  if (typeof AbortController === 'function') return new AbortController();
+  const signal = { aborted: false };
+  return { signal, abort() { signal.aborted = true; } };
+}
+
 function currentDoc() {
   return app.activeDocument;
 }
@@ -102,10 +203,12 @@ setInterval(() => {
   if (id === lastDocId) return;
   lastDocId = id;
   previewRequestId++;
-  img.removeAttribute('src');
+  previewAbortController?.abort();
+  clearPreviewImage();
   previewCache = null;
   previewSourceCache = null;
   documentState = { format: { gauge: '35mm', iso: 250 }, bindings: { sourceLayer: null, targetLayer: null } };
+  filmDocument = createRuntimeDocument(params, randomSeed(`document:${String(id ?? '')}`));
   if (!doc) {
     status.textContent = 'No active document.';
     return;
@@ -116,7 +219,7 @@ setInterval(() => {
 
 function onParamsChange(partial) {
   try {
-    params = createHalationParams({ ...params, ...partial });
+    setHalationParams({ ...params, ...partial });
   } catch (error) {
     status.textContent = STRINGS.statusFailed(error.message);
     return;
@@ -124,13 +227,44 @@ function onParamsChange(partial) {
   schedulePreview();
 }
 
+function onGraphChange(nextGraph) {
+  if (!IS_CURRENT_BUILD) return;
+  filmDocument = { ...filmDocument, graph: nextGraph };
+  schedulePreview();
+}
+
+function onFormatChange(partial) {
+  if (!IS_CURRENT_BUILD) return;
+  filmDocument = { ...filmDocument, format: normalizeFilmFormat({ ...filmDocument.format, ...partial }) };
+  documentState.format = filmDocument.format;
+  schedulePreview();
+}
+
+function onRandomizeGrain() {
+  if (!IS_CURRENT_BUILD) return;
+  filmDocument = {
+    ...filmDocument,
+    graph: filmDocument.graph.map((node) => node.type === 'grain'
+      ? { ...node, params: createGrainParams({ ...node.params, seed: fmix32((node.params.seed + SEED_GOLDEN_RATIO) >>> 0) }) }
+      : node),
+  };
+  panel.__handles.updateGraph(filmDocument.graph);
+  schedulePreview();
+}
+
 let panelTimer = null;
 let previewRequestId = 0;
+let previewAbortController = null;
 function schedulePreview() {
   clearTimeout(panelTimer);
+  previewAbortController?.abort();
+  const controller = createPreviewAbortController();
+  previewAbortController = controller;
   const requestId = ++previewRequestId;
   panelTimer = setTimeout(
-    () => enqueueTask(() => (requestId === previewRequestId ? runPanelPreview(requestId) : undefined)),
+    () => enqueueTask(() => (requestId === previewRequestId && !controller.signal.aborted
+      ? runPanelPreview(requestId, controller.signal)
+      : undefined)),
     80,
   );
 }
@@ -176,6 +310,7 @@ async function boundPreviewSources(doc) {
   const sourceWidth = bounds.right - bounds.left;
   const sourceHeight = bounds.bottom - bounds.top;
   const componentSize = documentComponentSize(doc);
+  const historyKey = previewHistoryKey(doc);
   const cacheKey = [
     doc.id,
     sourceLayer.id,
@@ -185,7 +320,7 @@ async function boundPreviewSources(doc) {
     bounds.bottom,
     componentSize,
     String(doc.colorProfileName || ''),
-    previewHistoryKey(doc),
+    historyKey,
   ].join(':');
   if (previewSourceCache?.cacheKey === cacheKey) return previewSourceCache;
 
@@ -214,30 +349,66 @@ async function boundPreviewSources(doc) {
     PREVIEW_EFFECT_MAX_EDGE,
     'effect-source preview',
   );
-  previewSourceCache = { display, effect, cacheKey };
+  previewSourceCache = {
+    display,
+    effect,
+    cacheKey,
+    documentID: doc.id,
+    layerID: sourceLayer.id,
+    historyKey,
+    originX: bounds.left,
+    originY: bounds.top,
+  };
   return previewSourceCache;
 }
 
-async function runPanelPreview(requestId = null) {
+async function runPanelPreview(requestId = null, signal = null) {
   const doc = currentDoc();
   if (!doc) return;
-  if (requestId !== null && requestId !== previewRequestId) return;
-  const renderParams = params;
+  if (signal?.aborted || (requestId !== null && requestId !== previewRequestId)) return;
+  const renderParams = filmDocument;
+  const totalStarted = Date.now();
   try {
+    const readStarted = Date.now();
     const sources = await ps.core.executeAsModal(async () => boundPreviewSources(doc), {
       commandName: 'film-halation-read-preview',
     });
-    if (requestId !== null && requestId !== previewRequestId) return;
+    const readMs = Date.now() - readStarted;
+    if (signal?.aborted || (requestId !== null && requestId !== previewRequestId)) return;
+    const sourceChanged = !previewCache || previewCache.sourceKey !== sources.cacheKey;
+    if (sourceChanged && supportsPreviewObjectUrl()) {
+      const basePng = immediateSourcePreviewPng(sources.display);
+      publishPreviewImage({ png: basePng, dataUrl: null }, requestId ?? previewRequestId);
+      status.textContent = STRINGS.statusPreviewRefining;
+      // Let UXP paint the color-managed source before the heavier physical
+      // effect proxy is processed on the main thread.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      if (signal?.aborted || (requestId !== null && requestId !== previewRequestId)) return;
+    }
     const trc = {
       display: resolvePixelTRC(doc, sources.display.colorProfile),
       effect: resolvePixelTRC(doc, sources.effect.colorProfile),
     };
-    const result = await renderPreviewIncremental(doc, renderParams, trc, previewCache, sources);
-    if (requestId !== null && requestId !== previewRequestId) return;
+    const objectUrl = supportsPreviewObjectUrl();
+    const result = await renderPreviewIncremental(doc, renderParams, trc, previewCache, sources, {
+      signal,
+      returnDataUrl: !objectUrl,
+    });
+    if (signal?.aborted || (requestId !== null && requestId !== previewRequestId)) return;
     previewCache = result.cache;
-    img.src = result.dataUrl;
-    status.textContent = STRINGS.statusPreviewed(result.ms);
+    const transport = publishPreviewImage(result, requestId ?? previewRequestId);
+    const totalMs = Date.now() - totalStarted;
+    status.textContent = STRINGS.statusPreviewedDetailed(totalMs, readMs, result.ms);
+    console.log('[film-halation] Panel preview timing', {
+      totalMs,
+      readMs,
+      renderMs: result.ms,
+      transport,
+      pngBytes: result.png.length,
+      ...result.timings,
+    });
   } catch (error) {
+    if (signal?.aborted || (requestId !== null && requestId !== previewRequestId)) return;
     status.textContent = STRINGS.statusFailed(error.message || error);
   }
 }
@@ -250,19 +421,22 @@ async function runApply() {
   }
   status.textContent = STRINGS.statusRendering;
   applyBtn.disabled = true;
+  clearTimeout(panelTimer);
+  previewAbortController?.abort();
   try {
     const result = await enqueueTask(() => ps.core.executeAsModal(
-      async () => renderToSafeCopy(doc, params, { allowCreate: true }),
+      async () => renderToSafeCopy(doc, filmDocument, { allowCreate: true }),
       { commandName: 'film-halation-apply-safe-copy' },
     ));
     if (result.bindings) documentState.bindings = result.bindings;
     // 即使效果层创建或写入失败，也保存已经确认的源绑定，便于安全重试。
-    await saveParamsForDoc(doc, params, documentState);
+    await saveParamsForDoc(doc, params, { ...documentState, document: filmDocument });
     if (!result.ok) {
       status.textContent = STRINGS.statusFailed(result.error);
       return;
     }
     previewRequestId++;
+    previewAbortController?.abort();
     previewCache = null;
     previewSourceCache = null;
     status.textContent = STRINGS.statusApplied(result.applyMs);
@@ -290,16 +464,22 @@ async function runRebind() {
     status.textContent = STRINGS.statusFailed('Select the original pixel layer, not a Film Halation effect copy.');
     return;
   }
+  const cachedSourceIsSelected = previewSourceCache?.documentID === doc.id
+    && previewSourceCache?.layerID === selected.id
+    && previewSourceCache?.historyKey === previewHistoryKey(doc);
   documentState.bindings = {
     sourceLayer: createLayerBinding(selected, `source-${doc.id}`),
     targetLayer: null,
   };
   previewRequestId++;
-  previewCache = null;
-  previewSourceCache = null;
-  await saveParamsForDoc(doc, params, documentState);
+  previewAbortController?.abort();
+  if (!cachedSourceIsSelected) {
+    previewCache = null;
+    previewSourceCache = null;
+  }
+  await saveParamsForDoc(doc, params, { ...documentState, document: filmDocument });
   status.textContent = STRINGS.statusRebound;
-  enqueueTask(runPanelPreview);
+  if (!cachedSourceIsSelected || !img.getAttribute?.('src')) schedulePreview();
 }
 
 async function runExportMigration() {
@@ -352,7 +532,7 @@ async function runImportMigration() {
   }
 }
 
-async function renderToSafeCopy(doc, renderParams, options) {
+async function renderToSafeCopy(doc, renderDocument, options) {
   const started = Date.now();
   let sourceLayer = resolveLayerBinding(doc, documentState.bindings.sourceLayer);
   if (!sourceLayer) {
@@ -370,6 +550,25 @@ async function renderToSafeCopy(doc, renderParams, options) {
     sourceLayer = selected;
   }
   const sourceBinding = createLayerBinding(sourceLayer);
+  const sourceBounds = layerPixelBounds(sourceLayer) ?? { left: 0, top: 0, right: doc.width, bottom: doc.height };
+  try {
+    const preflight = IS_CURRENT_BUILD
+      ? streamFilmGeometry(sourceBounds.right - sourceBounds.left, sourceBounds.bottom - sourceBounds.top, renderDocument, {
+          componentSize: doc.bitsPerChannel,
+          fullWidth: Number(doc.width),
+          fullHeight: Number(doc.height),
+          deviceMemoryGB: Number(globalThis.navigator?.deviceMemory ?? 0),
+          memoryMode: 'auto',
+        })
+      : streamGeometry(sourceBounds.right - sourceBounds.left, sourceBounds.bottom - sourceBounds.top, renderDocument.graph.find((node) => node.type === 'halation').params, {
+          componentSize: doc.bitsPerChannel,
+          deviceMemoryGB: Number(globalThis.navigator?.deviceMemory ?? 0),
+          memoryMode: 'auto',
+        });
+    if (preflight.hardBudgetExceeded) return { ok: false, error: `Film render preflight exceeds the ${Math.round(preflight.hardBudgetBytes / 1024 ** 3)} GiB hard memory budget; no effect layer was created.` };
+  } catch (error) {
+    return { ok: false, error: `Film render preflight failed; no effect layer was created. ${error.message || error}` };
+  }
   const savedTargetBinding = documentState.bindings.targetLayer;
   const { target: savedTarget, legacyTarget, recreate } = resolveApplyTarget(doc, savedTargetBinding);
   let targetLayer = savedTarget;
@@ -392,15 +591,20 @@ async function renderToSafeCopy(doc, renderParams, options) {
 
   unlockPixelLayer(targetLayer);
   const targetBinding = createLayerBinding(targetLayer, 'render-target-v1');
-  const sourceBounds = layerPixelBounds(sourceLayer) ?? { left: 0, top: 0, right: doc.width, bottom: doc.height };
   try {
     const targetBounds = layerPixelBounds(targetLayer) ?? sourceBounds;
     const trc = resolveDocumentTRC(doc);
-    const renderResult = await renderDocumentToLayer(doc, sourceLayer, targetLayer, sourceBounds, targetBounds, renderParams, trc, {
-      componentSize: doc.bitsPerChannel,
-      seed: 0x46534c4d,
-      signal: options.signal,
-    });
+    const renderResult = IS_CURRENT_BUILD
+      ? await renderFilmDocumentToLayer(doc, sourceLayer, targetLayer, sourceBounds, targetBounds, renderDocument, trc, {
+          componentSize: doc.bitsPerChannel,
+          seed: renderDocument.graph.find((node) => node.type === 'grain')?.params.seed ?? 0x46534c4d,
+          signal: options.signal,
+        })
+      : await renderDocumentToLayer(doc, sourceLayer, targetLayer, sourceBounds, targetBounds, renderDocument.graph.find((node) => node.type === 'halation').params, trc, {
+          componentSize: doc.bitsPerChannel,
+          seed: 0x46534c4d,
+          signal: options.signal,
+        });
     if (legacyTarget && legacyTarget !== targetLayer) {
       try { legacyTarget.visible = false; } catch (error) { /* old failed target may be protected */ }
     }
@@ -428,11 +632,17 @@ async function loadStoredParams(doc, expectedId = doc?.id) {
       return;
     }
     params = createHalationParams(stored.params);
+    const storedGraph = stored.document?.graph;
+    filmDocument = IS_CURRENT_BUILD && Array.isArray(storedGraph)
+      ? { ...stored.document, graph: storedGraph }
+      : createRuntimeDocument(params, randomSeed(`document:${String(doc.id ?? '')}`));
     documentState = {
       format: stored.format || { gauge: '35mm', iso: 250 },
       bindings: stored.bindings || { sourceLayer: null, targetLayer: null },
     };
     panel.__handles.updateParams(params);
+    panel.__handles.updateGraph?.(filmDocument.graph);
+    panel.__handles.updateFormat?.(filmDocument.format);
     status.textContent = 'Loaded Film Halation v2 state. Adjust a slider to preview.';
   } catch (error) {
     console.warn('[film-halation] state load failed: ' + error);
@@ -442,5 +652,6 @@ async function loadStoredParams(doc, expectedId = doc?.id) {
 
 const initialDocument = currentDoc();
 if (initialDocument) {
+  filmDocument = createRuntimeDocument(params, randomSeed(`document:${String(initialDocument.id ?? '')}`));
   loadStoredParams(initialDocument).catch((error) => console.warn('[film-halation] initial load failed: ' + error));
 }

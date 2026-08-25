@@ -63,6 +63,8 @@ export const STRINGS = {
   statusRendering: 'Rendering…',
   statusApplied: (ms) => `Rendered to a verified Film Halation copy (${ms}ms). Source preserved.`,
   statusPreviewed: (ms) => `Panel preview (${ms}ms).`,
+  statusPreviewedDetailed: (total, read, render) => `Panel preview ${total}ms (read ${read}ms, render ${render}ms).`,
+  statusPreviewRefining: 'Source loaded. Refining film effects…',
   statusRebound: 'Source rebound. Apply will create a new verified effect copy.',
   statusMigrationExporting: 'Preparing migration package…',
   statusMigrationImporting: 'Validating migration package…',

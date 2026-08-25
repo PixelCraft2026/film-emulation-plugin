@@ -4,7 +4,7 @@
  * 显示编码 → PNG data URL（面板内显示，不触碰文档，满足 A3 预览 <500ms）。
  * 注意：UXP 无 canvas/内置 PNG 编码，用 ui/pngEncoder 的最小编码器。
  */
-import { extractStep, diffuseStep, haloStep, blendStep, applyMatrix3, resolveSigmaParams } from '../core/index.js';
+import { extractStep, diffuseStep, haloStep, blendStep, processFilmStages, applyMatrix3, resolveSigmaParams } from '../core/index.js';
 import { readDocumentPixels } from './imageAccess.js';
 import { decodeToLinear, encodePanelPreviewSRGB, primariesMatrices, standardProfileName } from './colorPipeline.js';
 import { documentComponentSize } from './bitDepth.js';
@@ -15,7 +15,7 @@ import {
   downsampleExtractedFields,
   downsamplePlane,
 } from './preview.js';
-import { floatRgbaToPng, pngToDataUrl } from '../ui/pngEncoder.js';
+import { floatRgbToPng, pngToDataUrl } from '../ui/pngEncoder.js';
 import { applyRolloff } from './rolloff.js';
 
 /**
@@ -24,6 +24,16 @@ import { applyRolloff } from './rolloff.js';
  */
 let targetSizeUnsupported = false;
 const PANEL_COLOR_PROFILE = standardProfileName('sRGB');
+
+function throwIfCancelled(signal) {
+  if (signal?.aborted) throw new Error('Film render cancelled');
+}
+
+function assertFinitePreview(rgb) {
+  for (let i = 0; i < rgb.length; i++) {
+    if (!Number.isFinite(rgb[i])) throw new Error(`Preview produced a non-finite RGB sample at ${i}`);
+  }
+}
 async function readPreviewSource(doc) {
   // Preserve native bit depth so Photoshop does not need to perform the
   // problematic 16 -> 8/32 conversion, while retaining its ICC conversion to
@@ -61,10 +71,16 @@ async function readPreviewSource(doc) {
  * @param {object|null} cache 上次的 canonical 输入和中间量缓存
  * @param {{display?:object,effect?:object,cacheKey?:string,width?:number,height?:number,rgb?:Float32Array}|null} [source]
  *   双源模式：1024px ICC display + 2048px native effect；单源旧调用仍兼容。
- * @returns {Promise<{dataUrl:string,width:number,height:number,ms:number,cache:object}>}
+ * @param {{signal?:AbortSignal,returnDataUrl?:boolean}} [options]
+ * @returns {Promise<{dataUrl:string|null,png:Uint8Array,width:number,height:number,ms:number,cache:object,timings:object}>}
  */
-export async function renderPreviewIncremental(doc, params, trc, cache, source = null) {
+export async function renderPreviewIncremental(doc, paramsOrDocument, trc, cache, source = null, options = {}) {
   const t0 = Date.now();
+  const timings = { prepareMs: 0, algorithmMs: 0, encodeMs: 0, base64Ms: 0 };
+  const signal = options.signal;
+  throwIfCancelled(signal);
+  const filmDocument = paramsOrDocument?.graph ? paramsOrDocument : null;
+  const params = filmDocument?.graph.find((node) => node.type === 'halation')?.params ?? paramsOrDocument;
   const fallbackSource = source ? null : await readPreviewSource(doc);
   const displaySource = source?.display ?? source ?? fallbackSource;
   const effectSource = source?.effect ?? displaySource;
@@ -86,6 +102,7 @@ export async function renderPreviewIncremental(doc, params, trc, cache, source =
   } else {
     displayWork = { width, height, rgb, alpha };
   }
+  throwIfCancelled(signal);
 
   // 效果源保持文档原生 profile，并使用与 Apply 相同的 TRC + primaries 路径。
   // 只有 targetSize 回退返回过大图像时才在此限制到 2048px；正常宿主路径已直接
@@ -106,12 +123,17 @@ export async function renderPreviewIncremental(doc, params, trc, cache, source =
   } else {
     effectWork = effectSource;
   }
+  throwIfCancelled(signal);
 
   const w = displayWork.width;
   const h = displayWork.height;
   const ew = effectWork.width;
   const eh = effectWork.height;
   const sourceKey = source?.cacheKey ?? displaySource?.cacheKey ?? null;
+  const originX = source?.originX ?? displaySource?.originX ?? 0;
+  const originY = source?.originY ?? displaySource?.originY ?? 0;
+  timings.prepareMs = Date.now() - t0;
+  const algorithmStarted = Date.now();
   const c = cache
     && cache.w === w
     && cache.h === h
@@ -131,6 +153,7 @@ export async function renderPreviewIncremental(doc, params, trc, cache, source =
     if (displayToSRGB) applyMatrix3(baseLinear, displayToSRGB);
     c.baseLinear = baseLinear;
   }
+  throwIfCancelled(signal);
   let effectLinear = c.effectLinear;
   if (!effectLinear) {
     effectLinear = decodeToLinear(effectWork.rgb, effectTrc);
@@ -138,6 +161,7 @@ export async function renderPreviewIncremental(doc, params, trc, cache, source =
     if (effectToSRGB) applyMatrix3(effectLinear, effectToSRGB);
     c.effectLinear = effectLinear;
   }
+  throwIfCancelled(signal);
 
   // #5：σ 单位按原图尺寸解析（预览小图的 σ 保持原图语义）
   const rp = resolveSigmaParams(params, doc.width || width, doc.height || height);
@@ -195,10 +219,12 @@ export async function renderPreviewIncremental(doc, params, trc, cache, source =
     ({ G, W, Y, U, K, sourceR, sourceG, sourceB } = downsampleExtractedFields(extracted, ew, eh, w, h));
     c.kExtract = kExtract;
   }
+  throwIfCancelled(signal);
   if (!plane || c.kDiffuse !== kDiffuse || c.W !== W) {
     ({ plane, temp, temp2, blurFn } = diffuseStep({ sourceR, sourceG, sourceB, W, U, K }, w, h, p));
     c.kDiffuse = kDiffuse;
   }
+  throwIfCancelled(signal);
   if (!halo || c.kHalo !== kHalo || c.plane !== plane) {
     const haloContext = {
       localGate: G,
@@ -209,6 +235,7 @@ export async function renderPreviewIncremental(doc, params, trc, cache, source =
     densityGate = haloContext.densityGate ?? null;
     c.kHalo = kHalo;
   }
+  throwIfCancelled(signal);
   c.W = W;
   c.G = G;
   c.Y = Y;
@@ -230,20 +257,81 @@ export async function renderPreviewIncremental(doc, params, trc, cache, source =
   c.sourceKey = sourceKey;
 
   // 注意：halo 是缓存中间量，blend 必须分配新输出（不能就地写坏缓存）
-  const out = blendStep({ rgb: baseLinear }, halo, null, w, h, p, densityGate);
+  const kBlend = key(p);
+  const cachedHalationOut = c.halationOut
+    && c.kBlend === kBlend
+    && c.blendHalo === halo
+    && c.blendInput === baseLinear
+    ? c.halationOut
+    : null;
+  const halationOut = cachedHalationOut ?? {
+    width: w,
+    height: h,
+    rgb: blendStep({ rgb: baseLinear }, halo, null, w, h, p, densityGate),
+    alpha: displayWork.alpha,
+  };
+  c.kBlend = kBlend;
+  c.blendHalo = halo;
+  c.blendInput = baseLinear;
+  c.halationOut = halationOut;
+  const laterNodes = filmDocument?.graph.filter((node) => node.type === 'filmResolution' || node.type === 'grain') ?? [];
+  const graphKey = JSON.stringify({
+    nodes: laterNodes,
+    format: filmDocument?.format ?? null,
+    fullWidth: doc.width || width,
+    fullHeight: doc.height || height,
+    originX,
+    originY,
+    previewScale,
+    quality: 'fast',
+  });
+  c.nodeCaches ??= Object.create(null);
+  const graphResult = c.graphResult
+    && c.graphKey === graphKey
+    && c.graphInput === halationOut.rgb
+    ? c.graphResult
+    : laterNodes.length
+      ? processFilmStages(
+        { width: w, height: h, rgb: halationOut.rgb, alpha: displayWork.alpha },
+        laterNodes,
+        {
+          width: w,
+          height: h,
+          fullWidth: doc.width || width,
+          fullHeight: doc.height || height,
+          originX,
+          originY,
+          previewScale,
+          format: filmDocument?.format,
+          quality: 'fast',
+          seed: laterNodes.find((node) => node.type === 'grain')?.params.seed ?? 0,
+          signal,
+          nodeCaches: c.nodeCaches,
+        },
+      )
+      : halationOut;
+  throwIfCancelled(signal);
+  c.graphKey = graphKey;
+  c.graphInput = halationOut.rgb;
+  c.graphResult = graphResult;
+  assertFinitePreview(graphResult.rgb);
+  timings.algorithmMs = Date.now() - algorithmStarted;
   // Panel PNG has no embedded ICC profile. Keep the canonical linear-sRGB
   // result in sRGB primaries and encode with the sRGB TRC so sp-image does not
   // misinterpret Rec.2020/ProPhoto numeric values as sRGB.
-  const display = encodePanelPreviewSRGB(out);
+  const display = encodePanelPreviewSRGB(graphResult.rgb);
   // 2.3：面板预览与画布写回保持一致的 soft-knee（>1 值软滚降；0=硬裁剪）
   if (p.rolloff > 0) applyRolloff(display, p.rolloff);
-  const rgba = new Float32Array(w * h * 4);
-  for (let i = 0, q = 0; i < w * h; i++, q += 3) {
-    rgba[i * 4] = display[q];
-    rgba[i * 4 + 1] = display[q + 1];
-    rgba[i * 4 + 2] = display[q + 2];
-    rgba[i * 4 + 3] = displayWork.alpha ? displayWork.alpha[i] : 1;
+  throwIfCancelled(signal);
+  const encodeStarted = Date.now();
+  const png = floatRgbToPng(w, h, display, displayWork.alpha);
+  timings.encodeMs = Date.now() - encodeStarted;
+  throwIfCancelled(signal);
+  let dataUrl = null;
+  if (options.returnDataUrl !== false) {
+    const base64Started = Date.now();
+    dataUrl = pngToDataUrl(png);
+    timings.base64Ms = Date.now() - base64Started;
   }
-  const png = floatRgbaToPng(w, h, rgba);
-  return { dataUrl: pngToDataUrl(png), width: w, height: h, ms: Date.now() - t0, cache: c };
+  return { dataUrl, png, width: w, height: h, ms: Date.now() - t0, cache: c, timings };
 }

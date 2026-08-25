@@ -1,13 +1,14 @@
 // @ts-nocheck
 /**
  * ui/panel — Film Halation 面板（Spectrum UXP，原生 DOM）。
- * 布局：Basic（Strength）/ Advanced 折叠（其余参数）/ 预览图 / Apply + 状态行。
+ * 布局：效果领域导航 / 当前领域参数 / 大幅检查预览 / Apply + 状态行。
  * 控件变更 → handlers.onParamsChange()（main.jsx 负责 debounce 预览与状态刷新）。
  * 本文件只做视图与事件转发，不含算法与宿主逻辑。
  */
 import { STRINGS } from './i18n.js';
 import { createSlider, createSelect } from './controls.js';
-import { createHalationPreset, HALATION_PRESET_LABELS } from '../core/index.js';
+import { createHalationPreset, HALATION_PRESET_LABELS, createFilmResolutionParams, createGrainParams } from '../core/index.js';
+
 
 function setDropdownValue(el, value) {
   if (!el) return;
@@ -19,7 +20,13 @@ function setDropdownValue(el, value) {
 /**
  * @param {{
  *   params: object,                       // 当前 HalationParams
+ *   graph?: Array<object>,                // V1.6 graph
+ *   format?: object,                      // V1.6 physical format
+ *   featureLevel?: 'current'|'v1.5-bridge',
  *   onParamsChange: (partial:object)=>void, // 参数变更（partial 合并）
+ *   onGraphChange?: (graph:Array<object>)=>void,
+ *   onFormatChange?: (partial:object)=>void,
+ *   onRandomizeGrain?: ()=>void,
  *   onApply: ()=>void,                    // 触发 Apply
  *   onRebind: ()=>void,                   // 显式把当前像素层重新绑定为 source
  *   migrationRole?: 'export'|'import'|'none',
@@ -31,7 +38,13 @@ function setDropdownValue(el, value) {
 export function createPanel(handlers) {
   const {
     params,
+    graph = [],
+    format = { gauge: '35mm', iso: 250 },
+    featureLevel = 'current',
     onParamsChange,
+    onGraphChange = () => {},
+    onFormatChange = () => {},
+    onRandomizeGrain = () => {},
     onApply,
     onRebind,
     migrationRole = 'none',
@@ -39,6 +52,8 @@ export function createPanel(handlers) {
     onImportMigration,
   } = handlers;
   let currentParams = { ...params, redshift: [...params.redshift], sigmaRatio: [...params.sigmaRatio] };
+  let currentGraph = graph.map((node) => ({ ...node, params: { ...node.params } }));
+  let currentFormat = { ...format };
   const set = (partial) => {
     const explicitProfile = Object.prototype.hasOwnProperty.call(partial, 'profile');
     const effective = explicitProfile ? partial : { ...partial, profile: 'custom' };
@@ -51,37 +66,74 @@ export function createPanel(handlers) {
   // 全局紧凑样式 + 滚动条视觉；body 限高（滚动只发生在 panel 内）
   const style = document.createElement('style');
   style.textContent = `
-    html, body { height: 100%; margin: 0; padding: 0; overflow: hidden; }
+    html, body { height: 100%; margin: 0; padding: 0; overflow: hidden; background: #1d1e20; }
     ::-webkit-scrollbar { width: 8px; }
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: rgba(128, 128, 128, 0.45); border-radius: 4px; }
     ::-webkit-scrollbar-thumb:hover { background: rgba(128, 128, 128, 0.65); }
-    sp-heading { margin: 0 0 2px 0; }
+    sp-heading { margin: 0 0 2px 0; font-family: "Adobe Clean", "Segoe UI", sans-serif; }
     sp-label { font-size: 11px; line-height: 1.2; margin: 0; }
     sp-body { margin: 0; }
     .fhal-workspace { flex: 1; min-height: 0; display: flex; flex-direction: row; }
+    .fhal-domain-nav {
+      flex: 0 0 112px; min-width: 112px; display: flex; flex-direction: column; gap: 3px;
+      padding: 10px 7px; box-sizing: border-box; overflow-y: auto; background: #17181a;
+      border-right: 1px solid rgba(255,255,255,.09);
+    }
+    .fhal-nav-kicker {
+      padding: 2px 7px 8px; color: rgba(255,255,255,.48); font: 600 9px/1.2 Consolas, monospace;
+      letter-spacing: .14em; text-transform: uppercase;
+    }
+    .fhal-domain-button {
+      position: relative; width: 100%; min-height: 42px; padding: 7px 8px 7px 12px;
+      border: 0; border-left: 2px solid transparent; border-radius: 2px; box-sizing: border-box;
+      color: rgba(255,255,255,.68); background: transparent; text-align: left;
+      font: 600 12px/1.2 "Adobe Clean", "Segoe UI", sans-serif; cursor: pointer;
+    }
+    .fhal-domain-button:hover { color: #fff; background: rgba(255,255,255,.055); }
+    .fhal-domain-button:focus { outline: 1px solid #55a9d8; outline-offset: -1px; }
+    .fhal-domain-button[aria-pressed="true"] { color: #fff; background: rgba(255,255,255,.085); }
+    .fhal-domain-button[data-domain="halation"][aria-pressed="true"] { border-left-color: #e77f42; }
+    .fhal-domain-button[data-domain="resolution"][aria-pressed="true"] { border-left-color: #55a9d8; }
+    .fhal-domain-button[data-domain="grain"][aria-pressed="true"] { border-left-color: #b7b1a5; }
+    .fhal-domain-code { display: block; margin-top: 3px; color: rgba(255,255,255,.36); font: 9px/1 Consolas, monospace; letter-spacing: .08em; }
     .fhal-controls {
-      flex: 0 0 340px; min-width: 280px; max-width: 400px; overflow-y: auto;
-      padding: 10px; box-sizing: border-box; border-right: 1px solid rgba(128,128,128,.28);
+      flex: 0 0 340px; min-width: 280px; max-width: 380px; overflow-y: auto;
+      padding: 12px; box-sizing: border-box; background: #242528; border-right: 1px solid rgba(128,128,128,.28);
     }
     .fhal-controls > * { flex-shrink: 0; }
+    .fhal-domain-panel { display: none; flex-direction: column; gap: 8px; }
+    .fhal-domain-panel[data-active="true"] { display: flex; }
+    .fhal-section-heading { padding-bottom: 6px; border-bottom: 1px solid rgba(255,255,255,.09); }
+    .fhal-physical-group { display: none; flex-direction: column; gap: 6px; margin-bottom: 4px; padding-bottom: 10px; border-bottom: 1px solid rgba(255,255,255,.09); }
+    .fhal-physical-group[data-visible="true"] { display: flex; }
     .fhal-preview-stage {
       flex: 1 1 auto; min-width: 300px; min-height: 0; display: flex; flex-direction: column;
-      padding: 10px; box-sizing: border-box; background: #191919;
+      padding: 12px; box-sizing: border-box; background: #1d1e20;
     }
     .fhal-preview-frame {
       flex: 1; min-height: 220px; display: flex; align-items: center; justify-content: center;
-      overflow: hidden; background: #111; border: 1px solid rgba(255,255,255,.12);
-      box-shadow: inset 0 0 0 1px rgba(0,0,0,.35);
+      overflow: hidden; background: #101113; border: 1px solid rgba(255,255,255,.10);
+      box-shadow: inset 0 0 0 1px rgba(0,0,0,.42), 0 8px 28px rgba(0,0,0,.18);
     }
     #preview-image { width: 100%; height: 100%; object-fit: contain; }
-    @media (max-width: 680px) {
+    @media (max-width: 760px) {
       .fhal-workspace { flex-direction: column; }
+      .fhal-domain-nav {
+        flex: 0 0 auto; min-width: 0; flex-direction: row; overflow-x: auto; overflow-y: hidden;
+        padding: 6px; border-right: 0; border-bottom: 1px solid rgba(255,255,255,.09);
+      }
+      .fhal-nav-kicker { display: none; }
+      .fhal-domain-button { min-width: 94px; min-height: 36px; border-left: 0; border-bottom: 2px solid transparent; }
+      .fhal-domain-button[data-domain="halation"][aria-pressed="true"] { border-bottom-color: #e77f42; }
+      .fhal-domain-button[data-domain="resolution"][aria-pressed="true"] { border-bottom-color: #55a9d8; }
+      .fhal-domain-button[data-domain="grain"][aria-pressed="true"] { border-bottom-color: #b7b1a5; }
+      .fhal-domain-code { display: none; }
       .fhal-controls {
-        flex: 1 1 55%; width: 100%; min-width: 0; max-width: none;
+        flex: 1 1 52%; width: 100%; min-width: 0; max-width: none;
         border-right: 0; border-bottom: 1px solid rgba(128,128,128,.28);
       }
-      .fhal-preview-stage { flex: 1 1 45%; min-width: 0; min-height: 240px; }
+      .fhal-preview-stage { flex: 1 1 48%; min-width: 0; min-height: 220px; }
     }
     sp-heading, sp-label, sp-slider, sp-dropdown, sp-button, sp-body { flex-shrink: 0; }
   `;
@@ -98,14 +150,77 @@ export function createPanel(handlers) {
   panel.style.flexDirection = 'column';
   panel.style.boxSizing = 'border-box';
 
-  // 左侧参数独立滚动；右侧预览始终保持可见。
+  // 领域导航、当前参数和预览是三个独立区域；窄面板下导航转为横向。
   const workspace = document.createElement('div');
   workspace.classList.add('fhal-workspace');
+  const domainNav = document.createElement('div');
+  domainNav.classList.add('fhal-domain-nav');
+  domainNav.setAttribute('aria-label', 'Film effect domains');
+  domainNav.setAttribute('role', 'tablist');
+  const navKicker = document.createElement('div');
+  navKicker.classList.add('fhal-nav-kicker');
+  navKicker.textContent = 'Emulsion stages';
+  domainNav.append(navKicker);
   const scrollArea = document.createElement('div');
   scrollArea.style.display = 'flex';
   scrollArea.style.flexDirection = 'column';
   scrollArea.style.gap = '8px';
   scrollArea.classList.add('fhal-controls');
+
+  const halationPanel = document.createElement('div');
+  halationPanel.classList.add('fhal-domain-panel');
+  halationPanel.setAttribute('data-domain', 'halation');
+  halationPanel.id = 'film-domain-halation';
+  halationPanel.setAttribute('role', 'tabpanel');
+  const resolutionPanel = document.createElement('div');
+  resolutionPanel.classList.add('fhal-domain-panel');
+  resolutionPanel.setAttribute('data-domain', 'resolution');
+  resolutionPanel.id = 'film-domain-resolution';
+  resolutionPanel.setAttribute('role', 'tabpanel');
+  const grainPanel = document.createElement('div');
+  grainPanel.classList.add('fhal-domain-panel');
+  grainPanel.setAttribute('data-domain', 'grain');
+  grainPanel.id = 'film-domain-grain';
+  grainPanel.setAttribute('role', 'tabpanel');
+  const physicalGroup = document.createElement('div');
+  physicalGroup.classList.add('fhal-physical-group');
+  const domainPanels = { halation: halationPanel, resolution: resolutionPanel, grain: grainPanel };
+  const domainButtons = {};
+  const addDomainButton = (domain, label, code) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.classList.add('fhal-domain-button');
+    button.setAttribute('data-domain', domain);
+    button.setAttribute('aria-pressed', 'false');
+    button.setAttribute('role', 'tab');
+    button.setAttribute('aria-controls', `film-domain-${domain}`);
+    const codeLabel = document.createElement('span');
+    codeLabel.classList.add('fhal-domain-code');
+    codeLabel.textContent = code;
+    button.textContent = label;
+    button.append(codeLabel);
+    button.addEventListener('click', () => showDomain(domain));
+    domainButtons[domain] = button;
+    domainNav.append(button);
+  };
+  const showDomain = (domain) => {
+    for (const [name, section] of Object.entries(domainPanels)) {
+      section.setAttribute('data-active', String(name === domain));
+      section.setAttribute('aria-hidden', String(name !== domain));
+    }
+    for (const [name, button] of Object.entries(domainButtons)) {
+      button.setAttribute('aria-pressed', String(name === domain));
+      button.setAttribute('aria-selected', String(name === domain));
+    }
+    physicalGroup.setAttribute('data-visible', String(domain === 'resolution' || domain === 'grain'));
+  };
+  addDomainButton('halation', 'Halation', 'HAL / 30');
+  const currentBuild = __FILM_FEATURE_LEVEL__ === 'current' && featureLevel === 'current';
+  if (__FILM_FEATURE_LEVEL__ === 'current' && featureLevel === 'current') {
+    addDomainButton('resolution', 'Resolution', 'MTF / 60');
+    addDomainButton('grain', 'Grain', 'GRN / 70');
+  }
+  showDomain('halation');
 
   // ---- Basic ----
   const basicGroup = document.createElement('div');
@@ -114,6 +229,7 @@ export function createPanel(handlers) {
   basicGroup.style.gap = '6px';
   const basicHeading = document.createElement('sp-heading');
   basicHeading.textContent = STRINGS.basic;
+  basicHeading.classList.add('fhal-section-heading');
   basicGroup.append(basicHeading);
   basicGroup.append(
     createSelect({
@@ -145,7 +261,83 @@ export function createPanel(handlers) {
       step: 1,
       onInput: (v) => set({ strength: v }),
     }),
+    createSlider({ id: 'sigma', label: STRINGS.sigma, value: params.sigma, min: params.sigmaUnits === 'diagonal' ? 0.1 : 0.5, max: params.sigmaUnits === 'diagonal' ? 10 : 50, step: params.sigmaUnits === 'diagonal' ? 0.1 : 0.5, onInput: (v) => set({ sigma: v }) }),
+    createSlider({ id: 'threshold', label: STRINGS.threshold, value: params.threshold, min: params.thresholdUnits === 'stops' ? -4 : 0, max: params.thresholdUnits === 'stops' ? 4 : 1, step: params.thresholdUnits === 'stops' ? 0.1 : 0.01, onInput: (v) => set({ threshold: v }) }),
   );
+
+  if (__FILM_FEATURE_LEVEL__ === 'current' && featureLevel === 'current') {
+    const resolution = currentGraph.find((node) => node.type === 'filmResolution')?.params ?? createFilmResolutionParams();
+    const grain = currentGraph.find((node) => node.type === 'grain')?.params ?? createGrainParams();
+    const setNode = (type, partial) => {
+      const present = currentGraph.some((node) => node.type === type);
+      currentGraph = currentGraph.map((node) => node.type === type
+        ? { ...node, params: type === 'filmResolution' ? createFilmResolutionParams({ ...node.params, ...partial }) : createGrainParams({ ...node.params, ...partial }) }
+        : node);
+      if (!present) currentGraph.push({
+        id: type === 'filmResolution' ? 'film-resolution-main' : 'grain-main',
+        type,
+        enabled: true,
+        params: type === 'filmResolution' ? createFilmResolutionParams(partial) : createGrainParams(partial),
+      });
+      onGraphChange(currentGraph);
+    };
+
+    const physicalHeading = document.createElement('sp-heading');
+    physicalHeading.textContent = 'Film stock';
+    physicalHeading.classList.add('fhal-section-heading');
+    physicalGroup.append(physicalHeading, createSelect({
+      id: 'filmGauge', label: 'Film format', value: currentFormat.gauge,
+      options: [
+        { value: '8mm', label: 'Super 8' },
+        { value: '16mm', label: 'Super 16' },
+        { value: '35mm', label: 'Super 35 4-perf' },
+        { value: '65mm', label: '65mm 5-perf' },
+      ],
+      onChange: (value) => { currentFormat = { ...currentFormat, gauge: value }; onFormatChange({ gauge: value }); },
+    }), createSlider({ id: 'filmIso', label: 'ISO', value: currentFormat.iso, min: 25, max: 3200, step: 1, onInput: (value) => { currentFormat = { ...currentFormat, iso: value }; onFormatChange({ iso: value }); } }));
+
+    const resolutionHeading = document.createElement('sp-heading');
+    resolutionHeading.textContent = 'Film Resolution';
+    resolutionHeading.classList.add('fhal-section-heading');
+    resolutionPanel.append(
+      resolutionHeading,
+      createSelect({
+        id: 'filmResolutionProfile', label: 'Material', value: resolution.profile,
+        options: [{ value: 'negative', label: 'Negative' }, { value: 'positive', label: 'Positive / print' }],
+        onChange: (value) => setNode('filmResolution', { profile: value }),
+      }),
+      createSlider({ id: 'filmResolutionAmount', label: 'Resolution loss', value: resolution.amount, min: 0, max: 1.5, step: 0.01, onInput: (value) => setNode('filmResolution', { amount: value }) }),
+      createSlider({ id: 'filmResolutionResponse', label: 'MTF response', value: resolution.response, min: 0.5, max: 2, step: 0.01, onInput: (value) => setNode('filmResolution', { response: value }) }),
+      createSlider({ id: 'filmResolutionToeLoss', label: 'Shadow loss', value: resolution.toeLoss, min: 0, max: 1, step: 0.01, onInput: (value) => setNode('filmResolution', { toeLoss: value }) }),
+      createSlider({ id: 'filmResolutionShoulderLoss', label: 'Highlight loss', value: resolution.shoulderLoss, min: 0, max: 1, step: 0.01, onInput: (value) => setNode('filmResolution', { shoulderLoss: value }) }),
+    );
+
+    const grainHeading = document.createElement('sp-heading');
+    grainHeading.textContent = 'Film Grain';
+    grainHeading.classList.add('fhal-section-heading');
+    grainPanel.append(
+      grainHeading,
+      createSelect({
+        id: 'grainProfile', label: 'Material', value: grain.profile,
+        options: [{ value: 'negative', label: 'Negative' }, { value: 'positive', label: 'Positive / print' }],
+        onChange: (value) => setNode('grain', { profile: value }),
+      }),
+      createSelect({
+        id: 'grainMode', label: 'Correlation', value: grain.mode,
+        options: [{ value: 'analogue', label: 'Analogue' }, { value: 'fast', label: 'Fast' }],
+        onChange: (value) => setNode('grain', { mode: value }),
+      }),
+      createSlider({ id: 'grainAmount', label: 'Amount', value: grain.amount, min: 0, max: 2, step: 0.01, onInput: (value) => setNode('grain', { amount: value }) }),
+      createSlider({ id: 'grainSize', label: 'Size', value: grain.size, min: 0.5, max: 2, step: 0.01, onInput: (value) => setNode('grain', { size: value }) }),
+      createSlider({ id: 'grainRoughness', label: 'Roughness', value: grain.roughness, min: 0, max: 1, step: 0.01, onInput: (value) => setNode('grain', { roughness: value }) }),
+      createSlider({ id: 'grainChroma', label: 'Chroma', value: grain.chroma, min: 0, max: 1, step: 0.01, onInput: (value) => setNode('grain', { chroma: value }) }),
+    );
+    const randomize = document.createElement('sp-button');
+    randomize.variant = 'secondary';
+    randomize.textContent = 'Randomize grain';
+    randomize.addEventListener('click', onRandomizeGrain);
+    grainPanel.append(randomize);
+  }
 
   // ---- Advanced（折叠）----
   const details = document.createElement('div');
@@ -165,8 +357,6 @@ export function createPanel(handlers) {
   advGroup.style.flexDirection = 'column';
   advGroup.style.gap = '6px';
   advGroup.append(
-    createSlider({ id: 'sigma', label: STRINGS.sigma, value: params.sigma, min: params.sigmaUnits === 'diagonal' ? 0.1 : 0.5, max: params.sigmaUnits === 'diagonal' ? 10 : 50, step: params.sigmaUnits === 'diagonal' ? 0.1 : 0.5, onInput: (v) => set({ sigma: v }) }),
-    createSlider({ id: 'threshold', label: STRINGS.threshold, value: params.threshold, min: params.thresholdUnits === 'stops' ? -4 : 0, max: params.thresholdUnits === 'stops' ? 4 : 1, step: params.thresholdUnits === 'stops' ? 0.1 : 0.01, onInput: (v) => set({ threshold: v }) }),
     createSlider({ id: 'redLayerThresholdBias', label: STRINGS.redLayerThresholdBias, value: params.redLayerThresholdBias, min: 0, max: 1, step: 0.01, onInput: (v) => set({ redLayerThresholdBias: v }) }),
     createSlider({ id: 'sourceSoftness', label: STRINGS.sourceSoftness, value: params.sourceSoftness, min: 0, max: 1, step: 0.01, onInput: (v) => set({ sourceSoftness: v, thresholdSoftness: v }) }),
     createSlider({ id: 'backgroundSoftness', label: STRINGS.backgroundSoftness, value: params.backgroundSoftness, min: 0, max: 1, step: 0.01, onInput: (v) => set({ backgroundSoftness: v }) }),
@@ -325,8 +515,10 @@ export function createPanel(handlers) {
   hint.style.opacity = '0.6';
   hint.style.fontSize = '12px';
 
-  scrollArea.append(basicGroup, details);
-  workspace.append(scrollArea, previewStage);
+  halationPanel.append(basicGroup, details);
+  scrollArea.append(physicalGroup, halationPanel);
+  if (currentBuild) scrollArea.append(resolutionPanel, grainPanel);
+  workspace.append(domainNav, scrollArea, previewStage);
   footer.append(actions, status, hint);
   panel.append(workspace, footer);
 
@@ -404,7 +596,7 @@ export function createPanel(handlers) {
   const setControl = (id, value) => {
     const el = document.getElementById(id);
     if (!el) return;
-    if (id === 'profile' || id === 'blendMode' || id === 'diffusionMode' || id === 'extraction' || id === 'sigmaUnits' || id === 'thresholdUnits') {
+    if (id === 'profile' || id === 'blendMode' || id === 'diffusionMode' || id === 'extraction' || id === 'sigmaUnits' || id === 'thresholdUnits' || id === 'filmGauge' || id === 'filmResolutionProfile' || id === 'grainProfile' || id === 'grainMode') {
       // sp-dropdown：value 只读，用 selectedIndex
       setDropdownValue(el, value);
     } else {
@@ -418,6 +610,31 @@ export function createPanel(handlers) {
     rebindBtn,
     migrationBtn,
     chooseMigrationConflicts,
+    updateGraph(nextGraph) {
+      currentGraph = nextGraph.map((node) => ({ ...node, params: { ...node.params } }));
+      const resolution = currentGraph.find((node) => node.type === 'filmResolution')?.params;
+      const grain = currentGraph.find((node) => node.type === 'grain')?.params;
+      if (resolution) {
+        setControl('filmResolutionProfile', resolution.profile);
+        setControl('filmResolutionAmount', resolution.amount);
+        setControl('filmResolutionResponse', resolution.response);
+        setControl('filmResolutionToeLoss', resolution.toeLoss);
+        setControl('filmResolutionShoulderLoss', resolution.shoulderLoss);
+      }
+      if (grain) {
+        setControl('grainProfile', grain.profile);
+        setControl('grainMode', grain.mode);
+        setControl('grainAmount', grain.amount);
+        setControl('grainSize', grain.size);
+        setControl('grainRoughness', grain.roughness);
+        setControl('grainChroma', grain.chroma);
+      }
+    },
+    updateFormat(nextFormat) {
+      currentFormat = { ...nextFormat };
+      setControl('filmGauge', currentFormat.gauge);
+      setControl('filmIso', currentFormat.iso);
+    },
     /** 参数恢复后刷新全部控件显示（不触发预览回调）。 */
     updateParams(p) {
       currentParams = { ...p, redshift: [...p.redshift], sigmaRatio: [...p.sigmaRatio] };

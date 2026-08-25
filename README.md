@@ -1,8 +1,26 @@
 # Film Emulation 1.6.0（Halation Engine 1.5.1）
 
-Photoshop UXP 胶片模拟插件。当前 1.6.0 包先完成插件身份迁移，面板仍提供 V1.5.1 Halation 引擎；Film Grain 与 Film Resolution/MTF 将在后续 V1.6 功能迭代中加入。V1.5.1 引擎在非破坏性 V1.5 基础上修正夜景弱光源连成红雾、强光源核芯过软的问题，并增加面向无 Remjet 胶片观感的强光邻域扩张、红层长尾和亮度安全色密度合成。
+Photoshop UXP 胶片模拟插件。1.6.0 在保留 V1.5.1 Halation 引擎的同时，加入按胶片格式/ISO 换算的 Film Resolution/MTF 与曝光相关 Film Grain。两种新效果使用 schema v2 graph、固定坐标 hash seed，并在 Preview/Apply 的线性色彩路径中执行。V1.5.1 引擎在非破坏性 V1.5 基础上修正夜景弱光源连成红雾、强光源核芯过软的问题，并增加面向无 Remjet 胶片观感的强光邻域扩张、红层长尾和亮度安全色密度合成。
 
 当前正式插件 ID 为 `com.cheukwing.filmemulation`。为避免 UXP 按插件 ID 隔离的旧参数丢失，仓库同时生成仍使用 `com.cheukwing.filmhalation` 的 V1.5.2 迁移桥接包。
+
+## V1.6 功能概览
+
+V1.6 的可执行物理图固定为：
+
+```text
+Halation → Film Resolution / MTF → Film Grain
+```
+
+- 宽面板使用“领域导航—参数—预览”三栏布局；左侧 `Halation`、`Resolution`、`Grain` 按钮只切换参数窗口，不改变物理处理顺序。窄面板自动切换为上下布局。
+- Halation 的常用 `Strength`、`Sigma`、`Threshold` 位于 Basic；其余低频控制保留在 Advanced。
+- Film Resolution 和 Grain 共享 Super 8、Super 16、Super 35 4-perf、65mm 5-perf 四种格式以及 ISO 25–3200 的物理尺度。默认是 Super 35 4-perf、ISO 250、Negative material。
+- Film Resolution 提供非负权重的曝光相关 MTF 损失。`amount=0`、禁用节点或极小 sigma 保持逐浮点样本恒等；RGB 共用同一 PSF，alpha 原样保留。
+- Film Grain 使用按完整图像绝对坐标寻址的确定性 hash 场，不依赖 `Math.random()`、时间或分带顺序。相同 seed 在 Preview、Apply、重开、分带以及 JS/WASM 回退时保持同一排列。
+- 新文档默认包含并启用三个节点；旧 schema 和 V1.5 迁移状态保持 Halation-only，不会自动注入 V1.6 效果。
+- schema 仍为 v2，只序列化 `{gauge, iso}`；`engineVersion=1.6.0` 与 Halation 算法常量 `ENGINE_VERSION=1.5.1` 分开管理。
+
+详细操作和参数说明见 [Film Emulation V1.6.0 用户手册](docs/FilmHalation_V1.5.1_User_Manual.md)。为保持现有公开文档路径兼容，手册文件名暂时沿用 V1.5.1，文档标题和内容已经更新为 V1.6.0。
 
 ## 从旧插件迁移
 
@@ -14,7 +32,7 @@ Photoshop UXP 胶片模拟插件。当前 1.6.0 包先完成插件身份迁移�
 
 迁移包使用 schema v2 逐项校验、规范化 UTF-8 CRC32、10MB/10000 文档限制及导入回执。损坏文件会被拒绝；单个无效文档不会阻止其余有效文档；旧插件目录和导出文件不会被删除。导入的图层绑定仍须通过现有严格验证，存在歧义时应选择原始像素层并点击 **Rebind Source**。
 
-## V1.5 核心行为
+## Halation 1.5.1 核心行为
 
 - 在线性 sRGB primaries 中执行光源提取、曝光档位响应、光谱响应、三瓣 PSF、门控和合成。
 - Fast 与 Quality 使用同一个核芯/肩部/尾部三高斯 PSF；差异只限数值近似和多尺度精度。
@@ -38,7 +56,7 @@ Photoshop UXP 胶片模拟插件。当前 1.6.0 包先完成插件身份迁移�
 ## 非破坏性工作流
 
 1. 选择原始像素图层。
-2. 调整参数；面板使用 1024px Photoshop ICC 底图和缓存的 2048px 原生工作空间效果代理。Threshold/Hue Response 先在高分辨率代理上提取，再把光源场降到 1024px 扩散，避免小灯在提取前被缩图抹除。宽面板使用左参数、右大预览，窄停靠状态自动改为上下布局。
+2. 用左侧领域按钮依次调整 Halation、Resolution 和 Grain。面板使用 1024px Photoshop ICC 底图和缓存的 2048px 原生工作空间效果代理。Threshold/Hue Response 先在高分辨率代理上提取，再把光源场降到 1024px 扩散，避免小灯在提取前被缩图抹除。
 3. 点击 Apply。插件创建独立空白像素效果层，从绑定源层完成整图渲染后只向效果层写入。
 4. 后续调参始终重新读取绑定源层并更新同一副本，不会在已处理结果上叠加。
 
@@ -46,8 +64,22 @@ Photoshop UXP 胶片模拟插件。当前 1.6.0 包先完成插件身份迁移�
 
 智能对象、文本、调整层和组不能直接作为 Imaging API 像素源；请先进入智能对象内容或栅格化为像素层。
 
+## Preview、Rebind 与性能
+
+- 首次载入或绑定新源时，面板先显示色彩管理后的 1024px 源图，再异步替换为完整 Film graph 结果，避免效果计算期间出现黑色空窗。
+- 预览 PNG 优先使用 Blob URL，并在完全不透明时输出 RGB PNG，避免大型 Base64 字符串和不必要的 alpha 通道；宿主不支持时自动回退 Data URL。
+- 同一源图层且 Photoshop 历史状态未改变时，重复 Rebind 复用源像素和效果缓存，不重复读取或渲染。
+- Halation 的提取、扩散、合成，Resolution 的 Gaussian 结果，以及 Grain 的单位方差场分别缓存。快速拖动会取消或丢弃过期 generation，旧结果不能覆盖新参数。
+- 状态栏显示 `Panel preview total (read ..., render ...)`：`read` 反映 Photoshop Imaging API/ICC 代理读取，`render` 反映算法和预览编码，便于定位真实瓶颈。
+- Apply 在创建效果层前完成内存预检；所有 band 成功后才执行一次最终 `putPixels`。任何失败路径都不会把源层作为写入目标。
+
+最新本机 Node/WASM 协议（6000×4000、16 位、16GB 档、2 次预热 + 10 次正式测量）记录在 [`tests/performance-data.json`](tests/performance-data.json)：V1.6 默认 graph P95 为 24.62s，1024px graph Preview P95 为 562.4ms。该结果已明显低于早期约 51.5s 的完整 graph 记录，但仍未达到路线目标，且不能替代 Photoshop 实机计时；性能优化继续保留为发布前工作项。
+
 ## 参数和状态
 
+- Film Resolution：`Material`、`Resolution loss`、`MTF response`、`Shadow loss`、`Highlight loss`。Amount 0–1 从源图混合到目标 MTF，1–1.5 继续过渡到 2.2σ 的宽响应，不产生锐化负瓣。
+- Film Grain：`Material`、`Correlation`、`Amount`、`Size`、`Roughness`、`Chroma` 与 `Randomize grain`。Analogue 使用 fine/medium/coarse 三尺度，Fast 合并 fine/medium 并保留 coarse。
+- Film format 与 ISO 是 Resolution/Grain 的共享参数；较小格式和较高 ISO 会得到更明显的颗粒尺度和分辨率损失。
 - Source Softness、Background Softness 与 PSF Smoothness 已分别建模。
 - Source Impact 控制曝光响应指数；Strong Source/Strong Core 控制重建高光坐标上的强光分类和核芯密度；Global Source 独立限制全局扩散源。
 - Halation Amplify 控制 PSF 前的返回能量；Strong Source Expansion 控制强光对邻近光学 glow 的招募范围；Red Tail 控制红层肩部/长尾分配。
@@ -60,6 +92,7 @@ Photoshop UXP 胶片模拟插件。当前 1.6.0 包先完成插件身份迁移�
 - schema v2 使用有序 `graph`、格式档案和严格 source/target layer bindings。
 - v1 `FilmLab/effects.halation` 文档会迁移成单个 halation 节点；比当前更新的 schema 会被拒绝。
 - 参数保存在 UXP PluginStorage。已保存文档按规范化路径精确匹配；未保存文档额外使用 Photoshop document id，避免 Untitled 冲突。
+- 当前包由 `__FILM_FEATURE_LEVEL__` 门控：正式包可创建、保存并执行 V1.6 graph；V1.5.2 迁移桥只提供 Halation 与迁移导出，不暴露或写入 Resolution/Grain。
 
 ## 构建与验证
 
@@ -84,11 +117,11 @@ npm run package:migration
 - Photoshop 最低版本：23.3。
 - RGB 文档：8/16/32 位。
 - 已实现 sRGB、Display P3、Adobe RGB、ProPhoto RGB 和 Rec.2020 的 TRC/primaries 处理；未知或未标记工作空间回退 sRGB 并提示。
-- 运行时写入和性能仍必须按 `docs/smoke-test.md` 在真实 Photoshop 中验收；Node 测试不能替代宿主层验证。
+- 运行时写入和性能仍必须按真实 Photoshop 矩阵验收；Node 测试不能替代 Imaging API、modal scope、色彩 profile、16/32 位写回、透明边缘、文档切换与 Apply 实机验证。在该矩阵完成前不标记 release-ready。
 
 ## 后续路线
 
-- V1.6：曝光/密度相关 Film Grain 与 Film Resolution/MTF。
+- V1.6：曝光/密度相关 Film Grain 与 Film Resolution/MTF（已实现）。
 - V1.7：独立 Bloom、Defringe、亮部保护。
 - V1.8：Film Damage 与 Vignette。
 - V1.9：Overscan 与 Film Gate。

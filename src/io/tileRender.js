@@ -13,7 +13,16 @@
  * processTiledWithTrc 在带内做 TRC decode/encode（显示编码进、显示编码出），
  * 避免整图 linear 缓冲——大图（100MP+）时峰值内存显著降低，与独立验证程序一致。
  */
-import { processHalation, lowResScale, psfLobesFor, applyMatrix3, resolveSigmaParams } from '../core/index.js';
+import {
+  processHalation,
+  processFilm,
+  lowResScale,
+  psfLobesFor,
+  applyMatrix3,
+  resolveSigmaParams,
+  normalizeEffectGraph,
+  getEffectDefinition,
+} from '../core/index.js';
 import { splitBands } from './tiles.js';
 import { decodeToLinear, encodeFromLinear, primariesMatrices } from './colorPipeline.js';
 
@@ -132,4 +141,101 @@ export function processTiledWithTrc(input, params, trc, opts = {}) {
     }
   }
   return { width, height, rgb: out, alpha: outAlpha, timings };
+}
+
+/**
+ * Graph-aware linear renderer.  The legacy Halation-only entry point above is
+ * intentionally kept byte-compatible; V1.6 uses this function so every node
+ * receives the full-image geometry and absolute band origin.
+ * @param {{width:number,height:number,rgb:Float32Array,alpha?:Float32Array}} input
+ * @param {{format?:object,graph:Array<object>}} document
+ * @param {{decode:(v:number)=>number,encode:(v:number)=>number}} trc
+ * @param {{bandHeight?:number,overlapPx?:number,tileThreshold?:number,outputTrc?:object,quality?:'fast'|'quality',forceFast?:boolean,fullWidth?:number,fullHeight?:number,originX?:number,originY?:number,previewScale?:number,seed?:number,signal?:AbortSignal,profileTimings?:boolean}} [opts]
+ */
+export function processTiledFilmWithTrc(input, document, trc, opts = {}) {
+  const { width, height, rgb, alpha } = input;
+  const graph = normalizeEffectGraph(document?.graph);
+  const fullWidth = opts.fullWidth ?? width;
+  const fullHeight = opts.fullHeight ?? height;
+  const previewScale = opts.previewScale ?? 1;
+  const quality = opts.forceFast ? 'fast' : (opts.quality ?? 'quality');
+  const outputTrc = opts.outputTrc ?? trc;
+  const { toSRGB } = primariesMatrices(trc && trc.baseKey);
+  const { fromSRGB } = primariesMatrices(outputTrc && outputTrc.baseKey);
+  const timings = opts.profileTimings ? {} : null;
+  const enabled = graph.filter((node) => node.enabled !== false);
+  const support = Math.max(0, ...enabled.map((node) => getEffectDefinition(node.type).supportRadius(
+    node.params,
+    { fullWidth, fullHeight, previewScale, quality, format: document.format },
+  )));
+  const overlapDefault = Math.ceil(support);
+  const bandHeight = opts.bandHeight ?? Math.max(256, overlapDefault * 2);
+  const overlapPx = opts.overlapPx ?? overlapDefault;
+  const tileThreshold = opts.tileThreshold ?? TILE_THRESHOLD;
+  const seed = opts.seed ?? graph.find((node) => node.type === 'grain')?.params.seed ?? 0;
+  const baseContext = {
+    fullWidth,
+    fullHeight,
+    format: document.format,
+    previewScale,
+    quality,
+    forceFast: !!opts.forceFast,
+    seed,
+    memoryPlan: opts.memoryPlan,
+    signal: opts.signal,
+  };
+
+  const renderOne = (work, originY) => {
+    const linear = decodeToLinear(work.rgb, trc);
+    if (toSRGB) applyMatrix3(linear, toSRGB);
+    const result = processFilm(work && { width: work.width, height: work.height, rgb: linear, alpha: work.alpha }, { graph }, {
+      ...baseContext,
+      width: work.width,
+      height: work.height,
+      originX: opts.originX ?? 0,
+      originY,
+    });
+    if (fromSRGB) applyMatrix3(result.rgb, fromSRGB);
+    return { result, encoded: encodeFromLinear(result.rgb, outputTrc) };
+  };
+
+  if (width * height <= tileThreshold) {
+    const started = timings ? nowMs() : 0;
+    const rendered = renderOne(input, opts.originY ?? 0);
+    if (timings) {
+      timings.processMs = nowMs() - started;
+      timings.nodeCount = rendered.result.stats?.nodes?.length ?? 0;
+    }
+    return { width, height, rgb: rendered.encoded, alpha: rendered.result.alpha, timings, stats: rendered.result.stats };
+  }
+
+  const out = new Float32Array(width * height * 3);
+  const outAlpha = alpha ? new Float32Array(alpha) : undefined;
+  let lastStats = null;
+  const bands = splitBands(width, height, bandHeight, overlapPx);
+  const rowStride = width * 3;
+  for (let bandIndex = 0; bandIndex < bands.length; bandIndex++) {
+    if (opts.signal?.aborted) throw new Error('Film render cancelled');
+    const band = bands[bandIndex];
+    const bh = band.end - band.start;
+    const bandRgb = new Float32Array(rowStride * bh);
+    const bandAlpha = alpha ? new Float32Array(width * bh) : undefined;
+    for (let y = band.start; y < band.end; y++) {
+      const sourceRow = y * rowStride;
+      const targetRow = (y - band.start) * rowStride;
+      bandRgb.set(rgb.subarray(sourceRow, sourceRow + rowStride), targetRow);
+      if (bandAlpha) bandAlpha.set(alpha.subarray(y * width, (y + 1) * width), (y - band.start) * width);
+    }
+    const rendered = renderOne({ width, height: bh, rgb: bandRgb, alpha: bandAlpha }, band.start);
+    lastStats = rendered.result.stats;
+    const encoded = rendered.encoded;
+    for (let y = band.y0; y < band.y1; y++) {
+      const sourceRow = (y - band.start) * rowStride;
+      const targetRow = y * rowStride;
+      out.set(encoded.subarray(sourceRow, sourceRow + rowStride), targetRow);
+      if (outAlpha && rendered.result.alpha) outAlpha.set(rendered.result.alpha.subarray((y - band.start) * width, (y - band.start + 1) * width), y * width);
+    }
+    opts.onProgress?.((bandIndex + 1) / bands.length);
+  }
+  return { width, height, rgb: out, alpha: outAlpha, timings, stats: lastStats ?? { engineVersion: '1.6.0', nodes: [] } };
 }

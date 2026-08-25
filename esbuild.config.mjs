@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 const ROOT = fileURLToPath(new URL('.', import.meta.url));
 const pluginId = process.env.FILM_PLUGIN_ID || 'com.cheukwing.filmemulation';
 const migrationRole = process.env.FILM_MIGRATION_ROLE || 'import';
+const featureLevel = process.env.FILM_FEATURE_LEVEL || 'current';
 
 /** UXP panel bundle: self-contained IIFE, browser-ish platform (UXP provides DOM globals). */
 const options = {
@@ -18,12 +19,14 @@ const options = {
   target: 'es2020',
   jsx: 'transform',
   sourcemap: true,
+  minifySyntax: true,
   logLevel: 'info',
   // UXP runtime modules — never bundled.
   external: ['photoshop', 'uxp'],
   define: {
     __FILM_PLUGIN_ID__: JSON.stringify(pluginId),
     __FILM_MIGRATION_ROLE__: JSON.stringify(migrationRole),
+    __FILM_FEATURE_LEVEL__: JSON.stringify(featureLevel),
   },
 };
 

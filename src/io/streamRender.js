@@ -1,11 +1,11 @@
 // @ts-nocheck
 /** Host row-band renderer: keeps 24MP 16-bit peak memory below a whole-float-image pipeline. */
-import { processTiledWithTrc } from './tileRender.js';
+import { processTiledWithTrc, processTiledFilmWithTrc } from './tileRender.js';
 import { readDocumentPixels, encodeDisplayRgbaBuffer, writeDocumentRgbaBuffer } from './imageAccess.js';
-import { streamGeometry } from './streamGeometry.js';
+import { streamGeometry, streamFilmGeometry } from './streamGeometry.js';
 import { normalizeComponentSize } from './bitDepth.js';
 import { documentProfileName, resolvePixelTRC } from './colorPipeline.js';
-export { streamGeometry } from './streamGeometry.js';
+export { streamGeometry, streamFilmGeometry } from './streamGeometry.js';
 const nowMs = () => globalThis.performance?.now?.() ?? Date.now();
 
 function addTimings(target, source) {
@@ -120,5 +120,89 @@ export async function renderDocumentToLayer(doc, sourceLayer, targetLayer, sourc
     colorProfile: pixelProfile,
     timings,
     algorithmTimings,
+  };
+}
+
+/** V1.6 graph-aware Apply path. It keeps the one-final-putPixels invariant. */
+export async function renderFilmDocumentToLayer(doc, sourceLayer, targetLayer, sourceBounds, targetBounds, document, trc, options = {}) {
+  const totalStarted = nowMs();
+  const timings = { readMs: 0, processMs: 0, quantizeMs: 0, writeMs: 0 };
+  const algorithmTimings = {};
+  const width = sourceBounds.right - sourceBounds.left;
+  const height = sourceBounds.bottom - sourceBounds.top;
+  const fullWidth = Number(doc.width ?? width);
+  const fullHeight = Number(doc.height ?? height);
+  if (targetBounds.right - targetBounds.left !== width || targetBounds.bottom - targetBounds.top !== height) throw new Error('Safe copy bounds do not match source bounds');
+  const componentSize = normalizeComponentSize(options.componentSize ?? doc.bitsPerChannel);
+  const output = componentSize === 8 ? new Uint8Array(width * height * 4) : componentSize === 16 ? new Uint16Array(width * height * 4) : new Float32Array(width * height * 4);
+  const geometry = streamFilmGeometry(width, height, document, {
+    componentSize,
+    fullWidth,
+    fullHeight,
+    deviceMemoryGB: Number(options.deviceMemoryGB ?? globalThis.navigator?.deviceMemory ?? 0),
+    memoryMode: options.memoryMode ?? 'auto',
+    quality: options.quality ?? 'quality',
+  });
+  if (geometry.hardBudgetExceeded) throw new Error(`Film render exceeds the ${Math.round(geometry.hardBudgetBytes / 1024 ** 3)} GiB hard memory budget; reduce document size or choose a lower-memory mode.`);
+  let pixelProfile = '';
+  let outputTrc = null;
+  const seed = options.seed ?? document.graph.find((node) => node.type === 'grain')?.params.seed ?? 0;
+  const halation = document.graph.find((node) => node.type === 'halation');
+  for (let bandIndex = 0; bandIndex < geometry.bands.length; bandIndex++) {
+    if (options.signal?.aborted) throw new Error('Film render cancelled');
+    const band = geometry.bands[bandIndex];
+    const bandBounds = { left: sourceBounds.left, top: sourceBounds.top + band.start, right: sourceBounds.right, bottom: sourceBounds.top + band.end };
+    let started = nowMs();
+    const source = await readDocumentPixels(doc, { componentSize, layerID: sourceLayer.id, layerName: sourceLayer.name, bounds: bandBounds });
+    timings.readMs += nowMs() - started;
+    const sourceTrc = resolvePixelTRC(doc, source.colorProfile);
+    const bandProfile = String(source.colorProfile || documentProfileName(doc)).trim();
+    if (!outputTrc) { outputTrc = sourceTrc; pixelProfile = bandProfile; }
+    else if (bandProfile && pixelProfile && bandProfile !== pixelProfile) throw new Error(`Imaging API changed color profile between bands: "${pixelProfile}" vs "${bandProfile}"`);
+    started = nowMs();
+    const rendered = processTiledFilmWithTrc(source, document, sourceTrc, {
+      tileThreshold: Number.MAX_SAFE_INTEGER,
+      outputTrc: sourceTrc,
+      fullWidth,
+      fullHeight,
+      originX: sourceBounds.left,
+      originY: sourceBounds.top + band.start,
+      quality: geometry.quality,
+      seed,
+      signal: options.signal,
+      profileTimings: true,
+    });
+    timings.processMs += nowMs() - started;
+    addTimings(algorithmTimings, rendered.timings);
+    started = nowMs();
+    const encoded = encodeDisplayRgbaBuffer(rendered, componentSize, {
+      rolloff: halation?.params?.rolloff ?? 0,
+      dither: componentSize !== 32,
+      seed: options.seed ?? 0x46534c4d,
+      pixelOffset: band.start * width,
+    });
+    const sourceRow = (band.y0 - band.start) * width * 4;
+    const targetRow = band.y0 * width * 4;
+    const values = (band.y1 - band.y0) * width * 4;
+    output.set(encoded.subarray(sourceRow, sourceRow + values), targetRow);
+    timings.quantizeMs += nowMs() - started;
+    options.onProgress?.((bandIndex + 1) / geometry.bands.length);
+  }
+  const writeStarted = nowMs();
+  await writeDocumentRgbaBuffer(doc, { width, height, buffer: output }, { componentSize, layerID: targetLayer.id, layerName: targetLayer.name, bounds: targetBounds, colorProfile: '' });
+  timings.writeMs = nowMs() - writeStarted;
+  timings.totalMs = nowMs() - totalStarted;
+  return {
+    width,
+    height,
+    bands: geometry.bands.length,
+    memoryMode: geometry.memoryMode,
+    estimatedWorkingBytes: geometry.estimatedBytes,
+    estimatedBandBytes: geometry.estimatedBandBytes,
+    outputBytes: output.byteLength,
+    colorProfile: pixelProfile,
+    timings,
+    algorithmTimings,
+    graphStats: { engineVersion: '1.6.0', seed, nodes: document.graph.map((node) => ({ id: node.id, type: node.type })) },
   };
 }

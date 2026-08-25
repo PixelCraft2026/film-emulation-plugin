@@ -30,6 +30,7 @@ const definition = variant === 'bridge'
       version: '1.5.2',
       fileName: 'FilmHalation-MigrationBridge.ccx',
       panelLabel: 'Film Halation Migration',
+      featureLevel: 'v1.5-bridge',
     }
   : {
       pluginId: 'com.cheukwing.filmemulation',
@@ -37,6 +38,7 @@ const definition = variant === 'bridge'
       version: currentManifest.version,
       fileName: 'FilmEmulation.ccx',
       panelLabel: 'Film Halation',
+      featureLevel: 'current',
     };
 
 if (process.env.FILM_SKIP_WASM_BUILD !== '1') {
@@ -49,8 +51,21 @@ execFileSync(process.execPath, [join(ROOT, 'esbuild.config.mjs')], {
     ...process.env,
     FILM_PLUGIN_ID: definition.pluginId,
     FILM_MIGRATION_ROLE: definition.migrationRole,
+    FILM_FEATURE_LEVEL: definition.featureLevel,
   },
 });
+
+const bundleText = readFileSync(join(OUT_DIR, 'main.js'), 'utf8');
+if (!bundleText.includes(definition.featureLevel)) {
+  throw new Error(`Bundle feature gate missing for ${definition.featureLevel}`);
+}
+const v16UiMarkers = ['Film Resolution', 'Randomize grain', 'GRN / 70'];
+if (variant === 'bridge' && v16UiMarkers.some((marker) => bundleText.includes(marker))) {
+  throw new Error('Migration bridge bundle exposes V1.6 UI text');
+}
+if (variant === 'current' && !v16UiMarkers.every((marker) => bundleText.includes(marker))) {
+  throw new Error('Current bundle is missing V1.6 UI');
+}
 
 const stage = join(OUT_DIR, `ccx-stage-${variant}`);
 rmSync(stage, { recursive: true, force: true });

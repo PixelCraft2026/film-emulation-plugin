@@ -13,7 +13,7 @@
  * 限制（README/UI 告知）：machine-local；文档移动/改名后 fingerprint 变化需重新关联；不支持跨机器。
  */
 import { StorageBackend } from './backends.js';
-import { serializeParams, parseDocument } from './serializer.js';
+import { serializeParams, serializeDocument, parseDocument, toDocument } from './serializer.js';
 import {
   MIGRATION_EXTENSION,
   createMigrationBundle,
@@ -139,11 +139,21 @@ export const pluginStorage = new PluginStorage();
 export async function saveParamsForDoc(doc, params, state = {}) {
   const fp = computeFingerprint(doc);
   const key = fingerprintKey(fp);
-  await pluginStorage.save(key, serializeParams(params, {
-    format: state.format,
-    bindings: state.bindings,
-    documentFingerprint: fp,
-  }));
+  const document = state.document
+    ? toDocument(params, {
+        ...state.document,
+        graph: state.document.graph,
+        format: state.format ?? state.document.format,
+        bindings: state.bindings ?? state.document.bindings,
+        documentFingerprint: fp,
+      })
+    : toDocument(params, {
+        graph: state.graph,
+        format: state.format,
+        bindings: state.bindings,
+        documentFingerprint: fp,
+      });
+  await pluginStorage.save(key, serializeDocument(document));
   return { key, fingerprint: fp };
 }
 
@@ -160,7 +170,7 @@ export async function loadParamsForDoc(doc) {
   const { params, version, document } = parseDocument(text);
   const storedFingerprint = document.documentFingerprint;
   if (storedFingerprint && !fingerprintMatches(storedFingerprint, fp)) return null;
-  return { params, version, key, document, bindings: document.bindings, format: document.format };
+  return { params, version, key, document, graph: document.graph, bindings: document.bindings, format: document.format };
 }
 
 const migrationReceiptKey = (crc) => `migration-receipt-${String(crc).toLowerCase()}.json`;

@@ -13,6 +13,7 @@ import {
   SCHEMA_VERSION,
 } from '../../src/storage/serializer.js';
 import { createHalationParams } from '../../src/core/index.js';
+import { createDefaultEffectGraph } from '../../src/core/index.js';
 
 test('S1 roundtrip invariant: serialize(parse(json)) === json', () => {
   const params = createHalationParams({ strength: 60, sigma: 12, blendMode: 'screen' });
@@ -105,8 +106,23 @@ test('S9 temporary source-threshold switch migrates to the continuous bias', () 
   );
 });
 
+test('S10 V1.6 graph persists format, grain seed, and minimum engine version', () => {
+  const graph = createDefaultEffectGraph(createHalationParams({ strength: 20 }), 0x12345678);
+  const doc = toDocument(graph[0].params, {
+    graph,
+    format: { gauge: '16mm', iso: 500 },
+  });
+  assert.equal(doc.engineVersion, '1.6.0');
+  assert.equal(doc.minimumEngineVersion, '1.6.0');
+  assert.deepEqual(doc.format, { gauge: '16mm', iso: 500 });
+  assert.equal(doc.graph.find((node) => node.type === 'grain').params.seed, 0x12345678);
+  const roundTrip = parseDocument(JSON.stringify(doc)).document;
+  assert.equal(roundTrip.graph.length, 3);
+  assert.equal(roundTrip.graph.find((node) => node.type === 'filmResolution').type, 'filmResolution');
+});
+
 test('S8 current schema rejects unknown effect nodes instead of silently dropping them', () => {
   const doc = toDocument(createHalationParams({}));
-  doc.graph.push({ id: 'future', type: 'grain', enabled: true, params: {} });
-  assert.throws(() => normalizeDocument(doc), /Unsupported effect node type/);
+  doc.graph.push({ id: 'future', type: 'unknownFutureNode', enabled: true, params: {} });
+  assert.throws(() => normalizeDocument(doc), /Unknown effect node type/);
 });

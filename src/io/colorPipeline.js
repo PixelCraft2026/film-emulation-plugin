@@ -183,5 +183,8 @@ export function encodeFromLinear(rgb, trc) {
 
 /** Encode canonical linear-sRGB pixels for an untagged panel PNG. */
 export function encodePanelPreviewSRGB(rgb) {
+  if (!(rgb instanceof Float32Array) || rgb.length % 3 !== 0) {
+    throw new TypeError('Panel preview encoder requires an interleaved Float32 RGB buffer');
+  }
   return encodeFromLinear(rgb, getTRC('sRGB'));
 }

@@ -41,6 +41,10 @@ test('untagged panel preview is always sRGB-encoded, never document-TRC encoded'
   assert.notEqual(preview[0], Math.pow(0.25, 1 / 2.4), 'Rec.2020 gamma must not be used for panel PNG');
 });
 
+test('panel preview encoder rejects frame objects instead of silently producing black pixels', () => {
+  assert.throws(() => encodePanelPreviewSRGB({ rgb: new Float32Array([0.2, 0.3, 0.4]) }), /Float32 RGB/);
+});
+
 test('resolveDocumentTRC: 32-bit linear doc (profile name contains Linear) uses identity TRC, baseKey keeps base', () => {
   const r = resolveDocumentTRC({ colorProfileName: 'ProPhoto RGB (Linear)' });
   assert.equal(r.profileKey, 'linear');

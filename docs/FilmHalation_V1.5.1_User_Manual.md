@@ -1,33 +1,54 @@
-# Film Halation V1.5.1 用户手册
+# Film Emulation V1.6.0 用户手册
 
 状态：当前实现说明  
-适用版本：Film Halation 1.5.1  
+适用版本：Film Emulation 1.6.0
+Halation 引擎版本：1.5.1
 Photoshop 最低版本：23.3  
-最后核对：2026-08-23
+最后核对：2026-08-26
 
 ## 1. 插件用途与边界
 
-Film Halation 模拟胶片乳剂内部散射、片基层回射以及缺少防光晕层时形成的红橙色光晕。它不是通用 Glow/Bloom，也不是完整的胶片色彩配置。
+Film Emulation V1.6 是 Photoshop 静态图像胶片物理效果插件，当前包含三个按固定顺序执行的领域：
+
+```text
+Halation → Film Resolution / MTF → Film Grain
+```
+
+Halation 模拟胶片乳剂内部散射、片基层回射以及缺少防光晕层时形成的红橙色光晕；Film Resolution 模拟胶片材料、格式、ISO 与曝光区域造成的空间分辨率损失；Film Grain 模拟与胶片格式、ISO 和曝光相关的相关颗粒场。它们不是通用 Glow/锐化/数字噪声工具，也不是完整的胶片色彩配置。
 
 - 输入图像应当已经完成 RAW 解码、曝光调整和 Photoshop 颜色预设。
-- 插件只处理 Halation 的光学/乳剂效果，不复制任何第三方代码、参数或资产。
+- 插件只处理非色彩的胶片物理效果，不提供胶片色彩 LUT，也不复制任何第三方代码、参数或资产。
 - `Tungsten 800 No-Remjet` 只描述无 Remjet 胶片的视觉方向，不是 CineStill 官方预设。
 - 当前输入必须是 RGB 像素层。智能对象、文字、调整层和组需要先进入内容或栅格化。
 - Apply 创建或更新独立效果像素层，绑定的源图层不会被写入。
+- 新建 V1.6 文档默认包含并启用三个效果。由 V1.5 迁移的旧状态只恢复原 Halation；只有在用户调整 V1.6 参数后，才会把相应的新效果加入旧文档状态。
 
 ## 2. 推荐工作流程
 
 1. 在 Photoshop 中选中未经本插件处理的原始像素层。
-2. 打开插件，先选择一个预设。
-3. 先调 `Threshold`、`Strong Source Level`，决定哪些光源参与以及哪些属于强光。
-4. 再调 `Sigma`、`PSF Smoothness`、`Red Tail`，决定光晕的空间形状。
-5. 再调 `Halation Amplify`、`Strength`、`Halation Color Density`，决定能量、总量和红色浓度。
-6. 必要时用 `Background Threshold`、`Blue Compensation`、`Global Red Diffusion` 修正环境适应性。
-7. 在面板预览确认总体方向后点击 Apply，在 Photoshop 画布 100% 缩放下检查最终结果。
+2. 打开插件，用左侧的 `Halation`、`Resolution`、`Grain` 按钮切换当前调节领域。右侧预览保持不变。
+3. 在 Resolution 或 Grain 页面先设置共享的 `Film format` 与 `ISO`。默认是 Super 35 4-perf、ISO 250。
+4. 在 Halation 页面选择预设，并用 Basic 区域中的 `Strength`、`Sigma`、`Threshold` 建立整体方向；这些常用参数无需展开 Advanced。
+5. 必要时展开 Advanced，用 `Strong Source Level`、`PSF Smoothness`、`Red Tail`、`Halation Amplify`、`Halation Color Density` 等参数进一步塑形。
+6. 切换到 Resolution，先调 `Resolution loss`，再用 `MTF response`、`Shadow loss` 和 `Highlight loss` 微调不同曝光区域的清晰度。
+7. 切换到 Grain，先调 `Amount` 和 `Size`，再用 `Roughness`、`Chroma` 和 `Correlation` 调整颗粒结构。需要另一套排列时点击 `Randomize grain`。
+8. 在面板预览确认总体方向后点击 Apply，在 Photoshop 画布 100% 缩放下检查最终颗粒和细节。适配屏幕缩放的预览不适合判断单像素颗粒。
 
 如果文档曾保存过旧参数，Reload 插件不会自动覆盖它们。若要强制载入新版预设值，先切换到另一个预设，再重新选择目标预设。
 
-## 3. 算法 Pipeline 总览
+### 2.1 从 V1.5 迁移参数
+
+V1.6 使用新的插件 ID，Photoshop/UXP 不会让新插件直接读取旧 ID 的 PluginStorage。需要通过迁移桥转移参数：
+
+1. 安装 `FilmHalation-MigrationBridge.ccx`，它使用旧插件 ID 并可访问原 V1.5 状态。
+2. 在迁移桥面板点击 `Export Migration Package`，保存 `.filmemulation-migrate.json` 文件。
+3. 安装 `FilmEmulation.ccx`。
+4. 在新插件中点击 `Import V1.5 State` 并选择迁移文件。
+5. 打开目标文档，选中真正的原始像素层；若绑定无效，点击 `Rebind Source`。
+
+迁移只恢复旧 Halation 参数和安全绑定信息，不自动向旧文档注入 Resolution 或 Grain，也不包含任何图像像素。新插件已有同一文档状态时默认保留新状态，除非用户在冲突列表中明确选择覆盖。
+
+## 3. 完整处理顺序与 Halation Pipeline
 
 ```text
 Photoshop 编码 RGBA
@@ -57,6 +78,10 @@ PSF 前能量缩放：Halation Amplify
 独立宽红层：Global Source Level、Global Red Diffusion
         ↓
 HDR 安全合成：Strength、Blend Mode、Halation Color Density
+        ↓
+Film Resolution：格式/ISO、材料、曝光相关 MTF
+        ↓
+Film Grain：格式/ISO、材料、曝光相关颗粒
         ↓
 转换回文档 RGB primaries 与 TRC 编码
         ↓
@@ -185,7 +210,7 @@ Additive 直接增加正光能。Screen 在 0–1 范围按剩余高光余量增
 
 输出先转换回文档 RGB primaries 并按文档 TRC 编码。`Highlight Rolloff` 非零时在编码域、写回前主动压缩接近 1 和超过 1 的值。8/16 位随后使用确定性零均值抖动量化；32 位保留浮点值。
 
-## 4. 预设说明
+## 4. Halation 预设说明
 
 ### 4.1 Neutral / Legacy
 
@@ -248,7 +273,7 @@ Additive 直接增加正光能。Screen 在 0–1 范围按剩余高光余量增
 
 `5.2 diagonal units` 在当前实现中表示对角线的 5.2‰，即 0.52%，不是 5.2%。
 
-## 5. 每个参数的详细说明
+## 5. Halation 参数详细说明
 
 以下顺序按照算法 pipeline 分组，而不是完全照搬面板排列顺序。
 
@@ -766,77 +791,184 @@ Interior Protection → 把局部效果从高亮内部移到源体外缘
 5. 8/16 位输出可少量增加 Highlight Rolloff；
 6. 最后再降低 Strength。
 
-## 8. Preview、Apply 与非破坏性行为
+## 8. V1.6 界面布局与共享胶片设置
 
-### 8.1 面板预览
+宽面板分成三个区域：左侧领域导航、中间参数页、右侧 1024px 预览。点击左侧按钮只切换参数页，不会改变物理处理顺序；实际执行顺序始终是 Halation、Resolution、Grain。窄停靠状态会自动改为上下布局。
+
+为保持 V1.6–V1.9 的宿主兼容性，Photoshop 面板标签暂时仍显示 `Film Halation`；安装包与文档名称已经是 Film Emulation。这不影响 Resolution 和 Grain 功能。
+
+左侧编号表示内部物理阶段：
+
+```text
+HLT / 30  Halation
+RES / 60  Resolution
+GRN / 70  Grain
+```
+
+Halation 页的 Basic 区域直接显示 Preset、Strength、Sigma 和 Threshold。其余低频参数继续位于 Advanced。Resolution 与 Grain 共用 `Film stock` 设置：
+
+| Film format | 内部有效画幅 | 典型视觉倾向 |
+|---|---:|---|
+| Super 8 | 5.79 × 4.01 mm | 同分辨率下颗粒最大、解析度损失最明显 |
+| Super 16 | 12.52 × 7.41 mm | 颗粒和柔化较明显 |
+| Super 35 4-perf | 24.89 × 18.66 mm | 默认、均衡 |
+| 65mm 5-perf | 52.15 × 23.07 mm | 颗粒较细、细节保留较多 |
+
+`ISO` 范围为 25–3200，默认 250。提高 ISO 会同时增大颗粒尺度与强度，并轻微降低目标分辨率。Film format 和 ISO 是共享物理设置；在 Resolution 页修改后，Grain 页会使用相同值，反之亦然。
+
+## 9. Film Resolution / MTF
+
+Film Resolution 在线性 RGB 中对三个通道使用同一空间响应，不会造成彩边；alpha 不参与模糊并原样保留。它模拟胶片记录材料的有限 MTF，而不是锐化滤镜。参数在正常范围内只做非负权重的细节损失，不生成锐化负瓣、暗边或明显过冲。
+
+### 9.1 参数速查
+
+| 参数 | 范围 | 默认值 | 作用 |
+|---|---:|---:|---|
+| Material | Negative / Positive | Negative | Negative 解析度较高；Positive / print 更柔和 |
+| Resolution loss | 0–1.5 | 1.00 | 总体分辨率损失；0 为逐样本关闭 |
+| MTF response | 0.5–2.0 | 1.00 | 越高越保留细节，越低越柔和 |
+| Shadow loss | 0–1 | 0.25 | 增加暗部趾部的分辨率损失 |
+| Highlight loss | 0–1 | 0.15 | 增加高光肩部的分辨率损失 |
+
+### 9.2 Resolution loss
+
+- `0`：关闭 Film Resolution，输出与该节点输入逐浮点样本一致。
+- `0–1`：从原始细节连续混合到目标胶片 MTF。
+- `1`：完整应用由 Material、Film format、ISO 和 MTF response 决定的目标响应。
+- `1–1.5`：进一步向更宽的胶片响应过渡，适合明显的低解析度风格，但不会转成锐化或产生负权重。
+
+### 9.3 MTF response
+
+该参数改变胶片材料的目标 MTF50。向右调高会保留更多高频细节；向左调低会增加柔化。它不是后期锐化 Amount，因此不会恢复源图中不存在的细节。
+
+### 9.4 Shadow loss 与 Highlight loss
+
+胶片在曝光曲线趾部和肩部的细节响应通常不同于中间调。Shadow loss 只额外影响较暗区域，Highlight loss 只额外影响较亮区域；中间调保持接近基础 Resolution loss。
+
+建议先把两者设为 0，确定整体 MTF response 和 Resolution loss，再逐渐加入曝光相关损失。判断最终效果时应在 Photoshop 100% 缩放下查看发丝、织物、建筑细线和高光边缘。
+
+## 10. Film Grain
+
+Film Grain 使用与完整图像绝对坐标绑定的固定随机场。相同文档、节点和 seed 在 Preview、Apply、重新打开、不同分带高度以及 JavaScript/WASM 回退时保持同一颗粒排列。它不使用当前时间或 `Math.random()`，因此重复 Apply 不会无故改变纹理。
+
+颗粒以线性光中的曝光相关密度变化合成，并保持统计平均亮度。RGB 共享大部分颗粒结构，再按 Chroma 加入少量独立通道成分；这与把彩色数字噪点直接叠在图像上不同。
+
+### 10.1 参数速查
+
+| 参数 | 范围 | 默认值 | 作用 |
+|---|---:|---:|---|
+| Material | Negative / Positive | Negative | 选择负片或正片/印片的曝光响应分布 |
+| Correlation | Analogue / Fast | Analogue | 颗粒尺度组合与速度模式 |
+| Amount | 0–2 | 1.00 | 颗粒总体强度；0 为逐样本关闭 |
+| Size | 0.5–2 | 1.00 | 物理颗粒直径倍率 |
+| Roughness | 0–1 | 0.55 | 细颗粒与粗颗粒的比例 |
+| Chroma | 0–1 | 0.18 | RGB 独立颗粒成分比例 |
+
+### 10.2 Material
+
+- `Negative`：默认负片曝光包络，较宽范围的阴影和中间调具有可见颗粒。
+- `Positive / print`：颗粒更集中在特定中间调曝光区域，适合正片或印片方向。
+
+Material 只改变颗粒随曝光分布的方式，不替代胶片色彩预设。
+
+### 10.3 Correlation
+
+- `Analogue`：分别组合 fine、medium、coarse 三个相关尺度，结构最完整。
+- `Fast`：把 fine 与 medium 合并为一个等效尺度并保留 coarse，减少计算量；颗粒仍由相同的确定性坐标随机源产生。
+
+交互预览会采用速度优先路径；Apply 使用当前选择和渲染质量。需要最终输出时优先使用 Analogue，批量预览或大图调参可使用 Fast。
+
+### 10.4 Amount、Size、Roughness 与 Chroma
+
+- `Amount` 控制颗粒强度，不改变固定 seed 对应的排列。只调整 Amount 时，预览可以复用已经生成的单位颗粒场。
+- `Size` 改变物理颗粒直径。小格式和高 ISO 会在此基础上进一步放大可见颗粒。
+- `Roughness` 越高，细尺度权重越大、纹理更密；越低，粗尺度相对更多、颗粒团块感更明显。
+- `Chroma=0` 时 RGB 完全共享颗粒结构，观感最接近中性亮度颗粒；向右调高会增加通道差异。过高可能呈现彩色数字噪声感。
+
+### 10.5 Randomize grain
+
+点击 `Randomize grain` 会生成下一组确定性 seed，并立即更新预览。新 seed 会随文档状态保存；重新打开后仍得到相同颗粒。Randomize 只改变颗粒排列，不改变 Amount、Size、Roughness、Chroma、格式或 ISO。
+
+## 11. Preview、Apply 与非破坏性行为
+
+### 11.1 面板预览
 
 - 最长边 1024px。
 - 光源提取来自最长边 2048px 的效果代理，不是先把原图缩到 1024px 再找光源。
 - Source Expansion 使用 2048px 代理尺度的 sigma。
 - PSF 扩散使用 1024px 显示尺度的 sigma。
-- 预览固定使用 fast 数值实现。
+- Film Resolution 与 Grain 在 Halation 的 1024px 线性输出之后执行，并按原图尺寸、预览比例、Film format 和 ISO 换算物理尺度。
+- 预览固定使用速度优先的 graph 渲染质量；Halation 也固定使用 fast 数值实现。
 - 预览按 sRGB TRC 编码显示，不把 Rec.2020 数值直接当作 sRGB。
+- 首次读取或绑定新源时，面板会先显示色彩管理后的 1024px 源图，并提示 `Source loaded. Refining film effects…`，随后替换为完整效果，避免处理期间显示空白或黑屏。
+- 同一源图层且 Photoshop 历史状态未改变时，再次 Rebind 会复用读取和效果缓存。
+- 完成后状态显示 `Panel preview 总时间 (read 读取时间, render 渲染时间)`。`read` 主要反映 Photoshop Imaging API 和色彩代理读取；`render` 包含 Halation、Resolution、Grain 与预览编码。
+- 快速连续拖动时，旧渲染会被取消或丢弃，不会覆盖最新参数的结果。
 
-### 8.2 Apply
+### 11.2 Apply
 
 - 第一次 Apply 创建独立的效果像素层。
 - 后续 Apply 重新读取绑定源层并更新效果层，不在旧效果上重复叠加。
+- Apply 始终按 `Halation → Film Resolution → Grain` 的顺序从绑定源层重新计算。
 - 插件不会把源图层 ID 传给 `putPixels`。
 - 图层绑定失效或存在歧义时会停止或创建新的安全目标，不按相似名称静默猜测。
+- 内存预检在创建效果层之前执行；硬预算不足时不会创建图层或写入像素。
+- 所有分带完成后才执行最终写回。取消或渲染失败不会把部分结果写入源层。
 
-### 8.3 Rebind Source
+### 11.3 Rebind Source
 
 当源图层被删除、重命名、复制，或打开旧文档后绑定不再唯一时：
 
 1. 选中真正的原始像素层；
 2. 点击 Rebind Source；
-3. 重新选择预设或确认参数；
-4. 点击 Apply。
+3. 等待源图和完整效果预览依次出现；
+4. 确认 Halation、Resolution、Grain 及 Film format/ISO；
+5. 点击 Apply。
 
-不要把已经带有效果的 Film Halation 输出层绑定为新源，否则会人为形成重复烘焙。
+不要把已经带有效果的 Film Emulation 输出层绑定为新源，否则会人为形成重复烘焙。同一源图层的重复 Rebind 应直接复用缓存；若源像素已经改变，请先让 Photoshop 生成新的历史状态，再等待预览刷新。
 
-## 9. 位深、工作空间与输出注意事项
+## 12. 位深、工作空间与输出注意事项
 
-### 9.1 8 位
+### 12.1 8 位
 
 - 动态范围有限，强 Amplify、Strength、Color Density 更容易剪切；
 - 使用确定性抖动降低量化带状；
 - 必要时使用少量 Highlight Rolloff。
 
-### 9.2 16 位
+### 12.2 16 位
 
 - Photoshop 使用 0–32768 的整数范围表示 0–1；
 - 插件在写回前严格 clamp 到该范围并使用确定性抖动；
 - 是当前推荐的主要工作位深。
 
-### 9.3 32 位
+### 12.3 32 位
 
 - 保留浮点 HDR 值，不执行整数抖动量化；
 - Threshold 仍然在线性光语义下工作；
 - E>1 的高光按曝光档继续扩展，不会压成与 clipped white 完全相同；
 - 若 Highlight Rolloff 非零，当前实现仍会应用用户指定的输出软肩。
 
-### 9.4 Rec.2020 与其他宽色域
+### 12.4 Rec.2020 与其他宽色域
 
 插件读取文档实际 profile/TRC，转换到 canonical linear sRGB 计算，再转换回原空间。面板预览与 Apply 不应该因为 Rec.2020、Display P3、Adobe RGB 或 ProPhoto 而出现整体 gamma 变暗。
 
 如果遇到未知或未标记 profile，插件会回退到 sRGB 假设并给出提示。最终颜色仍应以 Photoshop 画布和正确显示器 ICC 为准。
 
-## 10. 常见问题
+## 13. 常见问题
 
-### 10.1 调整参数后预设显示为 Custom
+### 13.1 调整参数后预设显示为 Custom
 
 这是正常行为，表示当前值已经偏离内置预设。重新选择内置预设会恢复其全部参数。
 
-### 10.2 Reload 后预设看起来还是旧强度
+### 13.2 Reload 后预设看起来还是旧强度
 
 文档存储的参数会恢复。先切换到另一个预设，再重新选择目标预设。
 
-### 10.3 预览和 Apply 有轻微差异
+### 13.3 预览和 Apply 有轻微差异
 
-预览是 1024px，并固定使用 fast；Apply 使用全分辨率和用户选择的 Diffusion。两者共享同一物理 PSF，但缩放、量化和输出位深仍可能造成细微差异。请在 Photoshop 100% 缩放下评价最终结果。
+预览是 1024px，并固定使用速度优先路径；Apply 使用全分辨率和用户选择的 Diffusion/Correlation。两者共享相同物理尺度和固定 grain seed，但缩放、颗粒统计场近似、量化和输出位深仍可能造成细微差异。请在 Photoshop 100% 缩放下评价最终结果。
 
-### 10.4 图像看起来变暗
+### 13.4 图像看起来变暗
 
 Additive、HDR-safe Screen 和 Color Density 本身不会降低线性亮度。优先检查：
 
@@ -845,29 +977,59 @@ Additive、HDR-safe Screen 和 Color Density 本身不会降低线性亮度。�
 - 输入/输出 profile 是否一致；
 - 是否把效果层设成了非正常混合模式或降低了图层不透明度。
 
-### 10.5 为什么蓝光没有红晕，而蓝天上的白灯有
+### 13.5 为什么蓝光没有红晕，而蓝天上的白灯有
 
 Hue Response 判断发光体本身的色谱；Blue Compensation 判断背景承载条件。白灯含有足够长波能量，可以在蓝天上形成红晕；纯蓝 LED 的长波返回接近零，因此仍被抑制。
 
-## 11. 推荐调参顺序速查
+### 13.6 Rebind Source 后预览短暂显示原图
+
+这是 V1.6 的渐进预览行为。插件先显示已经完成色彩管理的源图，避免读取和物理效果计算期间出现黑色空窗；状态显示 `Refining film effects…` 时仍在计算，完成后会自动替换为 Halation、Resolution 和 Grain 的最终预览。
+
+如果预览长时间保持全黑或不再更新：
+
+1. 确认选中的是可读取的 RGB 像素层，而不是组、智能对象、文本或调整层；
+2. 查看状态栏是否显示失败信息；
+3. 切换到另一个文档再返回，或重新打开插件面板；
+4. 记录状态栏中的 read/render 时间与 Photoshop 版本，用于问题诊断。
+
+### 13.7 为什么预览接近 3 秒
+
+新状态栏把耗时拆成 read 和 render：
+
+- `read` 较高：瓶颈通常在 Photoshop 读取、ICC 转换或源图层状态；复杂文档、宽色域和较旧 Photoshop 版本可能更慢。
+- `render` 较高：瓶颈通常在 2048px Halation 光源提取、Resolution 或 Grain。先确认 WASM 已正常加载，并避免在每次拖动后立刻点击 Apply。
+- 同一源和相同参数的第二次预览应明显更快，因为颜色转换、Halation 中间场、MTF 模糊结果和单位颗粒场都可以复用。
+
+不要用降低文档位深或关闭 Quality 作为最终性能规避。交互时可以暂用 Grain Fast，最终输出再切回 Analogue。
+
+### 13.8 Randomize 后颗粒为什么与之前不同
+
+这是预期行为。Randomize 会推进并保存 seed；之后 Preview、Apply 和重新打开仍会使用新的固定排列。如果只调整 Amount，排列不会变化。若没有点击 Randomize 却出现颗粒整体跳动，请记录操作顺序并报告。
+
+## 14. 推荐调参顺序速查
 
 ```text
-1. Preset
-2. Threshold Units / Sigma Units
-3. Highlight Extraction + Spill Mix
-4. Red-Layer Threshold Bias
-5. Threshold + Source Softness
-6. Source Impact + Strong Source Level
-7. Hue Response
-8. Strong Source Expansion
-9. Sigma + PSF Smoothness + Red Tail
-10. Sigma Ratio + Red Shift
-11. Center Attenuation + Strong Core + Source Interior Protection
-12. Background Threshold + Blue Compensation
-13. Global Source Level + Global Red Diffusion
-14. Halation Amplify + Color Density
-15. Strength
-16. Blend Mode + Highlight Rolloff
+1. Film format + ISO（Resolution / Grain 共享）
+2. Halation Preset
+3. Threshold Units / Sigma Units
+4. Highlight Extraction + Spill Mix
+5. Red-Layer Threshold Bias
+6. Threshold + Source Softness
+7. Source Impact + Strong Source Level
+8. Hue Response
+9. Strong Source Expansion
+10. Sigma + PSF Smoothness + Red Tail
+11. Sigma Ratio + Red Shift
+12. Center Attenuation + Strong Core + Source Interior Protection
+13. Background Threshold + Blue Compensation
+14. Global Source Level + Global Red Diffusion
+15. Halation Amplify + Color Density
+16. Halation Strength + Blend Mode + Highlight Rolloff
+17. Resolution loss + MTF response
+18. Shadow loss + Highlight loss
+19. Grain Amount + Size
+20. Grain Roughness + Chroma + Correlation
+21. Randomize grain（需要另一套排列时）
 ```
 
-这套顺序先决定“谁产生效果”，再决定“效果长什么样”，最后才决定“混合多少”。这样比一开始反复拉 Strength 更容易获得可控、可重复的结果。
+这套顺序先决定物理画幅和感光度，再决定“谁产生 Halation”和“光晕长什么样”，随后确定解析度和颗粒，最后固定随机排列。这样比一开始反复拉 Strength 或 Grain Amount 更容易获得可控、可重复的结果。

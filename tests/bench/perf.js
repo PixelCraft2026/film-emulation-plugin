@@ -4,19 +4,23 @@ import { fileURLToPath } from 'node:url';
 import {
   createHalationParams,
   createHalationPreset,
+  createDefaultEffectGraph,
   resolveSigmaParams,
   installWasmModule,
   getWasmBackendStatus,
   processHalation,
 } from '../../src/core/index.js';
 import { processTiledWithTrc } from '../../src/io/tileRender.js';
-import { streamGeometry } from '../../src/io/streamGeometry.js';
+import { processTiledFilmWithTrc } from '../../src/io/tileRender.js';
+import { streamGeometry, streamFilmGeometry } from '../../src/io/streamGeometry.js';
 
 const WIDTH = 6000;
 const HEIGHT = 4000;
 const WARMUPS = Number(process.env.FILM_BENCH_WARMUPS ?? 2);
 const RUNS = Number(process.env.FILM_BENCH_RUNS ?? 10);
 const DEVICE_MEMORY_GB = Number(process.env.FILM_BENCH_MEMORY_GB ?? 16);
+const SUITE = String(process.env.FILM_BENCH_SUITE ?? 'all');
+if (!['all', 'legacy', 'v16'].includes(SUITE)) throw new Error(`Unknown FILM_BENCH_SUITE: ${SUITE}`);
 const LINEAR_TRC = { decode: (value) => value, encode: (value) => value, baseKey: 'sRGB' };
 const wasmPath = fileURLToPath(new URL('../../assets/film_core.wasm', import.meta.url));
 if (existsSync(wasmPath)) await installWasmModule(readFileSync(wasmPath));
@@ -71,10 +75,10 @@ function render24MP(params) {
   for (const band of geometry.bands) {
     const source = makeBand(WIDTH, band.start, band.end);
     const result = processTiledWithTrc(source, geometry.params, LINEAR_TRC, { tileThreshold: Number.MAX_SAFE_INTEGER });
-    const row0 = band.y0 - band.start;
-    const row1 = band.y1 - band.start;
-    for (let y = row0; y < row1; y += 17) {
-      const p = (y * WIDTH + ((y * 101) % WIDTH)) * 3;
+    const firstSampleY = band.y0 + ((17 - (band.y0 % 17)) % 17);
+    for (let absoluteY = firstSampleY; absoluteY < band.y1; absoluteY += 17) {
+      const y = absoluteY - band.start;
+      const p = (y * WIDTH + ((absoluteY * 101) % WIDTH)) * 3;
       checksum = (checksum + Math.round(result.rgb[p] * 1e6)) >>> 0;
     }
     const current = memoryMB();
@@ -91,6 +95,61 @@ function renderPreview(params) {
   return result.rgb[0];
 }
 
+const defaultGraphDocument = {
+  format: { gauge: '35mm', iso: 250 },
+  graph: createDefaultEffectGraph(createHalationPreset('tungsten-800'), 0x12345678),
+};
+
+function renderFilm24MP() {
+  const geometry = streamFilmGeometry(WIDTH, HEIGHT, defaultGraphDocument, {
+    componentSize: 16,
+    deviceMemoryGB: DEVICE_MEMORY_GB,
+    memoryMode: 'auto',
+    quality: 'fast',
+  });
+  let checksum = 0;
+  let peak = memoryMB();
+  const nodeTimings = {};
+  for (const band of geometry.bands) {
+    const source = makeBand(WIDTH, band.start, band.end);
+    const result = processTiledFilmWithTrc(source, defaultGraphDocument, LINEAR_TRC, {
+      tileThreshold: Number.MAX_SAFE_INTEGER,
+      fullWidth: WIDTH,
+      fullHeight: HEIGHT,
+      originY: band.start,
+      quality: 'fast',
+      seed: 0x12345678,
+    });
+    for (const node of result.stats?.nodes ?? []) {
+      nodeTimings[node.type] = (nodeTimings[node.type] ?? 0) + node.elapsedMs;
+    }
+    const firstSampleY = band.y0 + ((17 - (band.y0 % 17)) % 17);
+    for (let absoluteY = firstSampleY; absoluteY < band.y1; absoluteY += 17) {
+      const y = absoluteY - band.start;
+      const p = (y * WIDTH + ((absoluteY * 101) % WIDTH)) * 3;
+      checksum = (checksum + Math.round(result.rgb[p] * 1e6)) >>> 0;
+    }
+    const current = memoryMB();
+    peak = { rss: Math.max(peak.rss, current.rss), arrayBuffers: Math.max(peak.arrayBuffers, current.arrayBuffers) };
+  }
+  return { checksum, peak, bands: geometry.bands.length, memoryMode: geometry.memoryMode, nodeTimings };
+}
+
+function renderFilmPreview() {
+  const width = 1024;
+  const height = 683;
+  const source = makeBand(width, 0, height);
+  const result = processTiledFilmWithTrc(source, defaultGraphDocument, LINEAR_TRC, {
+    tileThreshold: Number.MAX_SAFE_INTEGER,
+    fullWidth: WIDTH,
+    fullHeight: HEIGHT,
+    previewScale: width / WIDTH,
+    quality: 'fast',
+    seed: 0x12345678,
+  });
+  return result.rgb[0];
+}
+
 async function measure(label, render, warmups = WARMUPS, runs = RUNS) {
   for (let i = 0; i < warmups; i++) render();
   const timings = [];
@@ -98,6 +157,7 @@ async function measure(label, render, warmups = WARMUPS, runs = RUNS) {
   let checksum = 0;
   let bands = 1;
   let memoryMode = 'n/a';
+  const nodeSamples = {};
   for (let i = 0; i < runs; i++) {
     if (global.gc) global.gc();
     const started = performance.now();
@@ -106,6 +166,9 @@ async function measure(label, render, warmups = WARMUPS, runs = RUNS) {
     checksum = typeof result === 'number' ? result : result.checksum;
     bands = typeof result === 'number' ? 1 : result.bands;
     memoryMode = typeof result === 'number' ? 'n/a' : result.memoryMode;
+    for (const [type, value] of Object.entries(result?.nodeTimings ?? {})) {
+      (nodeSamples[type] ??= []).push(value);
+    }
     if (result.peak) peak = { rss: Math.max(peak.rss, result.peak.rss), arrayBuffers: Math.max(peak.arrayBuffers, result.peak.arrayBuffers) };
   }
   const summary = {
@@ -120,6 +183,11 @@ async function measure(label, render, warmups = WARMUPS, runs = RUNS) {
     checksum,
     bands,
     memoryMode,
+    nodeTimingsMs: Object.fromEntries(Object.entries(nodeSamples).map(([type, values]) => [type, {
+      samples: values.map((value) => Math.round(value * 10) / 10),
+      p50: Math.round(percentile(values, 0.5) * 10) / 10,
+      p95: Math.round(percentile(values, 0.95) * 10) / 10,
+    }])),
   };
   console.log(`${label}: P50=${summary.p50Ms}ms P95=${summary.p95Ms}ms peakRSS=${summary.peakRssMB}MB`);
   return summary;
@@ -131,6 +199,7 @@ const defaultParams = createHalationParams({
   diffusionMode: 'fast',
 });
 const previewParams = createHalationParams({ ...defaultParams, sigma: defaultParams.sigma * (1024 / WIDTH) });
+/** @type {any} */
 const report = {
   generatedAt: new Date().toISOString(),
   node: process.version,
@@ -138,10 +207,16 @@ const report = {
   cpu: process.env.PROCESSOR_IDENTIFIER ?? 'unknown',
   backend: getWasmBackendStatus(),
   protocol: { warmups: WARMUPS, runs: RUNS, size: `${WIDTH}x${HEIGHT}`, componentSize: 16, deviceMemoryGB: DEVICE_MEMORY_GB },
-  apply24MP: await measure('24MP streamed fast', () => render24MP(defaultParams)),
-  preview1024: await measure('1024px preview fast', () => renderPreview(previewParams)),
 };
+if (SUITE === 'all' || SUITE === 'legacy') {
+  report.apply24MP = await measure('24MP streamed fast', () => render24MP(defaultParams));
+  report.preview1024 = await measure('1024px preview fast', () => renderPreview(previewParams));
+}
+if (SUITE === 'all' || SUITE === 'v16') {
+  report.v16Apply24MP = await measure('24MP V1.6 graph fast', renderFilm24MP);
+  report.v16Preview1024 = await measure('1024px V1.6 graph fast', renderFilmPreview);
+}
 
-const out = new URL('../performance-data.json', import.meta.url);
+const out = process.env.FILM_BENCH_OUTPUT || fileURLToPath(new URL('../performance-data.json', import.meta.url));
 writeFileSync(out, JSON.stringify(report, null, 2) + '\n', 'utf8');
-console.log(`report: ${out.pathname}`);
+console.log(`report: ${typeof out === 'string' ? out : out.pathname}`);

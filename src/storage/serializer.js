@@ -1,54 +1,37 @@
 // @ts-nocheck
-/** Film Halation schema v2：确定性序列化、严格迁移与未来效果图基础。 */
-import { createHalationParams, validateParams, DEFAULT_PARAMS, ENGINE_VERSION } from '../core/index.js';
+/** Film Emulation schema v2: deterministic graph serialization and strict migration. */
+import { DEFAULT_PARAMS, createHalationParams, validateParams } from '../core/params.js';
+import { ENGINE_VERSION, FILM_GRAPH_VERSION } from '../core/film.js';
+import {
+  createDefaultEffectGraph,
+  graphMinimumEngineVersion,
+  normalizeEffectGraph,
+} from '../core/effectRegistry.js';
+import { createFilmResolutionParams } from '../core/resolution.js';
+import { createGrainParams } from '../core/grain.js';
+import { DEFAULT_FILM_FORMAT, GAUGES, normalizeFilmFormat } from '../core/format.js';
 
 export const PLUGIN_NAME = 'FilmHalation';
 export const LEGACY_PLUGIN_NAME = 'FilmLab';
 export const SCHEMA_VERSION = 2;
-export const DEFAULT_FORMAT = Object.freeze({ gauge: '35mm', iso: 250 });
-export const GAUGES = Object.freeze(['8mm', '16mm', '35mm', '65mm']);
+export const DEFAULT_FORMAT = DEFAULT_FILM_FORMAT;
 
 export const PARAM_KEY_ORDER = Object.freeze([
-  'strength',
-  'sigma',
-  'sigmaUnits',
-  'threshold',
-  'thresholdUnits',
-  'thresholdSoftness',
-  'sourceSoftness',
-  'backgroundSoftness',
-  'smoothness',
-  'backgroundThreshold',
-  'sourceImpact',
-  'amplify',
-  'sourceExpansion',
-  'redTail',
-  'blueCompensation',
-  'colorDensity',
-  'sourceInteriorProtection',
-  'hotSourceThreshold',
-  'hotCoreStrength',
-  'globalSourceThreshold',
-  'spectralSensitivity',
-  'redLayerThresholdBias',
-  'redshift',
-  'sigmaRatio',
-  'globalDiffusion',
-  'centerAttenuation',
-  'blendMode',
-  'diffusionMode',
-  'extraction',
-  'spillMix',
-  'rolloff',
-  'profile',
+  'strength', 'sigma', 'sigmaUnits', 'threshold', 'thresholdUnits', 'thresholdSoftness',
+  'sourceSoftness', 'backgroundSoftness', 'smoothness', 'backgroundThreshold',
+  'sourceImpact', 'amplify', 'sourceExpansion', 'redTail', 'blueCompensation',
+  'colorDensity', 'sourceInteriorProtection', 'hotSourceThreshold', 'hotCoreStrength',
+  'globalSourceThreshold', 'spectralSensitivity', 'redLayerThresholdBias', 'redshift',
+  'sigmaRatio', 'globalDiffusion', 'centerAttenuation', 'blendMode', 'diffusionMode',
+  'extraction', 'spillMix', 'rolloff', 'profile',
 ]);
+export const RESOLUTION_PARAM_KEY_ORDER = Object.freeze(['amount', 'response', 'toeLoss', 'shoulderLoss', 'profile']);
+export const GRAIN_PARAM_KEY_ORDER = Object.freeze(['amount', 'size', 'roughness', 'chroma', 'profile', 'mode', 'seedMode', 'seed']);
 
-const isFiniteNumber = (v) => typeof v === 'number' && Number.isFinite(v);
-
-function orderedParams(params) {
-  const validated = validateParams(params);
+function orderedParams(params, keys, validate) {
+  const validated = validate(params);
   const ordered = {};
-  for (const key of PARAM_KEY_ORDER) {
+  for (const key of keys) {
     const value = validated[key];
     ordered[key] = Array.isArray(value) ? [...value] : value;
   }
@@ -65,27 +48,61 @@ function normalizeBinding(binding) {
   return { id, name, token };
 }
 
-function normalizeFormat(format) {
-  const gauge = GAUGES.includes(format?.gauge) ? format.gauge : DEFAULT_FORMAT.gauge;
-  const iso = isFiniteNumber(format?.iso) && format.iso > 0 && format.iso <= 12800 ? format.iso : DEFAULT_FORMAT.iso;
-  return { gauge, iso };
+function orderedNode(node) {
+  if (node.type === 'halation') {
+    return {
+      id: node.id,
+      type: node.type,
+      enabled: node.enabled,
+      params: orderedParams(node.params, PARAM_KEY_ORDER, validateParams),
+    };
+  }
+  if (node.type === 'filmResolution') {
+    return {
+      id: node.id,
+      type: node.type,
+      enabled: node.enabled,
+      params: orderedParams(node.params, RESOLUTION_PARAM_KEY_ORDER, createFilmResolutionParams),
+    };
+  }
+  if (node.type === 'grain') {
+    return {
+      id: node.id,
+      type: node.type,
+      enabled: node.enabled,
+      params: orderedParams(node.params, GRAIN_PARAM_KEY_ORDER, createGrainParams),
+    };
+  }
+  return { id: node.id, type: node.type, enabled: node.enabled, params: { ...node.params } };
 }
 
-/** 构造 schema v2 文档；options 用于宿主层绑定，不污染 HalationParams。 */
+function normalizeGraphForDocument(graph) {
+  return normalizeEffectGraph(graph).map(orderedNode);
+}
+
+function documentEngineVersion(graph) {
+  return graph.some((node) => node.type === 'filmResolution' || node.type === 'grain')
+    ? FILM_GRAPH_VERSION
+    : ENGINE_VERSION;
+}
+
+/** Construct a schema-v2 document. options.graph enables the complete V1.6 graph. */
 export function toDocument(params, options = {}) {
-  return {
-    plugin: PLUGIN_NAME,
-    schemaVersion: SCHEMA_VERSION,
-    engineVersion: ENGINE_VERSION,
-    format: normalizeFormat(options.format),
-    graph: [
-      {
+  const graph = options.graph
+    ? normalizeGraphForDocument(options.graph)
+    : [{
         id: options.nodeId || 'halation-main',
         type: 'halation',
         enabled: options.enabled !== false,
-        params: orderedParams(params),
-      },
-    ],
+        params: orderedParams(params, PARAM_KEY_ORDER, validateParams),
+      }];
+  return {
+    plugin: PLUGIN_NAME,
+    schemaVersion: SCHEMA_VERSION,
+    engineVersion: documentEngineVersion(graph),
+    minimumEngineVersion: graphMinimumEngineVersion(graph),
+    format: normalizeFilmFormat(options.format),
+    graph,
     bindings: {
       sourceLayer: normalizeBinding(options.bindings?.sourceLayer),
       targetLayer: normalizeBinding(options.bindings?.targetLayer),
@@ -94,7 +111,18 @@ export function toDocument(params, options = {}) {
   };
 }
 
-/** 将 v1 effects.halation 文档明确迁移成单节点 graph。 */
+export function toFilmDocument(graph, options = {}) {
+  const halation = graph.find((node) => node.type === 'halation');
+  if (!halation) throw new Error('toFilmDocument: halation node is required');
+  return toDocument(halation.params, { ...options, graph });
+}
+
+export function createDefaultFilmDocument(halationParams, options = {}) {
+  const graph = createDefaultEffectGraph(halationParams ?? DEFAULT_PARAMS, options.seed);
+  return toFilmDocument(graph, options);
+}
+
+/** Convert legacy v1 effects.halation into a Halation-only schema-v2 graph. */
 export function migrateDocument(doc) {
   if (!doc || typeof doc !== 'object') throw new Error('Invalid sidecar document: not an object');
   if (doc.schemaVersion !== undefined) {
@@ -113,47 +141,38 @@ export function migrateDocument(doc) {
   return toDocument(params);
 }
 
-/** 校验并规范化 schema v2。 */
+/** Validate and normalize schema-v2 graph without silently dropping nodes. */
 export function normalizeDocument(doc) {
   const migrated = migrateDocument(doc);
   if (migrated.plugin !== PLUGIN_NAME) throw new Error(`Invalid sidecar document: plugin="${String(migrated.plugin)}"`);
   if (migrated.schemaVersion !== SCHEMA_VERSION) throw new Error(`Invalid schemaVersion: ${String(migrated.schemaVersion)}`);
   if (!Array.isArray(migrated.graph)) throw new Error('Invalid sidecar document: graph must be an array');
-  const unsupported = migrated.graph.find((node) => !node || node.type !== 'halation');
-  if (unsupported) {
-    throw new Error(`Unsupported effect node type in schema v${SCHEMA_VERSION}: ${String(unsupported?.type)}`);
-  }
-  const halationNodes = migrated.graph.filter((node) => node && node.type === 'halation');
-  if (halationNodes.length !== 1) throw new Error('Invalid sidecar document: exactly one halation node is required');
-  const node = halationNodes[0];
-  if (!node.params || typeof node.params !== 'object') throw new Error('Invalid sidecar document: halation params missing');
-  const params = createHalationParams({ ...DEFAULT_PARAMS, ...node.params });
-  const document = toDocument(params, {
-    nodeId: typeof node.id === 'string' && node.id ? node.id : 'halation-main',
-    enabled: node.enabled !== false,
+  const graph = normalizeGraphForDocument(migrated.graph);
+  const halation = graph.find((node) => node.type === 'halation');
+  const document = toFilmDocument(graph, {
     format: migrated.format,
     bindings: migrated.bindings,
     documentFingerprint: migrated.documentFingerprint ?? null,
   });
-  return { params, version: String(SCHEMA_VERSION), document };
+  return { params: halation.params, version: String(SCHEMA_VERSION), document };
 }
 
 export function serializeParams(params, options = {}) {
-  const document = toDocument(params, options);
-  for (const key of ['redshift', 'sigmaRatio']) {
-    if (!document.graph[0].params[key].every(isFiniteNumber)) {
-      throw new TypeError(`serializeParams: ${key} contains NaN/Infinity`);
-    }
-  }
-  return JSON.stringify(document);
+  return JSON.stringify(toDocument(params, options));
+}
+
+export function serializeDocument(document) {
+  return JSON.stringify(normalizeDocument(document).document);
 }
 
 export function parseDocument(json) {
   let doc;
   try {
-    doc = JSON.parse(json.replace(/^\uFEFF/, ''));
+    doc = JSON.parse(String(json).replace(/^\uFEFF/, ''));
   } catch (error) {
     throw new Error(`Invalid sidecar JSON: ${error instanceof Error ? error.message : String(error)}`);
   }
   return normalizeDocument(doc);
 }
+
+export { GAUGES };

@@ -6,7 +6,7 @@ use std::slice;
 
 #[no_mangle]
 pub extern "C" fn film_version() -> u32 {
-    0x01_05_02
+    0x01_06_00
 }
 
 #[no_mangle]
@@ -95,6 +95,116 @@ fn box_once(
             sums[x] += temp[in_row + x];
         }
     }
+}
+
+fn gaussian_radius(sigma: f32) -> usize {
+    if sigma <= 0.0 { 0 } else { (3.0 * sigma).ceil() as usize }
+}
+
+fn gaussian_once(src: &[f32], temp: &mut [f32], dst: &mut [f32], width: usize, height: usize, sigma: f32) {
+    let radius = gaussian_radius(sigma);
+    if radius == 0 { dst.copy_from_slice(src); return; }
+    let denom = 2.0 * sigma * sigma;
+    let mut kernel = vec![0.0_f32; radius * 2 + 1];
+    let mut sum = 0.0_f32;
+    for (index, value) in kernel.iter_mut().enumerate() {
+        let offset = index as isize - radius as isize;
+        *value = (-(offset * offset) as f32 / denom).exp();
+        sum += *value;
+    }
+    for value in &mut kernel { *value /= sum; }
+    for y in 0..height {
+        for x in 0..width {
+            let mut value = 0.0_f32;
+            for (index, weight) in kernel.iter().enumerate() {
+                let sx = (x as isize + index as isize - radius as isize).clamp(0, width as isize - 1) as usize;
+                value += src[y * width + sx] * *weight;
+            }
+            temp[y * width + x] = value;
+        }
+    }
+    for y in 0..height {
+        for x in 0..width {
+            let mut value = 0.0_f32;
+            for (index, weight) in kernel.iter().enumerate() {
+                let sy = (y as isize + index as isize - radius as isize).clamp(0, height as isize - 1) as usize;
+                value += temp[sy * width + x] * *weight;
+            }
+            dst[y * width + x] = value;
+        }
+    }
+}
+
+fn fmix32(mut value: u32) -> u32 {
+    value ^= value >> 16;
+    value = value.wrapping_mul(0x85eb_ca6b);
+    value ^= value >> 13;
+    value = value.wrapping_mul(0xc2b2_ae35);
+    value ^ (value >> 16)
+}
+
+fn gaussian_from_hash(seed: u32, node_hash: u32, x: i32, y: i32, scale: u32, channel: u32) -> f32 {
+    // The tuple prefix is identical for every sample.  Keep the exact fmix32
+    // sequence but evaluate its common portion once per output coordinate.
+    let mut prefix = fmix32(seed ^ 0x9e37_79b9);
+    for word in [node_hash, x as u32, y as u32, scale] {
+        prefix = fmix32(prefix ^ word);
+    }
+    let channel_prefix = fmix32(prefix ^ channel);
+    let mut sum = 0.0_f32;
+    for sample in 0..12 { sum += fmix32(channel_prefix ^ sample) as f32 / 4294967296.0_f32; }
+    sum - 6.0_f32
+}
+
+/// Gaussian blur ABI. The allocation contains source, destination and two scratch planes.
+#[no_mangle]
+pub unsafe extern "C" fn film_gaussian_blur_f32(pointer: *mut f32, pixels: u32, width: u32, height: u32, sigma: f32) -> i32 {
+    if pointer.is_null() || width == 0 || height == 0 || width.checked_mul(height) != Some(pixels) || !sigma.is_finite() || sigma < 0.0 { return -1; }
+    let n = pixels as usize;
+    let all = slice::from_raw_parts_mut(pointer, n * 4);
+    let (source, rest) = all.split_at_mut(n);
+    let (destination, rest) = rest.split_at_mut(n);
+    let (temp_a, _temp_b) = rest.split_at_mut(n);
+    gaussian_once(source, temp_a, destination, width as usize, height as usize, sigma);
+    0
+}
+
+/// Fill a coordinate-addressed twelve-uniform Gaussian field in-place.
+#[no_mangle]
+pub unsafe extern "C" fn film_hash_field_f32(pointer: *mut f32, pixels: u32, width: u32, height: u32, seed: u32, node_hash: u32, origin_x: i32, origin_y: i32, scale: u32, channel: u32) -> i32 {
+    if pointer.is_null() || width == 0 || height == 0 || width.checked_mul(height) != Some(pixels) { return -1; }
+    let output = slice::from_raw_parts_mut(pointer, pixels as usize);
+    for y in 0..height as usize {
+        for x in 0..width as usize {
+            output[y * width as usize + x] = gaussian_from_hash(seed, node_hash, origin_x.wrapping_add(x as i32), origin_y.wrapping_add(y as i32), scale, channel);
+        }
+    }
+    0
+}
+
+/// Apply a precomputed three-channel multiplicative grain field. `rgb` points to
+/// 3*pixels values and `noise` to 3*pixels zero-mean unit-variance values.
+#[no_mangle]
+pub unsafe extern "C" fn film_apply_grain_f32(rgb: *mut f32, noise: *const f32, alpha: *const f32, pixels: u32, amount: f32, iso: f32, profile: u32) -> i32 {
+    if rgb.is_null() || noise.is_null() || pixels == 0 || !amount.is_finite() || !iso.is_finite() || iso <= 0.0 { return -1; }
+    let rgb_slice = slice::from_raw_parts_mut(rgb, pixels as usize * 3);
+    let noise_slice = slice::from_raw_parts(noise, pixels as usize * 3);
+    let alpha_slice = if alpha.is_null() { None } else { Some(slice::from_raw_parts(alpha, pixels as usize)) };
+    for i in 0..pixels as usize {
+        let luminance = (0.2126 * rgb_slice[i * 3] + 0.7152 * rgb_slice[i * 3 + 1] + 0.0722 * rgb_slice[i * 3 + 2]).max(1e-6);
+        let x = (luminance / 0.18).log2();
+        let envelope = if profile == 1 { 0.35 + 0.75 * (-0.5 * ((x - 0.3) / 1.4).powi(2)).exp() } else { 0.42 + 0.58 * (-0.5 * ((x + 0.5) / 2.0).powi(2)).exp() };
+        let sigma_d = 0.085 * amount * (iso / 250.0).sqrt() * envelope;
+        let variance = (std::f32::consts::LN_2 * sigma_d).powi(2);
+        let mix = alpha_slice.map(|values| values[i]).unwrap_or(1.0);
+        for channel in 0..3 {
+            let log_gain = (std::f32::consts::LN_2 * sigma_d * noise_slice[i * 3 + channel] - 0.5 * variance).clamp(-20.0, 20.0);
+            let gain = log_gain.exp();
+            let original = rgb_slice[i * 3 + channel];
+            rgb_slice[i * 3 + channel] = original + mix * (original * gain - original);
+        }
+    }
+    0
 }
 
 /// Run the same three-box Gaussian approximation as the JavaScript fallback.
