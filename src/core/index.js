@@ -32,6 +32,8 @@ export {
   thresholdLinear,
   sigmaPxFor,
   resolveSigmaParams,
+  createHalationPreset,
+  HALATION_PRESET_LABELS,
 } from './params.js';
 export { TRCS, getTRC } from './color/trc.js';
 export { SPACE_TO_SRGB, SRGB_TO_SPACE, applyMatrix3 } from './color/primaries.js';
@@ -39,10 +41,30 @@ export { gaussianKernel1D, blurRowConv, blurColConv, gaussianBlurSep } from './d
 export { boxRadiusForSigma, boxBlurOnce, boxBlur3 } from './diffuse/box.js';
 export { vvCoef, vvGauss } from './diffuse/vv.js';
 export { boxDownsample, bilinearUpsample } from './diffuse/resample.js';
-export { smoothstep, extractHighlights } from './extract.js';
+export {
+  smoothstep,
+  extractHighlights,
+  sourceResponseFor,
+  compressedHighlightResponseFor,
+  reconstructedSourceExposureFor,
+  maxFilterSeparable,
+  WASM_MAX_FILTER_PIXEL_LIMIT,
+  SOURCE_RESPONSE_LIMIT,
+  SOURCE_CLASS_SOFTNESS,
+  SOURCE_CLASS_SOFTNESS_EV,
+  BACKGROUND_LONG_WAVE_R,
+  BACKGROUND_LONG_WAVE_G,
+  RED_LAYER_EXPOSURE_R,
+  RED_LAYER_EXPOSURE_G,
+  RED_LAYER_EXPOSURE_B,
+  spectralHueResponse,
+  RED_LAYER_HUE_RESPONSE,
+  GREEN_LAYER_HUE_RESPONSE,
+  BLUE_LAYER_HUE_RESPONSE,
+} from './extract.js';
 export { channelSigmas, applyRedShift } from './redshift.js';
 export { computeHalo, alphaFor, blend, screenGain } from './composite.js';
-export { makeBlurFn, processHalation, extractStep, diffuseStep, haloStep, blendStep, lowResScale, lobeScale, psfLobesFor, LOWRES_MIN_SIGMA, LOWRES_MAX_SCALE, PSF_LOBES } from './pipeline.js';
+export { makeBlurFn, processHalation, extractStep, diffuseStep, haloStep, blendStep, lowResScale, lobeScale, psfLobesFor, LOWRES_MIN_SIGMA, LOWRES_MAX_SCALE, PSF_LOBES, LOCAL_GATE_RELIEF_GAIN } from './pipeline.js';
 export { ENGINE_VERSION, EFFECT_ORDER, processFilm } from './film.js';
-export { installWasmModule, tryWasmBoxBlur, tryWasmHalation, getWasmBackendStatus, resetWasmBackend } from './wasmBackend.js';
+export { installWasmModule, tryWasmBoxBlur, tryWasmMaxFilter, tryWasmHalation, getWasmBackendStatus, resetWasmBackend } from './wasmBackend.js';
 export { blueNoise, BLUE_NOISE_SIZE } from './dither.js';

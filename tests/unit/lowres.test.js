@@ -4,7 +4,7 @@
  *
  * 注意：参考实现必须与 diffuseStep 完全同构（含 redshift 增益）——
  * plane = blur(field)·redshift[c]，逐通道比较。
- * 真实输入是稀疏的（W = S·Y/threshold，背景被 S 掩码清零），
+ * 真实输入是稀疏的（W = S·曝光档位响应，背景被 S 掩码清零），
  * 本测试用 extractStep 产出的真实 W 场标定误差。
  */
 import { test } from 'node:test';
@@ -22,7 +22,7 @@ import {
 import { gaussianBlurSep } from '../../src/core/diffuse/conv.js';
 import { boxBlur3, boxRadiusForSigma } from '../../src/core/diffuse/box.js';
 
-test('lowResScale: Fast/Quality 共用双瓣多尺度，只改变保守阈值', () => {
+test('lowResScale: Fast/Quality 共用三瓣多尺度，只改变保守阈值', () => {
   const q = (sigma) => createHalationParams({ diffusionMode: 'quality', sigma });
   const f = (sigma) => createHalationParams({ diffusionMode: 'fast', sigma });
   assert.equal(lowResScale(f(48), 48), 8, 'fast 宽尾 scale 8');
@@ -81,19 +81,21 @@ test('low-res diffuse ≈ 全分辨率卷积（真实稀疏 W 场，σ=48, scale
   const field = makeSparseField(W, H);
   const P = createHalationParams({ strength: 100, diffusionMode: 'quality', sigma: 48 });
   const { plane } = diffuseStep(field, W, H, P);
-  // 全分辨率参考：双瓣高斯逐通道 + 同构 redshift 增益（与 diffuseStep 完全同构）
+  // 全分辨率参考：三瓣高斯逐通道 + 同构 redshift 增益（与 diffuseStep 完全同构）
   const ref = new Float32Array(n * 3);
   const tempA = new Float32Array(n);
   const tempB = new Float32Array(n);
   const rs = P.redshift;
   const sigmas = [48, 48 * 0.85, 48 * 0.7];
-  const [core, tail] = PSF_LOBES;
   for (let c = 0; c < 3; c++) {
     const dst = ref.subarray(c * n, (c + 1) * n);
     const sig = sigmas[c];
-    gaussianBlurSep(field, dst, tempA, tempB, W, H, sig * core.sigmaRatio);
-    gaussianBlurSep(field, tempB, tempA, tempB, W, H, sig * tail.sigmaRatio);
-    for (let i = 0; i < n; i++) dst[i] = dst[i] * core.weight + tempB[i] * tail.weight;
+    dst.fill(0);
+    for (const lobe of PSF_LOBES) {
+      const lobeOut = new Float32Array(n);
+      gaussianBlurSep(field, lobeOut, tempA, tempB, W, H, sig * lobe.sigmaRatio);
+      for (let i = 0; i < n; i++) dst[i] += lobeOut[i] * lobe.weight;
+    }
     for (let i = 0; i < n; i++) dst[i] *= rs[c];
   }
   let l2 = 0;

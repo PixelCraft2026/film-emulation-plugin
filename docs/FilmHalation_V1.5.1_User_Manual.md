@@ -1,0 +1,873 @@
+# Film Halation V1.5.1 用户手册
+
+状态：当前实现说明  
+适用版本：Film Halation 1.5.1  
+Photoshop 最低版本：23.3  
+最后核对：2026-08-23
+
+## 1. 插件用途与边界
+
+Film Halation 模拟胶片乳剂内部散射、片基层回射以及缺少防光晕层时形成的红橙色光晕。它不是通用 Glow/Bloom，也不是完整的胶片色彩配置。
+
+- 输入图像应当已经完成 RAW 解码、曝光调整和 Photoshop 颜色预设。
+- 插件只处理 Halation 的光学/乳剂效果，不复制任何第三方代码、参数或资产。
+- `Tungsten 800 No-Remjet` 只描述无 Remjet 胶片的视觉方向，不是 CineStill 官方预设。
+- 当前输入必须是 RGB 像素层。智能对象、文字、调整层和组需要先进入内容或栅格化。
+- Apply 创建或更新独立效果像素层，绑定的源图层不会被写入。
+
+## 2. 推荐工作流程
+
+1. 在 Photoshop 中选中未经本插件处理的原始像素层。
+2. 打开插件，先选择一个预设。
+3. 先调 `Threshold`、`Strong Source Level`，决定哪些光源参与以及哪些属于强光。
+4. 再调 `Sigma`、`PSF Smoothness`、`Red Tail`，决定光晕的空间形状。
+5. 再调 `Halation Amplify`、`Strength`、`Halation Color Density`，决定能量、总量和红色浓度。
+6. 必要时用 `Background Threshold`、`Blue Compensation`、`Global Red Diffusion` 修正环境适应性。
+7. 在面板预览确认总体方向后点击 Apply，在 Photoshop 画布 100% 缩放下检查最终结果。
+
+如果文档曾保存过旧参数，Reload 插件不会自动覆盖它们。若要强制载入新版预设值，先切换到另一个预设，再重新选择目标预设。
+
+## 3. 算法 Pipeline 总览
+
+```text
+Photoshop 编码 RGBA
+        ↓
+识别文档 TRC 与 RGB primaries
+        ↓
+解码到线性光，并转换到 canonical linear sRGB primaries
+        ↓
+高光提取：luma / spill、Red-Layer Threshold Bias、Threshold、Source Softness
+        ↓
+曝光重建：Source Impact、Strong Source Level
+        ↓
+光谱分层：Hue Response → 红层、绿层、残余蓝层源场
+        ↓
+强种子邻域扩张：Strong Source Expansion
+        ↓
+PSF 前能量缩放：Halation Amplify
+        ↓
+局部承载背景门控：Background Threshold、Background Softness、Blue Compensation
+        ↓
+三瓣多尺度 PSF：Sigma、PSF Smoothness、Red Tail、Sigma Ratio
+        ↓
+通道能量增益：Red Shift R/G/B
+        ↓
+局部光晕：Center Attenuation、Strong Core、Source Interior Protection
+        ↓
+独立宽红层：Global Source Level、Global Red Diffusion
+        ↓
+HDR 安全合成：Strength、Blend Mode、Halation Color Density
+        ↓
+转换回文档 RGB primaries 与 TRC 编码
+        ↓
+输出软肩：Highlight Rolloff
+        ↓
+8/16 位抖动量化或 32 位浮点写回
+        ↓
+保留原 alpha，写入独立效果层
+```
+
+### 3.1 色彩与透明度
+
+插件不会直接在显示编码的 RGB 数值上模糊。它先解码 TRC，再把 sRGB、Display P3、Adobe RGB、ProPhoto RGB 或 Rec.2020 转换到统一的线性 sRGB primaries。算法完成后再转换回文档工作空间。
+
+这一步很重要：Halation 是光能扩散，必须在线性域计算。若直接在 gamma 编码值上模糊，暗部会被错误抬升，光晕强度和颜色也会随文档色域变化。
+
+- 面板底图最长边为 1024px，并以 sRGB 显示。
+- 光源提取使用最长边 2048px 的高分辨率代理，再把提取后的能量场降到 1024px 扩散。
+- Apply 在源图层分辨率处理。
+- 完全透明像素不产生光晕；半透明像素按 alpha 比例贡献光能。
+- 输出 alpha 原样保留。
+
+### 3.2 高光提取与曝光重建
+
+在线性 RGB 中，亮度近似为：
+
+```text
+Y = 0.2126R + 0.7152G + 0.0722B
+M = max(R, G, B)
+```
+
+`luma (Y)` 使用 Y；`spill (max RGB)` 按 `Spill Mix` 在 Y 与 M 之间混合，形成亮度曝光场 E。插件同时构造深红层曝光 `ER=0.82R+0.16G+0.02B`。两条路径分别完成阈值、曝光响应和发光体色谱资格判断后，由 `Red-Layer Threshold Bias` 连续混合：
+
+```text
+BrightnessSource = Gate(E) × Response(E)
+RedLayerSource   = Gate(ER) × Response(ER) × RedEmitterConfidence
+Source           = (1-w) × BrightnessSource + w × RedLayerSource
+```
+
+其中 w 为滑块值。`w=0` 完整保留原有亮度提取；`w=1` 完全依据红层曝光和发光体置信度；中间值平滑过渡。随后源场乘以 alpha。
+
+为了让被限制在 0–1 的 8/16 位高光仍有足够动态范围，插件把阈值 T 到数字白点 1 重建为强光坐标 U：
+
+```text
+T < E ≤ 1 : U = (E-T)/(1-T)
+E > 1     : U = 1 + log2(E)
+T ≥ 1     : U = max(0, log2(E/T))
+```
+
+因此 clipped white 的 U 仍为 1，而刚刚越过阈值的窗户仍接近 0。`Source Impact` 再以 `1 + 1.5×Impact` 的指数拉开弱光和强光。
+
+### 3.3 光谱源场
+
+插件分别建立深红层、绿/橙核芯层和弱蓝残余层。基础长波源偏重 R/G，B 对红层的直接贡献很低；`Hue Response` 再根据光源色相和色纯度调整响应。饱和度低于 0.35 的冷白光保持原始响应，0.35–0.80 之间平滑过渡，达到 0.80 后才完整使用严格色相曲线。
+
+严格 Hue Response 下的大致顺序为：
+
+```text
+暖白、红、黄：高响应
+品红：中高响应
+绿：较弱响应
+青、蓝：接近零
+中性灰轴：保持中性光响应
+```
+
+因此“蓝天中的白灯”“略偏冷的白灯”和“纯蓝 LED”会得到不同判断：前两者可以形成红晕，只有高色纯度的蓝/青 LED 被严格拒绝。
+
+### 3.4 强种子邻域扩张
+
+真实照片中的灯芯通常已经带有镜头 glow、衍射或传感器高光扩散。只提取最亮像素会得到很细、很弱的红边。`Strong Source Expansion` 使用迟滞式两级判断：
+
+1. 只有通过 Hue Response 且达到 `Strong Source Level` 的长波强光才能成为种子。
+2. 种子在一个与 Sigma 成比例的邻域内寻找较低阈值候选。
+3. 每个候选还会按自身色纯度复核：邻近的白色、暖色或低饱和冷白光学 glow 可以被吸收到 Halation 源场，高饱和蓝/青像素会被拒绝。
+4. 孤立弱窗、纯蓝灯和纯青灯不能自行成为扩张种子，也不能仅因旁边存在白光种子而继承红层许可。
+5. 内部保护开启时，只有“种子合格且候选复核合格”的许可会保留，使灯芯外已有的 optical glow 连续进入红晕，同时保护真实光源本体颜色。
+
+这与简单降低 Threshold 不同：降低 Threshold 会让整片弱光参与；Source Expansion 只扩大合格强光周围的源体。
+
+### 3.5 三瓣 PSF
+
+每个光谱源场都使用 core、shoulder、tail 三个高斯瓣：
+
+```text
+PSF(x) = wc·G(σc) + ws·G(σs) + wt·G(σt)
+wc + ws + wt = 1
+```
+
+默认附近的形态约为：
+
+```text
+core     : 0.617 · G(0.235σ)
+shoulder : 0.282 · G(0.6575σ)
+tail     : 0.101 · G(1.4325σ)
+```
+
+`PSF Smoothness` 会连续改变三瓣的权重和半径。`Red Tail` 只把深红层的一部分 core 能量重新分配到更宽的 shoulder/tail，并在最后重新归一化；绿层仍保持较窄，所以近源偏橙，远端逐渐转红。
+
+窄 core 始终全分辨率。较宽的 shoulder/tail 会根据有效 sigma 自动在 1/2、1/4 或 1/8 分辨率计算，再中心对齐上采样。
+
+### 3.6 局部光晕与全局红层
+
+局部光晕近似为：
+
+```text
+Local Halo = max(Diffused Source - Attenuation × Source, 0) × Background Gate
+```
+
+`Center Attenuation` 决定从扩散结果中扣除多少原始光源中心。`Strong Core` 会只对被 `Strong Source Level` 分类为强光的区域降低这项扣除，让强光保持扎实核芯，而弱窗仍然收敛。
+
+`Source Interior Protection` 另有一条自适应路径：源场局部占用率和较宽的环境亮度共同区分“大面积亮反射面”与“黑夜中的紧凑灯芯”。白衣、灯箱等连续亮面以及实际灯芯本体仍只保留越过外轮廓的残差；暗环境中经复核的低阈值 optical glow 会局部放开保护，使原始光学 glow 与外缘红晕保持连续。明亮、高饱和蓝/青 LED 还有目标侧保护，不会被附近其他白灯的红晕覆盖成紫红色；较暗蓝天不会触发该保护，白灯仍能在蓝天背景上形成红晕。
+
+`Global Red Diffusion` 是另一条独立路径。它只接收超过 `Global Source Level` 的强光，以 `max(12px, 4×Sigma)` 的宽半径扩散，并主要落在中间调区域。密集源采用软饱和聚合，避免窗户阵列无限叠加成红雾。
+
+### 3.7 合成与输出
+
+最终效果量为：
+
+```text
+α = Strength / 100 × 2
+```
+
+Additive 直接增加正光能。Screen 在 0–1 范围按剩余高光余量增加，在 HDR >1 时使用正的递减增益，禁止把原始高光反向变暗。
+
+`Halation Color Density` 只根据红层相对绿/蓝的正超额能量生成橙红色度覆盖。它保护白色灯芯；若色度调整会降低线性亮度，算法会补回中性亮度。因此该参数本身不会制造暗环。
+
+输出先转换回文档 RGB primaries 并按文档 TRC 编码。`Highlight Rolloff` 非零时在编码域、写回前主动压缩接近 1 和超过 1 的值。8/16 位随后使用确定性零均值抖动量化；32 位保留浮点值。
+
+## 4. 预设说明
+
+### 4.1 Neutral / Legacy
+
+克制但可见的通用 Halation。Sigma 随画面对角线缩放，使用较高光源门槛、窄范围 Source Expansion、短红尾和近乎关闭的 Global Diffusion；它优先保护光源本体和高纯度蓝/青 LED，避免城市窗户阵列累积成红雾，也不追求 No-Remjet 的浓重深红尾。
+
+适合：
+
+- 普通夜景和城市灯光；
+- 不希望画面出现大片深红尾部；
+- 作为手动调参的起点；
+- 已有较强色彩风格、只需增加适度物理质感的照片。
+
+### 4.2 Tungsten 800 No-Remjet
+
+高能量、强种子扩张、强红层长尾和较高色密度的实验性物理预设。目标形态是“白芯—橙红肩—深红尾”。
+
+适合：
+
+- 钨丝灯、路灯、灯牌等夜景强光；
+- 希望获得类似无 Remjet 胶片的浓郁红晕；
+- 蓝天、青色暮光背景中的白色强光；
+- 强光突出、弱窗需要保持收敛的城市照片。
+
+### 4.3 Custom
+
+`Custom` 不是一套可加载的固定参数。只要用户修改了当前预设中的任一参数，面板就用 Custom 标记当前状态。
+
+### 4.4 当前预设参数对照
+
+| 参数 | Neutral / Legacy | Tungsten 800 No-Remjet |
+|---|---:|---:|
+| Strength | 68 | 82 |
+| Sigma | 3.6 diagonal units | 5.2 diagonal units |
+| Threshold | 0.74 linear | 0.86 linear |
+| Red-Layer Threshold Bias | 0.00 | 0.00 |
+| Source Softness | 0.04 | 0.03 |
+| Background Softness | 0.10 | 0.24 |
+| PSF Smoothness | 0.14 | 0.14 |
+| Background Threshold | 0.36 | 0.48 |
+| Source Impact | 0.88 | 1.00 |
+| Halation Amplify | 1.65 | 2.20 |
+| Strong Source Expansion | 0.16 | 0.85 |
+| Red Tail | 0.28 | 0.80 |
+| Blue Compensation | 0.35 | 0.90 |
+| Halation Color Density | 0.045 | 0.68 |
+| Source Interior Protection | 1.00 | 0.00 |
+| Strong Source Level | 0.42 | 0.45 |
+| Strong Core | 0.62 | 0.90 |
+| Global Source Level | 1.05 | 0.78 |
+| Hue Response | 1.00 | 1.00 |
+| Red Shift R/G/B | 1.08 / 0.10 / 0.01 | 1.25 / 0.12 / 0.00 |
+| Sigma Ratio R/G/B | 1.05 / 0.50 / 0.28 | 1.15 / 0.42 / 0.18 |
+| Global Red Diffusion | 0.008 | 0.05 |
+| Center Attenuation | 0.45 | 0.35 |
+| Blend Mode | additive | additive |
+| Diffusion | fast | fast |
+| Highlight Extraction | spill | spill |
+| Spill Mix | 0.55 | 0.70 |
+| Highlight Rolloff | 0 | 0 |
+
+`5.2 diagonal units` 在当前实现中表示对角线的 5.2‰，即 0.52%，不是 5.2%。
+
+## 5. 每个参数的详细说明
+
+以下顺序按照算法 pipeline 分组，而不是完全照搬面板排列顺序。
+
+### 5.1 Preset
+
+类型：`Neutral / Legacy`、`Tungsten 800 No-Remjet`、`Custom`。
+
+- 选择内置预设会一次性载入完整参数组合。
+- 修改任一参数后状态变为 Custom。
+- 切换回内置预设会覆盖当前 Custom 数值。
+- 文档保存的旧参数优先于新版内置值；需要重新选择预设才能刷新。
+
+### 5.2 Strength
+
+范围：0–100。阶段：最终合成。
+
+- 0：输出与输入一致，关闭最终 Halation。
+- 调大：按比例提高所有已生成局部/全局光晕的最终混合量。
+- 不改变：哪些像素被提取、PSF 形状、强弱光分类。
+- 与 `Halation Amplify` 的区别：Strength 是最后的输出 Impact；Amplify 在 PSF 之前改变乳剂返回能量，可能进一步影响色密度和空间可见性。
+
+建议先用 Amplify 把光晕形态调正确，再用 Strength 做最终总量微调。
+
+### 5.3 Threshold Units
+
+类型：`linear` 或 `stops (EV)`。阶段：高光提取与背景门控。
+
+- linear：Threshold 直接表示线性亮度值。
+- stops：换算公式为 `T = 0.18 × 2^EV`。
+- EV 示例：-2 = 0.045，0 = 0.18，+1 = 0.36，+2 = 0.72。
+- 切换单位时，当前 Threshold 和 Background Threshold 数字不会自动换算，必须重新调整。
+
+### 5.4 Highlight Extraction
+
+类型：`luma (Y)` 或 `spill (max RGB)`。阶段：高光提取。
+
+`luma (Y)`：
+
+- 依据感知亮度选择光源；
+- 对白灯和中性高光稳定；
+- 高饱和红、蓝霓虹可能因为亮度 Y 较低而较难进入。
+
+`spill (max RGB)`：
+
+- 允许最亮单通道参与；
+- 更容易提取红色灯牌、饱和霓虹和单通道接近剪切的高光；
+- 必须配合 Hue Response，避免蓝/青数字光源错误产生红晕。
+
+### 5.5 Spill Mix
+
+范围：0–1。仅在 Highlight Extraction=`spill` 时生效。
+
+- 0：等价于纯 luma。
+- 1：完全使用 max RGB。
+- 调大：饱和单色光源更容易进入；红色招牌通常更明显。
+- 过大副作用：彩色反射、彩灯和传感器单通道噪点也更容易被选中。
+
+一般建议从 0.4–0.7 开始，并与 Hue Response 联动。
+
+### 5.5a Red-Layer Threshold Bias
+
+范围：0–1。阶段：两条高光源场完成各自阈值和曝光响应之后、进入光谱分层之前。
+
+- 0：完全参考 `BrightnessGate(E)`，逐值保留原有 luma/maxRGB 提取；旧文档缺少该字段时使用此值。
+- 0.25–0.50：轻度向红层曝光倾斜，红/橙灯牌更容易进入，但整体仍接近旧版外观。
+- 0.60–0.85：明显强调长波发光体，适合希望获得更强红敏感乳剂倾向的夜景。
+- 1：完全参考 `RedLayerGate(ER) × RedEmitterConfidence`。深红、橙红和钨丝光按深红层曝光判断；高饱和蓝/青 LED 的置信度趋近零。
+
+这不是 R 通道硬阈值。低饱和冷白光的 `RedEmitterConfidence` 保持 1，因此仍可正常产生 Halation；只有高色纯度的蓝/青发光体会随滑块向右而被更严格抑制。中性白的 E 与 ER 标尺一致，所以两端不会产生无理由的白光强度跳变。
+
+调整该滑块会把当前状态标记为 `Custom`。建议先确定倾向，再调整 Threshold 和 Source Impact，因为它会同时影响基础源场、Strong Source 与 Global Source 的曝光坐标。此前短期版本保存的 `legacy` 开关自动迁移为 0，`red-layer` 自动迁移为 1。
+
+### 5.6 Threshold
+
+范围：linear 0–1；stops 界面范围 -4–+4 EV。阶段：高光提取。
+
+- 调低：更多中等亮度、窗户、反射和灯光进入；画面更容易形成连续红雾。
+- 调高：只保留更亮的灯芯；弱光收敛，但可能只剩很细的高光点。
+- 它决定“谁能参与”，不直接决定最终光晕有多红或多宽。
+
+如果强灯不够明显但弱窗已经很多，不要继续降低 Threshold；优先提高 Amplify、Source Expansion 或 Strong Core。
+
+### 5.7 Source Softness
+
+范围：0–1。阶段：高光提取边缘。
+
+- 0：精确阶跃，Threshold 以下不参与、以上立即参与。
+- 调大：阈值附近的过渡更宽，光源遮罩边缘更柔和。
+- 过小：可能出现硬圈、量化敏感或参数轻微变化时效果突然跳变。
+- 过大：大量临界亮度区域逐渐参与，弱光容易连接成雾。
+
+它只软化光源提取，不改变 PSF 模糊半径。
+
+### 5.8 Source Impact
+
+范围：0–1。阶段：曝光响应。
+
+内部指数为 `1 + 1.5×Source Impact`。
+
+- 调低：阈值以上的弱光和强光响应更接近线性，更多普通窗户可见。
+- 调高：弱源被相对压低，最亮光源更突出。
+- 1：最强的强弱光非线性分离，适合灯牌和 clipped white。
+
+如果出现“所有窗户强度差不多”，提高 Source Impact；如果只有最亮灯芯有反应，适当降低。
+
+### 5.9 Hue Response
+
+范围：0–1。阶段：光谱源场。
+
+- 0：V1.5 兼容矩阵，不进行严格的饱和色相选择。
+- 调大：暖白、红、黄响应增强；绿减弱；青和蓝逐渐被抑制。
+- 1：完整光谱近似，纯蓝/青发光体对红层接近零。
+- 中性白光和略偏冷的低饱和白光不因 Hue Response=1 而被拒绝；只有高色纯度光源进入色相抑制。
+
+如果纯蓝 LED 出现红晕，提高 Hue Response。若希望蓝紫霓虹也产生风格化红边，可降低，但这不再是严格物理模式。
+
+### 5.10 Strong Source Level
+
+范围：0–4。阶段：强光分类。
+
+它在重建坐标 U 上工作，而不是直接使用原始 RGB：
+
+- 调低：更多高光被视为强源；Strong Core 和 Source Expansion 更容易启动。
+- 调高：只有最亮、接近白点或 HDR 的光源成为强源。
+- 8/16 位 clipped white 的 U=1，因此 Level 小于 1 时仍可被识别。
+
+Strong Source Level 不决定高光是否进入基础源场；那是 Threshold 的职责。
+
+### 5.11 Strong Source Expansion
+
+范围：0–1。阶段：强种子邻域扩张。
+
+- 0：关闭迟滞扩张，只使用原始阈值源。
+- 调大：强光周围已有的白色/暖色镜头 glow 被纳入 Halation，肩部更厚、更有冲击感。
+- 只允许通过 Hue Response 的强种子扩张，纯蓝/青灯不会因此恢复红晕。
+- 保护开启时，强种子许可会沿扩张支持场传播，使略偏冷路灯的灯芯和外围 glow 不出现空心断层。
+- 扩张半径与 Sigma 成比例；Sigma 越大，同一个 Expansion 的空间影响也越大。
+- 过大：大型灯牌或相邻强灯可能融合，局部出现大片红块。
+
+如果高亮只出现细红线而没有扎实肩部，提高它；如果弱窗连成片，先提高 Strong Source Level，而不是只降低 Expansion。
+
+### 5.12 Halation Amplify
+
+范围：0–4。阶段：PSF 之前的乳剂返回能量。
+
+- 0：关闭返回源能量。
+- 1：兼容能量。
+- 大于 1：优先放大红层；绿层和蓝层按较弱比例增加，避免变成白色 Bloom。
+- 调大不仅使结果更亮，也会让 Color Density 的非线性遮罩更容易达到较高覆盖。
+- 过大：红通道可能在 8/16 位输出中剪切，灯周形成纯红实块。
+
+Strength 与 Amplify 都会增强效果，但推荐把 Amplify 用于建立“乳剂能量感”，把 Strength 用于最后总量。
+
+### 5.13 Background Threshold
+
+范围：与 Threshold Units 相同。阶段：局部承载背景门控。
+
+局部门控主要查看背景长波占用 `0.82R+0.18G`：
+
+- 调低：更多背景被判断为已经较亮/长波饱和，局部 Halation 更受抑制。
+- 调高：更多背景允许承载红晕，亮部和中间调周围效果增加。
+- 它不会改变光源本身是否被提取。
+
+如果暗天空的红晕正常、但建筑亮表面完全看不到效果，可适当提高；如果整片暖色墙面泛红，应降低。
+
+### 5.14 Background Softness
+
+范围：0–1。阶段：局部承载背景门控。
+
+- 0：背景门控接近硬切换。
+- 调大：从允许 Halation 到抑制 Halation 的过渡更渐进。
+- 过小：亮暗背景交界处可能出现门控边界。
+- 过大：门控影响范围变宽，可能使红晕在大面积背景上显得平淡。
+
+它与 Source Softness 完全独立：前者控制承载背景，后者控制发光源。
+
+### 5.15 Blue Compensation
+
+范围：0–1。阶段：局部门控和色密度合成。
+
+- 0：只依据长波背景余量。
+- 调大：白色/暖色光源在蓝天、青色暮光和冷色建筑背景上的红晕更容易显现。
+- 它不会取消 Hue Response 对纯蓝/青发光体的拒绝。
+- 同时会适度提高冷背景上的 Color Density 能量。
+- 过大：冷色背景上的红晕可能比暖背景更抢眼。
+
+“蓝色背景中的白灯无红晕”应提高本参数；“纯蓝灯出现红晕”应提高 Hue Response，而不是降低 Blue Compensation。
+
+### 5.16 Sigma Units
+
+类型：`pixels` 或 `% of diagonal`。阶段：空间尺度换算。
+
+`pixels`：
+
+- Sigma 直接表示源文档像素；
+- 在不同分辨率照片上视觉比例会变化；
+- 适合固定尺寸输出或精确像素调试。
+
+`% of diagonal`：
+
+- 当前实际公式为 `sigmaPixels = Sigma / 1000 × imageDiagonal`；
+- 因而数值 1 表示对角线的 0.1%，5.2 表示 0.52%；
+- 更适合跨分辨率照片保持相似视觉比例。
+
+切换单位不会自动把当前 Sigma 数字换算成等效值，需要重新调整。
+
+### 5.17 Sigma
+
+范围：pixels 模式 0.5–50；diagonal 模式 0.1–10。阶段：PSF 基准半径。
+
+- 调小：紧贴光源的细边、核芯更集中。
+- 调大：肩部和尾部扩散更远。
+- 它还影响 Strong Source Expansion 的邻域以及 Global Diffusion 的宽半径。
+- 过大：相邻灯光融合，细节被大面积红雾覆盖。
+
+Sigma 不是最终可见半径。最终各通道半径还要乘 Sigma Ratio 和 PSF 各瓣比例。
+
+### 5.18 PSF Smoothness
+
+范围：0–1。阶段：三瓣 PSF 形态。
+
+- 调低：core 权重更高，形态紧实、边缘有冲击感。
+- 调高：shoulder/tail 权重与半径增加，过渡更柔和。
+- 与 Sigma 的区别：Sigma 统一改变尺度；Smoothness 同时重新分配 core/shoulder/tail 的能量。
+- 过高：强光可能变成通用柔光雾，失去胶片 Halation 的扎实内圈。
+
+希望图像更宽但仍有实体感时，优先提高 Red Tail 或 Sigma，不要只把 Smoothness 拉满。
+
+### 5.19 Red Tail
+
+范围：0–1。阶段：深红层专属 PSF。
+
+- 0：红、绿、蓝层使用相同三瓣形态。
+- 调大：红层 core 的部分权重转移到更宽的 shoulder/tail，远端更红。
+- 绿层不继承该加宽，因此近源仍可保持橙色。
+- PSF 总权重会重新归一化，Red Tail 主要重排空间能量，而不是简单增加总能量。
+- 过大：小光源可能出现过长红尾，城市灯光之间开始相互连接。
+
+### 5.20 Sigma Ratio R / G / B
+
+范围：每通道 0.1–2。阶段：逐通道 PSF 半径。
+
+```text
+σR = Sigma × Sigma Ratio R
+σG = Sigma × Sigma Ratio G
+σB = Sigma × Sigma Ratio B
+```
+
+- R 较大：红晕扩散更远。
+- G 较小：橙色成分集中在近源区域。
+- B 通常最小：防止远端变成白色/紫色 Bloom。
+- 三者接近：光晕趋向中性 Glow。
+- G 或 B 过大：红尾的光谱层次减弱。
+
+典型物理顺序为 `R > G > B`。
+
+### 5.21 Red Shift R / G / B
+
+范围：每通道 0–2。阶段：扩散后的通道能量增益。
+
+名称虽然叫 Red Shift，但当前实现不是色相角旋转，而是：
+
+```text
+Diffused R × Red Shift R
+Diffused G × Red Shift G
+Diffused B × Red Shift B
+```
+
+- 提高 R：整体红层能量增加。
+- 提高 G：近源更黄/橙，可能逐渐接近暖白。
+- 提高 B：加入蓝/紫成分，一般不符合传统红色 Halation。
+- B=0：完全移除扩散后的蓝残余层。
+- 过高的 R 与高 Amplify/Strength 叠加时容易剪切。
+
+先用 Sigma Ratio 调空间层次，再用 Red Shift 调每层的相对亮度。
+
+### 5.22 Center Attenuation
+
+范围：0–1。阶段：局部光晕中心扣除。
+
+- 0：不扣除源中心，结果更像实心扩散光团。
+- 调大：从扩散结果中扣除更多原始源，效果逐渐集中到边缘和暗侧。
+- 1：普通弱源的中心扣除最强，容易形成明显环状边缘。
+- Strong Core 会对强源抵消一部分扣除。
+
+如果光晕像柔焦 Bloom，适当提高；如果灯芯外围出现空心红圈，降低。
+
+### 5.22a Source Interior Protection
+
+范围：0–1。阶段：局部光晕源体内部保护。
+
+- 0：保持旧版 `扩散场 − Center Attenuation×源场` 行为，强源内部可以保留实体红橙核芯。
+- 1：大面积亮反射面与实际光源本体使用 `扩散场 − Red Shift×源场` 的外缘残差；算法同时观察源场局部占用和更宽的环境亮度。暗环境中经光谱复核的低阈值扩张 glow 会自适应放开保护，使亮度轮廓连续；白衣褶皱、灯箱纹理和灯芯原色仍保持内部保护。明亮高纯度蓝/青灯体还会拒绝落在其本体上的外来红晕。
+- 0–1：在兼容核芯和纯外缘之间连续混合。
+- 只作用于局部 Halation；Global Red Diffusion 仍可让高亮内部产生轻微、宽范围的暖色偏移。
+
+人物白衣、大面积高亮或灯芯内部出现粉红块时提高它。当前算法通过保留原始底图光源并只在外围加入红层扩散，避免保护核心被误解为亮度空洞；需要无 Remjet 式全面实体核芯时再降低。Neutral 默认为 1，Tungsten 800 No-Remjet 默认为 0。
+
+### 5.23 Strong Core
+
+范围：0–1。阶段：强源局部核芯。
+
+- 0：强源与普通源使用相同 Center Attenuation。
+- 调大：只对超过 Strong Source Level 的强光保留更扎实的扩散核芯，并放松其周围的局部门控。
+- 不直接抬升弱窗。
+- 过大且 Strong Source Level 过低：很多普通窗户都可能变成实心红点。
+
+它与 Center Attenuation 是一对控制：Center Attenuation 决定普通源扣除量，Strong Core 决定强源能保留多少实体感。
+
+### 5.24 Global Source Level
+
+范围：0–4。阶段：独立全局红层源选择。
+
+- 调低：更多光源进入 Global Red Diffusion。
+- 调高：只有最亮强光产生宽红层。
+- 与 Strong Source Level 独立，不影响局部核芯和 Source Expansion。
+- 过低：密集窗户虽然经过软饱和，仍可能形成大范围红雾。
+
+### 5.25 Global Red Diffusion
+
+范围：0–1。阶段：独立宽红层。
+
+- 0：关闭全局红层，只保留局部 Halation。
+- 调大：在强光周围增加更宽、以红色为主、主要落在中间调的扩散。
+- 不是白色 Bloom；通道比例固定为红主导。
+- 宽半径约为 `max(12px, 4×Sigma)`。
+- 过大：画面对比度感下降，多个强光可能形成大面积红色空气感。
+
+建议先用局部 PSF 调出正确形状，最后只添加少量 Global Red Diffusion。
+
+### 5.26 Halation Color Density
+
+范围：0–1。阶段：最终合成前的亮度安全色度覆盖。
+
+- 0：纯 RGB 正光能加法，不额外改变原图底色。
+- 调大：肩部和尾部的红橙色更浓、更接近染料密度覆盖，而不只是透明红光。
+- 白色灯芯受到保护，效果主要落在灯芯外部。
+- 算法会补回色度调整造成的线性亮度损失，因此本参数不会主动把图像变暗。
+- 过大：红色趋向厚重实块，渐变层次减少。
+
+如果光晕宽度正确但仍像淡红色透明雾，提高它；如果已经出现纯红剪切，先降低它，再考虑降低 Amplify。
+
+### 5.27 Blend Mode
+
+类型：`additive` 或 `screen`。阶段：最终合成。
+
+`additive`：
+
+- 直接增加光能；
+- 是默认物理模式；
+- 更容易获得有冲击力的强光；
+- 8/16 位可能更快到达通道上限。
+
+`screen`：
+
+- 在 0–1 范围根据剩余余量增加；
+- 高光区域更收敛；
+- HDR >1 使用正增益，原始高光不会反向变暗；
+- 视觉上通常比 additive 柔和。
+
+### 5.28 Diffusion
+
+类型：`fast` 或 `quality`。阶段：高斯 PSF 数值实现。
+
+- 两种模式使用相同三瓣 PSF、通道比例和参数。
+- fast：优先使用 WASM 三盒高斯，失败自动回退 JavaScript；速度优先。
+- quality：窄 sigma 使用精确可分离高斯，宽 sigma 使用递归高斯；多尺度选择更保守。
+- 面板交互预览固定使用 fast，即使下拉框选择 quality。
+- Apply 尊重用户选择。
+
+在当前验收标准下两种模式应非常接近。只有在高分辨率细边、极大 Sigma 或需要最终输出时才有必要使用 quality。
+
+### 5.29 Highlight Rolloff
+
+范围：0–1。阶段：输出编码/写回前软肩。
+
+- 0：不使用软肩；8/16 位超过范围的结果最终硬裁剪。
+- 调大：软肩起点从 1 向 0.5 移动，更多高光被渐进压向 1。
+- 优点：减少白灯和红通道突然剪切，保留更柔和的亮部层次。
+- 副作用：高光冲击力和局部亮度下降，可能被误认为插件把图像变暗。
+- 32 位不量化，但当前实现中非零 Rolloff 仍会执行用户指定的软肩函数。
+
+若希望完全保留 HDR 能量，应保持 0。
+
+## 6. 参数之间最重要的关系
+
+### 6.1 Threshold、Source Impact、Strong Source Level
+
+三者职责不同：
+
+```text
+Threshold           → 哪些像素能成为光源
+Source Impact       → 弱源与强源的能量差距
+Strong Source Level → 哪些已提取光源触发强核芯和邻域扩张
+```
+
+城市弱窗过多时，先提高 Threshold 或 Source Impact。只有强灯太软时，提高 Strong Core 或降低 Strong Source Level。
+
+### 6.2 Sigma、PSF Smoothness、Red Tail
+
+```text
+Sigma          → 整个 PSF 的基础尺度
+PSF Smoothness → core/shoulder/tail 的共同权重与柔度
+Red Tail       → 只把深红层能量推向更宽的肩和尾
+```
+
+需要“宽而扎实”时，提高 Sigma/Red Tail，并保持较低 Smoothness；需要“柔和雾化”时才提高 Smoothness。
+
+### 6.3 Amplify、Strength、Color Density
+
+```text
+Amplify      → PSF 前的乳剂返回能量
+Strength     → 最后的线性混合量
+Color Density→ 红橙覆盖的浓度与厚度
+```
+
+推荐顺序：Amplify 建立能量 → Color Density 建立质感 → Strength 做总量微调。
+
+### 6.4 Background Threshold、Blue Compensation、Hue Response
+
+```text
+Background Threshold → 背景是否允许承载局部红晕
+Blue Compensation    → 冷色背景上的可见性补偿
+Hue Response         → 发光体本身是否能激发红/绿层
+```
+
+蓝天里的白灯应调 Blue Compensation；纯蓝 LED 的红泄漏应调 Hue Response。不要混淆背景颜色和光源颜色。
+
+### 6.5 Center Attenuation、Strong Core、Source Expansion、Source Interior Protection
+
+```text
+Center Attenuation → 普通光源中心扣除量
+Strong Core        → 强光源保留的实体核芯
+Source Expansion   → 强光周围已有光学 glow 的吸收范围
+Interior Protection → 把局部效果从高亮内部移到源体外缘
+```
+
+“细红线”通常需要 Source Expansion；“空心红圈”需要降低 Center Attenuation；“强灯不够扎实”需要提高 Strong Core；“白衣内部变粉但轮廓外没有红晕”应提高 Source Interior Protection。
+
+## 7. 典型调参配方
+
+以下数值是调整方向，不是固定标准。建议从内置预设出发做相对修改。
+
+### 7.1 自然、克制的普通胶片感
+
+从 Neutral / Legacy 开始：
+
+- Strength：55–70
+- Amplify：1.1–1.4
+- Source Expansion：0.10–0.25
+- Red Tail：0.15–0.30
+- Color Density：0.05–0.20
+- Global Red Diffusion：0–0.03
+
+### 7.2 浓郁无 Remjet 红晕
+
+从 Tungsten 800 No-Remjet 开始：
+
+- 保持较高 Threshold 和 Source Impact，避免弱窗成雾；
+- Amplify：1.8–2.5；
+- Source Expansion：0.65–0.90；
+- Red Tail：0.65–0.90；
+- Color Density：0.45–0.75；
+- Hue Response：0.9–1；
+- Strength 最后微调。
+
+### 7.3 蓝色天空背景中的白色路灯
+
+- Hue Response：0.9–1，保证纯蓝灯仍被拒绝；
+- Blue Compensation：0.7–1；
+- Source Expansion：0.5–0.85，吸收白灯已有 glow；
+- Strong Source Level：确保灯芯能成为种子；
+- 如果只有淡白光、没有红色厚度，再提高 Color Density。
+
+略偏冷但仍接近白色的路灯不应被 Hue Response 拒绝。若只有高饱和蓝色 LED 被抑制而冷白灯正常，这是预期行为。
+
+### 7.4 城市弱窗连成红雾
+
+按顺序处理：
+
+1. 提高 Threshold；
+2. 提高 Source Impact；
+3. 提高 Strong Source Level；
+4. 提高 Global Source Level 或降低 Global Red Diffusion；
+5. 必要时降低 Source Expansion；
+6. 最后才降低 Strength。
+
+只降低 Strength 会让强灯和弱窗一起变弱，不能真正改善强弱分离。
+
+### 7.5 强光红晕太软、缺乏冲击力
+
+- 降低 PSF Smoothness；
+- 提高 Strong Core；
+- 降低 Center Attenuation；
+- 适度提高 Source Expansion；
+- 用 Red Tail 增加远端红色，而不是把 Smoothness 拉高。
+
+### 7.6 纯蓝或青色灯出现红晕
+
+- 提高 Hue Response；
+- 检查 Highlight Extraction 是否为高 Spill Mix；
+- 不要通过降低 Blue Compensation 解决，因为它主要处理承载背景；
+- 若追求严格物理响应，可把 Hue Response 设为 1。
+
+这里的“蓝/青灯”指高色纯度 LED。带少量蓝偏色但 R/G 通道仍充足的白灯会继续产生 Halation，不应通过进一步收紧 Hue Response 把它误杀。
+
+### 7.7 红晕变成纯红色实块
+
+按顺序处理：
+
+1. 降低 Halation Color Density；
+2. 降低 Halation Amplify；
+3. 降低 Red Shift R；
+4. 降低 Source Expansion；
+5. 8/16 位输出可少量增加 Highlight Rolloff；
+6. 最后再降低 Strength。
+
+## 8. Preview、Apply 与非破坏性行为
+
+### 8.1 面板预览
+
+- 最长边 1024px。
+- 光源提取来自最长边 2048px 的效果代理，不是先把原图缩到 1024px 再找光源。
+- Source Expansion 使用 2048px 代理尺度的 sigma。
+- PSF 扩散使用 1024px 显示尺度的 sigma。
+- 预览固定使用 fast 数值实现。
+- 预览按 sRGB TRC 编码显示，不把 Rec.2020 数值直接当作 sRGB。
+
+### 8.2 Apply
+
+- 第一次 Apply 创建独立的效果像素层。
+- 后续 Apply 重新读取绑定源层并更新效果层，不在旧效果上重复叠加。
+- 插件不会把源图层 ID 传给 `putPixels`。
+- 图层绑定失效或存在歧义时会停止或创建新的安全目标，不按相似名称静默猜测。
+
+### 8.3 Rebind Source
+
+当源图层被删除、重命名、复制，或打开旧文档后绑定不再唯一时：
+
+1. 选中真正的原始像素层；
+2. 点击 Rebind Source；
+3. 重新选择预设或确认参数；
+4. 点击 Apply。
+
+不要把已经带有效果的 Film Halation 输出层绑定为新源，否则会人为形成重复烘焙。
+
+## 9. 位深、工作空间与输出注意事项
+
+### 9.1 8 位
+
+- 动态范围有限，强 Amplify、Strength、Color Density 更容易剪切；
+- 使用确定性抖动降低量化带状；
+- 必要时使用少量 Highlight Rolloff。
+
+### 9.2 16 位
+
+- Photoshop 使用 0–32768 的整数范围表示 0–1；
+- 插件在写回前严格 clamp 到该范围并使用确定性抖动；
+- 是当前推荐的主要工作位深。
+
+### 9.3 32 位
+
+- 保留浮点 HDR 值，不执行整数抖动量化；
+- Threshold 仍然在线性光语义下工作；
+- E>1 的高光按曝光档继续扩展，不会压成与 clipped white 完全相同；
+- 若 Highlight Rolloff 非零，当前实现仍会应用用户指定的输出软肩。
+
+### 9.4 Rec.2020 与其他宽色域
+
+插件读取文档实际 profile/TRC，转换到 canonical linear sRGB 计算，再转换回原空间。面板预览与 Apply 不应该因为 Rec.2020、Display P3、Adobe RGB 或 ProPhoto 而出现整体 gamma 变暗。
+
+如果遇到未知或未标记 profile，插件会回退到 sRGB 假设并给出提示。最终颜色仍应以 Photoshop 画布和正确显示器 ICC 为准。
+
+## 10. 常见问题
+
+### 10.1 调整参数后预设显示为 Custom
+
+这是正常行为，表示当前值已经偏离内置预设。重新选择内置预设会恢复其全部参数。
+
+### 10.2 Reload 后预设看起来还是旧强度
+
+文档存储的参数会恢复。先切换到另一个预设，再重新选择目标预设。
+
+### 10.3 预览和 Apply 有轻微差异
+
+预览是 1024px，并固定使用 fast；Apply 使用全分辨率和用户选择的 Diffusion。两者共享同一物理 PSF，但缩放、量化和输出位深仍可能造成细微差异。请在 Photoshop 100% 缩放下评价最终结果。
+
+### 10.4 图像看起来变暗
+
+Additive、HDR-safe Screen 和 Color Density 本身不会降低线性亮度。优先检查：
+
+- Highlight Rolloff 是否非零；
+- 是否在比较不同缩放比例或不同 Photoshop 色彩管理预览；
+- 输入/输出 profile 是否一致；
+- 是否把效果层设成了非正常混合模式或降低了图层不透明度。
+
+### 10.5 为什么蓝光没有红晕，而蓝天上的白灯有
+
+Hue Response 判断发光体本身的色谱；Blue Compensation 判断背景承载条件。白灯含有足够长波能量，可以在蓝天上形成红晕；纯蓝 LED 的长波返回接近零，因此仍被抑制。
+
+## 11. 推荐调参顺序速查
+
+```text
+1. Preset
+2. Threshold Units / Sigma Units
+3. Highlight Extraction + Spill Mix
+4. Red-Layer Threshold Bias
+5. Threshold + Source Softness
+6. Source Impact + Strong Source Level
+7. Hue Response
+8. Strong Source Expansion
+9. Sigma + PSF Smoothness + Red Tail
+10. Sigma Ratio + Red Shift
+11. Center Attenuation + Strong Core + Source Interior Protection
+12. Background Threshold + Blue Compensation
+13. Global Source Level + Global Red Diffusion
+14. Halation Amplify + Color Density
+15. Strength
+16. Blend Mode + Highlight Rolloff
+```
+
+这套顺序先决定“谁产生效果”，再决定“效果长什么样”，最后才决定“混合多少”。这样比一开始反复拉 Strength 更容易获得可控、可重复的结果。

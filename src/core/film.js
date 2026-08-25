@@ -3,7 +3,7 @@
 import { createHalationParams } from './params.js';
 import { processHalation } from './pipeline.js';
 
-export const ENGINE_VERSION = '1.5.0';
+export const ENGINE_VERSION = '1.5.1';
 export const EFFECT_ORDER = Object.freeze([
   'defringe',
   'vignette',

@@ -2,11 +2,12 @@
 /** Film Halation V1.5 — 非破坏性 UXP 编排。 */
 import { createPanel } from './ui/panel.jsx';
 import { renderPreviewIncremental } from './io/previewRender.js';
-import { computePreviewScale } from './io/preview.js';
-import { createHalationParams } from './core/index.js';
+import { PREVIEW_MAX_EDGE, PREVIEW_EFFECT_MAX_EDGE, computePreviewScale } from './io/preview.js';
+import { createHalationParams, createHalationPreset } from './core/index.js';
 import { renderDocumentToLayer } from './io/streamRender.js';
 import { resolveDocumentTRC, resolvePixelTRC, standardProfileName } from './io/colorPipeline.js';
 import { readDocumentPixels } from './io/imageAccess.js';
+import { documentComponentSize } from './io/bitDepth.js';
 import {
   EFFECT_LAYER_NAME,
   ensureEffectLayer,
@@ -22,17 +23,25 @@ import {
   resolveApplyTarget,
 } from './io/layerOps.js';
 import { STRINGS } from './ui/i18n.js';
-import { saveParamsForDoc, loadParamsForDoc } from './storage/pluginStorage.js';
+import {
+  saveParamsForDoc,
+  loadParamsForDoc,
+  exportMigrationState,
+  prepareMigrationImport,
+  commitMigrationImport,
+} from './storage/pluginStorage.js';
 import { loadBundledWasm } from './io/wasmRuntime.js';
 
 const ps = require('photoshop');
 const app = ps.app;
+const BUILD_PLUGIN_ID = __FILM_PLUGIN_ID__;
+const MIGRATION_ROLE = __FILM_MIGRATION_ROLE__;
 
 loadBundledWasm().then((wasm) => {
-  console.log(`[film-halation] compute backend: ${wasm.backend}${wasm.error ? ` (${wasm.error})` : ''}`);
+  console.log(`[${BUILD_PLUGIN_ID}] compute backend: ${wasm.backend}${wasm.error ? ` (${wasm.error})` : ''}`);
 });
 
-let params = createHalationParams({ strength: 50 });
+let params = createHalationPreset('tungsten-800');
 let documentState = {
   format: { gauge: '35mm', iso: 250 },
   bindings: { sourceLayer: null, targetLayer: null },
@@ -53,21 +62,26 @@ let panel;
 let img;
 let status;
 let applyBtn;
+let migrationBtn;
 try {
   panel = createPanel({
     params,
     onParamsChange,
     onApply: runApply,
     onRebind: runRebind,
+    migrationRole: MIGRATION_ROLE,
+    onExportMigration: runExportMigration,
+    onImportMigration: runImportMigration,
   });
   document.body.append(panel);
-  ({ img, status, applyBtn } = panel.__handles);
+  ({ img, status, applyBtn, migrationBtn } = panel.__handles);
 } catch (error) {
   console.error('[film-halation] panel creation failed: ' + (error && (error.stack || error.message || error)));
   writeDiagFile('ui-error.json', { message: String(error), at: new Date().toISOString() });
   status = { textContent: '' };
   img = { removeAttribute() {}, src: '' };
   applyBtn = { disabled: false };
+  migrationBtn = { disabled: false };
 }
 
 let taskChain = Promise.resolve();
@@ -87,8 +101,10 @@ setInterval(() => {
   const id = doc ? doc.id : null;
   if (id === lastDocId) return;
   lastDocId = id;
+  previewRequestId++;
   img.removeAttribute('src');
   previewCache = null;
+  previewSourceCache = null;
   documentState = { format: { gauge: '35mm', iso: 250 }, bindings: { sourceLayer: null, targetLayer: null } };
   if (!doc) {
     status.textContent = 'No active document.';
@@ -109,13 +125,46 @@ function onParamsChange(partial) {
 }
 
 let panelTimer = null;
+let previewRequestId = 0;
 function schedulePreview() {
   clearTimeout(panelTimer);
-  panelTimer = setTimeout(() => enqueueTask(runPanelPreview), 80);
+  const requestId = ++previewRequestId;
+  panelTimer = setTimeout(
+    () => enqueueTask(() => (requestId === previewRequestId ? runPanelPreview(requestId) : undefined)),
+    80,
+  );
 }
 
 let previewCache = null;
-async function boundPreviewSource(doc) {
+let previewSourceCache = null;
+
+function previewHistoryKey(doc) {
+  try {
+    const state = doc?.activeHistoryState;
+    return state ? String(state.id ?? state.name ?? '') : '';
+  } catch (error) {
+    return '';
+  }
+}
+
+async function readPreviewVariant(doc, readOptions, sourceWidth, sourceHeight, maxEdge, label) {
+  const scale = computePreviewScale(sourceWidth, sourceHeight, maxEdge);
+  if (scale >= 1) return readDocumentPixels(doc, readOptions);
+  try {
+    return await readDocumentPixels(doc, {
+      ...readOptions,
+      targetSize: {
+        width: Math.max(1, Math.round(sourceWidth * scale)),
+        height: Math.max(1, Math.round(sourceHeight * scale)),
+      },
+    });
+  } catch (error) {
+    console.warn(`[film-halation] ${label} targetSize read failed; retrying full resolution inside modal scope: ${error?.message || error}`);
+    return readDocumentPixels(doc, readOptions);
+  }
+}
+
+async function boundPreviewSources(doc) {
   const binding = documentState.bindings.sourceLayer;
   const sourceLayer = resolvePreviewSourceLayer(doc, binding);
   if (!sourceLayer) {
@@ -124,42 +173,67 @@ async function boundPreviewSource(doc) {
   }
   if (!isPixelLayer(sourceLayer)) throw new Error(unreadableLayerMessage(sourceLayer));
   const bounds = layerPixelBounds(sourceLayer) ?? { left: 0, top: 0, right: doc.width, bottom: doc.height };
-  const scale = computePreviewScale(bounds.right - bounds.left, bounds.bottom - bounds.top);
-  const readOptions = {
+  const sourceWidth = bounds.right - bounds.left;
+  const sourceHeight = bounds.bottom - bounds.top;
+  const componentSize = documentComponentSize(doc);
+  const cacheKey = [
+    doc.id,
+    sourceLayer.id,
+    bounds.left,
+    bounds.top,
+    bounds.right,
+    bounds.bottom,
+    componentSize,
+    String(doc.colorProfileName || ''),
+    previewHistoryKey(doc),
+  ].join(':');
+  if (previewSourceCache?.cacheKey === cacheKey) return previewSourceCache;
+
+  const nativeReadOptions = {
     layerID: sourceLayer.id,
     layerName: sourceLayer.name,
     bounds,
-    // Let Photoshop's ICC engine convert the document thumbnail to sRGB.
-    // The panel PNG is untagged and is displayed as sRGB by UXP.
-    colorProfile: standardProfileName('sRGB'),
+    componentSize,
   };
-  let source;
-  try {
-    source = await readDocumentPixels(doc, {
-      ...readOptions,
-      componentSize: 8,
-      targetSize: {
-        width: Math.max(1, Math.round((bounds.right - bounds.left) * scale)),
-        height: Math.max(1, Math.round((bounds.bottom - bounds.top) * scale)),
-      },
-    });
-  } catch (error) {
-    console.warn('[film-halation] preview targetSize read failed; retrying full resolution inside modal scope: ' + (error?.message || error));
-    source = await readDocumentPixels(doc, { ...readOptions, componentSize: 32 });
-  }
-  source.cacheKey = `${doc.id}:${sourceLayer.id}:${bounds.left},${bounds.top},${bounds.right},${bounds.bottom}`;
-  return source;
+  // 1024px 底图由 Photoshop ICC 引擎转换到 sRGB，保证面板观感与画布一致。
+  const display = await readPreviewVariant(
+    doc,
+    { ...nativeReadOptions, colorProfile: standardProfileName('sRGB') },
+    sourceWidth,
+    sourceHeight,
+    PREVIEW_MAX_EDGE,
+    'display preview',
+  );
+  // 2048px 效果代理不请求 profile 转换；后续使用与 Apply 相同的 TRC/primaries 路径，
+  // 保留 Rec.2020 等宽色域中的高饱和峰值并在更高分辨率执行非线性提取。
+  const effect = await readPreviewVariant(
+    doc,
+    nativeReadOptions,
+    sourceWidth,
+    sourceHeight,
+    PREVIEW_EFFECT_MAX_EDGE,
+    'effect-source preview',
+  );
+  previewSourceCache = { display, effect, cacheKey };
+  return previewSourceCache;
 }
 
-async function runPanelPreview() {
+async function runPanelPreview(requestId = null) {
   const doc = currentDoc();
   if (!doc) return;
+  if (requestId !== null && requestId !== previewRequestId) return;
+  const renderParams = params;
   try {
-    const source = await ps.core.executeAsModal(async () => boundPreviewSource(doc), {
+    const sources = await ps.core.executeAsModal(async () => boundPreviewSources(doc), {
       commandName: 'film-halation-read-preview',
     });
-    const trc = resolvePixelTRC(doc, source.colorProfile);
-    const result = await renderPreviewIncremental(doc, params, trc, previewCache, source);
+    if (requestId !== null && requestId !== previewRequestId) return;
+    const trc = {
+      display: resolvePixelTRC(doc, sources.display.colorProfile),
+      effect: resolvePixelTRC(doc, sources.effect.colorProfile),
+    };
+    const result = await renderPreviewIncremental(doc, renderParams, trc, previewCache, sources);
+    if (requestId !== null && requestId !== previewRequestId) return;
     previewCache = result.cache;
     img.src = result.dataUrl;
     status.textContent = STRINGS.statusPreviewed(result.ms);
@@ -188,7 +262,9 @@ async function runApply() {
       status.textContent = STRINGS.statusFailed(result.error);
       return;
     }
+    previewRequestId++;
     previewCache = null;
+    previewSourceCache = null;
     status.textContent = STRINGS.statusApplied(result.applyMs);
   } catch (error) {
     status.textContent = STRINGS.statusFailed(error.message || error);
@@ -218,10 +294,62 @@ async function runRebind() {
     sourceLayer: createLayerBinding(selected, `source-${doc.id}`),
     targetLayer: null,
   };
+  previewRequestId++;
   previewCache = null;
+  previewSourceCache = null;
   await saveParamsForDoc(doc, params, documentState);
   status.textContent = STRINGS.statusRebound;
   enqueueTask(runPanelPreview);
+}
+
+async function runExportMigration() {
+  status.textContent = STRINGS.statusMigrationExporting;
+  if (migrationBtn) migrationBtn.disabled = true;
+  try {
+    const result = await exportMigrationState();
+    if (result.cancelled) {
+      status.textContent = 'Migration export cancelled.';
+      return;
+    }
+    const invalidLabel = result.invalidEntries.length === 1 ? 'entry' : 'entries';
+    status.textContent = `Exported ${result.exported} document state(s) to ${result.fileName}; ${result.invalidEntries.length} invalid cache ${invalidLabel} skipped. CRC32 ${result.crc32}.`;
+  } catch (error) {
+    status.textContent = STRINGS.statusFailed(error.message || error);
+  } finally {
+    if (migrationBtn) migrationBtn.disabled = false;
+  }
+}
+
+async function runImportMigration() {
+  status.textContent = STRINGS.statusMigrationImporting;
+  if (migrationBtn) migrationBtn.disabled = true;
+  try {
+    // Keep the picker directly on the button call stack: UXP may require an
+    // active user gesture for getFileForOpening/getFileForSaving.
+    const plan = await prepareMigrationImport();
+    if (plan.cancelled) {
+      status.textContent = 'Migration import cancelled.';
+      return;
+    }
+    if (plan.repeated) {
+      status.textContent = `Migration package ${plan.parsed.crc32} was already imported. No state was changed.`;
+      return;
+    }
+    const overwriteKeys = await panel.__handles.chooseMigrationConflicts(plan.conflicts);
+    if (overwriteKeys === null) {
+      status.textContent = 'Migration import cancelled; no state was changed.';
+      return;
+    }
+    const result = await commitMigrationImport(plan, { overwriteKeys });
+    const invalidLabel = result.invalid === 1 ? 'entry' : 'entries';
+    status.textContent = `Imported ${result.imported} document state(s); ${result.preserved} existing state(s) preserved; ${result.invalid} invalid ${invalidLabel} skipped.`;
+    const doc = currentDoc();
+    if (doc) await loadStoredParams(doc, doc.id);
+  } catch (error) {
+    status.textContent = STRINGS.statusFailed(error.message || error);
+  } finally {
+    if (migrationBtn) migrationBtn.disabled = false;
+  }
 }
 
 async function renderToSafeCopy(doc, renderParams, options) {
@@ -268,7 +396,7 @@ async function renderToSafeCopy(doc, renderParams, options) {
   try {
     const targetBounds = layerPixelBounds(targetLayer) ?? sourceBounds;
     const trc = resolveDocumentTRC(doc);
-    await renderDocumentToLayer(doc, sourceLayer, targetLayer, sourceBounds, targetBounds, renderParams, trc, {
+    const renderResult = await renderDocumentToLayer(doc, sourceLayer, targetLayer, sourceBounds, targetBounds, renderParams, trc, {
       componentSize: doc.bitsPerChannel,
       seed: 0x46534c4d,
       signal: options.signal,
@@ -279,6 +407,7 @@ async function renderToSafeCopy(doc, renderParams, options) {
     return {
       ok: true,
       applyMs: Date.now() - started,
+      render: renderResult,
       bindings: { sourceLayer: sourceBinding, targetLayer: targetBinding },
     };
   } catch (error) {

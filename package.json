@@ -1,25 +1,23 @@
 {
-  "name": "film-halation",
-  "version": "1.5.0",
-  "description": "Photoshop UXP plugin — non-destructive spectral film halation simulation (V1.5)",
+  "name": "film-emulation",
+  "version": "1.6.0",
+  "description": "Photoshop UXP film-emulation plugin — V1.6 migration foundation with the V1.5.1 Halation engine",
   "private": true,
   "type": "module",
   "scripts": {
     "build": "node esbuild.config.mjs",
     "build:wasm": "node scripts/build-wasm.mjs",
-    "build:standalone": "node tools/standalone-halation/build-standalone.mjs",
     "validate": "node scripts/validate-manifest.mjs",
     "test": "node --test",
     "bench": "node --expose-gc tests/bench/perf.js",
-    "package": "node scripts/package.mjs",
+    "package": "node scripts/package.mjs current",
+    "package:migration-bridge": "node scripts/package.mjs bridge",
+    "package:migration": "node scripts/package-migration.mjs",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
     "esbuild": "^0.24.0",
     "pngjs": "^7.0.0",
     "typescript": "^5.6.0"
-  },
-  "dependencies": {
-    "jpeg-js": "^0.4.4"
   }
 }

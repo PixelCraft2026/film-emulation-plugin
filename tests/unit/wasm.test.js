@@ -9,6 +9,8 @@ import {
   processHalation,
   resetWasmBackend,
   tryWasmBoxBlur,
+  tryWasmMaxFilter,
+  maxFilterSeparable,
 } from '../../src/core/index.js';
 import { boxBlur3 } from '../../src/core/diffuse/box.js';
 
@@ -22,7 +24,7 @@ test('WASM three-box blur matches the JavaScript fallback', async (t) => {
   const bytes = readFileSync(wasmPath);
   const status = await installWasmModule(bytes);
   assert.equal(status.available, true, status.error || 'WASM available');
-  assert.equal(getWasmBackendStatus().version, 0x010500);
+  assert.equal(getWasmBackendStatus().version, 0x010502);
   const width = 73;
   const height = 41;
   const n = width * height;
@@ -46,7 +48,26 @@ test('WASM three-box blur matches the JavaScript fallback', async (t) => {
   assert.equal(getWasmBackendStatus().backend, 'js');
 });
 
-test('WASM complete Fast pipeline matches the compact JavaScript fallback', async (t) => {
+test('WASM source-expansion max filter matches the alias-safe JavaScript fallback', async (t) => {
+  if (!existsSync(wasmPath)) {
+    t.skip('assets/film_core.wasm not built; run npm run build:wasm');
+    return;
+  }
+  const status = await installWasmModule(readFileSync(wasmPath));
+  assert.equal(status.available, true, status.error || 'WASM available');
+  const width = 97;
+  const height = 61;
+  const n = width * height;
+  const source = new Float32Array(n);
+  for (let i = 0; i < n; i++) source[i] = ((i * 2246822519) >>> 7) / 0x1ffffff;
+  const js = maxFilterSeparable(source, width, height, 9);
+  const wasm = new Float32Array(n);
+  assert.equal(tryWasmMaxFilter(source, wasm, width, height, 9), true);
+  assert.deepEqual(wasm, js);
+  resetWasmBackend();
+});
+
+test('WASM blur-backed Fast pipeline matches the pure JavaScript fallback', async (t) => {
   if (!existsSync(wasmPath)) {
     t.skip('assets/film_core.wasm not built; run npm run build:wasm');
     return;

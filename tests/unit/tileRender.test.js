@@ -4,11 +4,28 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { processHalation, createHalationParams, getTRC } from '../../src/core/index.js';
+import { processHalation, createHalationParams, createHalationPreset, getTRC } from '../../src/core/index.js';
 import { processTiledWithTrc } from '../../src/io/tileRender.js';
+import { estimateHighMemoryBytes, streamGeometry } from '../../src/io/streamGeometry.js';
 import { decodeToLinear, encodeFromLinear, resolveDocumentTRC } from '../../src/io/colorPipeline.js';
 
 const TRC = getTRC('sRGB');
+
+test('automatic memory preflight selects High for common files and Balanced for unsafe full images', () => {
+  const params = createHalationParams({ sigma: 7 });
+  const common = streamGeometry(3492, 2328, params, { componentSize: 16, memoryMode: 'auto' });
+  assert.equal(common.memoryMode, 'high');
+  assert.equal(common.bands.length, 1);
+  assert.equal(common.overlap, 0);
+  const largeUnknown = streamGeometry(6000, 4000, params, { componentSize: 32, memoryMode: 'auto' });
+  assert.equal(largeUnknown.memoryMode, 'balanced');
+  assert.ok(largeUnknown.bands.length > 1);
+  const high16GB = streamGeometry(6000, 4000, params, { componentSize: 16, deviceMemoryGB: 16, memoryMode: 'auto' });
+  assert.equal(high16GB.memoryMode, 'high');
+  assert.equal(high16GB.estimatedBytes, estimateHighMemoryBytes(6000, 4000, 16));
+  const forcedBalanced = streamGeometry(3492, 2328, params, { memoryMode: 'balanced' });
+  assert.equal(forcedBalanced.memoryMode, 'balanced');
+});
 
 /** 显示编码输入（0..1，含 1.0 高光点）。 */
 function buildDisplayInput(w, h) {
@@ -81,6 +98,17 @@ test('processTiledWithTrc small image goes full-image path (bit-identical)', () 
   assert.ok(maxDiff < 1e-6, `small image maxDiff=${maxDiff.toExponential(2)}`);
 });
 
+test('profileTimings reports color and algorithm stages without changing output', () => {
+  const input = buildDisplayInput(64, 48);
+  const params = createHalationPreset('standard');
+  const plain = processTiledWithTrc(input, params, TRC);
+  const profiled = processTiledWithTrc(input, params, TRC, { profileTimings: true });
+  assert.deepEqual(profiled.rgb, plain.rgb);
+  for (const key of ['decodeMs', 'extractMs', 'diffuseMs', 'haloMs', 'blendMs', 'encodeMs']) {
+    assert.ok(Number.isFinite(profiled.timings[key]) && profiled.timings[key] >= 0, `${key} is recorded`);
+  }
+});
+
 test('linear Imaging API input is encoded to the nonlinear document TRC without darkening', () => {
   const width = 4;
   const height = 4;
@@ -116,6 +144,20 @@ test('default overlap covers sigmaRatio>1 (3.2): tiled matches full with large c
   const { l2 } = l2AndMax(full, tiled.rgb);
   console.log(`INFO defaultOverlap sigmaRatio L2=${l2.toExponential(2)}`);
   assert.ok(l2 < 1e-6, `tile≈full with σ·maxRatio overlap L2=${l2.toExponential(2)}`);
+});
+
+test('No-Remjet source expansion, red tail and density composite remain band-seam free', () => {
+  const input = buildDisplayInput(160, 600);
+  const params = createHalationParams({
+    ...createHalationPreset('tungsten-800'),
+    sigmaUnits: 'pixels',
+    sigma: 8,
+  });
+  const full = fullReference(input, params);
+  const tiled = processTiledWithTrc(input, params, TRC, { tileThreshold: 10000 });
+  const { l2, maxDiff } = l2AndMax(full, tiled.rgb);
+  console.log(`INFO no-remjet banded L2=${l2.toExponential(2)} max=${maxDiff.toExponential(2)}`);
+  assert.ok(l2 < 1e-5, `No-Remjet tile≈full L2=${l2.toExponential(2)}`);
 });
 
 test('banded low-res diffusion aligns with full-image low-res (3.1 相位对齐)', () => {

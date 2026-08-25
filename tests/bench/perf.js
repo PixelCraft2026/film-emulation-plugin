@@ -3,6 +3,8 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
   createHalationParams,
+  createHalationPreset,
+  resolveSigmaParams,
   installWasmModule,
   getWasmBackendStatus,
   processHalation,
@@ -14,6 +16,7 @@ const WIDTH = 6000;
 const HEIGHT = 4000;
 const WARMUPS = Number(process.env.FILM_BENCH_WARMUPS ?? 2);
 const RUNS = Number(process.env.FILM_BENCH_RUNS ?? 10);
+const DEVICE_MEMORY_GB = Number(process.env.FILM_BENCH_MEMORY_GB ?? 16);
 const LINEAR_TRC = { decode: (value) => value, encode: (value) => value, baseKey: 'sRGB' };
 const wasmPath = fileURLToPath(new URL('../../assets/film_core.wasm', import.meta.url));
 if (existsSync(wasmPath)) await installWasmModule(readFileSync(wasmPath));
@@ -58,7 +61,11 @@ function makeBand(width, start, end) {
 }
 
 function render24MP(params) {
-  const geometry = streamGeometry(WIDTH, HEIGHT, params);
+  const geometry = streamGeometry(WIDTH, HEIGHT, params, {
+    componentSize: 16,
+    deviceMemoryGB: DEVICE_MEMORY_GB,
+    memoryMode: 'auto',
+  });
   let checksum = 0;
   let peak = memoryMB();
   for (const band of geometry.bands) {
@@ -73,7 +80,7 @@ function render24MP(params) {
     const current = memoryMB();
     peak = { rss: Math.max(peak.rss, current.rss), arrayBuffers: Math.max(peak.arrayBuffers, current.arrayBuffers) };
   }
-  return { checksum, peak, bands: geometry.bands.length };
+  return { checksum, peak, bands: geometry.bands.length, memoryMode: geometry.memoryMode };
 }
 
 function renderPreview(params) {
@@ -90,6 +97,7 @@ async function measure(label, render, warmups = WARMUPS, runs = RUNS) {
   let peak = { rss: 0, arrayBuffers: 0 };
   let checksum = 0;
   let bands = 1;
+  let memoryMode = 'n/a';
   for (let i = 0; i < runs; i++) {
     if (global.gc) global.gc();
     const started = performance.now();
@@ -97,6 +105,7 @@ async function measure(label, render, warmups = WARMUPS, runs = RUNS) {
     timings.push(performance.now() - started);
     checksum = typeof result === 'number' ? result : result.checksum;
     bands = typeof result === 'number' ? 1 : result.bands;
+    memoryMode = typeof result === 'number' ? 'n/a' : result.memoryMode;
     if (result.peak) peak = { rss: Math.max(peak.rss, result.peak.rss), arrayBuffers: Math.max(peak.arrayBuffers, result.peak.arrayBuffers) };
   }
   const summary = {
@@ -110,12 +119,17 @@ async function measure(label, render, warmups = WARMUPS, runs = RUNS) {
     peakArrayBuffersMB: Math.round(peak.arrayBuffers * 10) / 10,
     checksum,
     bands,
+    memoryMode,
   };
   console.log(`${label}: P50=${summary.p50Ms}ms P95=${summary.p95Ms}ms peakRSS=${summary.peakRssMB}MB`);
   return summary;
 }
 
-const defaultParams = createHalationParams({ strength: 100, diffusionMode: 'fast' });
+const presetParams = createHalationPreset('tungsten-800');
+const defaultParams = createHalationParams({
+  ...resolveSigmaParams(presetParams, WIDTH, HEIGHT),
+  diffusionMode: 'fast',
+});
 const previewParams = createHalationParams({ ...defaultParams, sigma: defaultParams.sigma * (1024 / WIDTH) });
 const report = {
   generatedAt: new Date().toISOString(),
@@ -123,7 +137,7 @@ const report = {
   platform: `${process.platform}-${process.arch}`,
   cpu: process.env.PROCESSOR_IDENTIFIER ?? 'unknown',
   backend: getWasmBackendStatus(),
-  protocol: { warmups: WARMUPS, runs: RUNS, size: `${WIDTH}x${HEIGHT}`, componentSize: 16 },
+  protocol: { warmups: WARMUPS, runs: RUNS, size: `${WIDTH}x${HEIGHT}`, componentSize: 16, deviceMemoryGB: DEVICE_MEMORY_GB },
   apply24MP: await measure('24MP streamed fast', () => render24MP(defaultParams)),
   preview1024: await measure('1024px preview fast', () => renderPreview(previewParams)),
 };

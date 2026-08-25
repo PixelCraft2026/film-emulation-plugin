@@ -1,40 +1,84 @@
 /**
- * 打包脚本：esbuild 产物 + manifest + index.html → .ccx（UXP 安装包，zip 格式）。
- * 用法：npm run package（= node scripts/package.mjs）
- * 输出：dist/FilmHalation.ccx
+ * Package one UXP identity from the shared source tree.
+ *
+ *   node scripts/package.mjs current  -> V1.6 new-ID importer
+ *   node scripts/package.mjs bridge   -> V1.5.2 old-ID exporter
  */
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, rmSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const OUT_DIR = join(ROOT, 'dist');
-const CCX = join(OUT_DIR, 'FilmHalation.ccx');
-const STAGE = join(OUT_DIR, 'ccx-stage');
+const variant = process.argv[2] || 'current';
+if (!['current', 'bridge'].includes(variant)) throw new Error(`Unknown package variant: ${variant}`);
 
-// 1) build（确保最新 bundle；直接用 node 跑 esbuild 配置，避免 .cmd spawn 问题）
-execFileSync('node', [join(ROOT, 'scripts', 'build-wasm.mjs')], { cwd: ROOT, stdio: 'inherit' });
-execFileSync('node', [join(ROOT, 'esbuild.config.mjs')], { cwd: ROOT, stdio: 'inherit' });
+const currentManifest = JSON.parse(readFileSync(join(ROOT, 'manifest.json'), 'utf8'));
+const definition = variant === 'bridge'
+  ? {
+      pluginId: 'com.cheukwing.filmhalation',
+      migrationRole: 'export',
+      version: '1.5.2',
+      fileName: 'FilmHalation-MigrationBridge.ccx',
+      panelLabel: 'Film Halation Migration',
+    }
+  : {
+      pluginId: 'com.cheukwing.filmemulation',
+      migrationRole: 'import',
+      version: currentManifest.version,
+      fileName: 'FilmEmulation.ccx',
+      panelLabel: 'Film Halation',
+    };
 
-// 2) 组装 stage：manifest.json + index.html + dist/main.js
-rmSync(STAGE, { recursive: true, force: true });
-mkdirSync(join(STAGE, 'dist'), { recursive: true });
-const copy = (src, dst) => execFileSync('cmd', ['/c', 'copy', '/Y', src, dst], { stdio: 'inherit' });
-copy(join(ROOT, 'manifest.json'), STAGE);
-copy(join(ROOT, 'index.html'), STAGE);
-copy(join(OUT_DIR, 'main.js'), join(STAGE, 'dist'));
-copy(join(OUT_DIR, 'main.js.map'), join(STAGE, 'dist'));
-copy(join(OUT_DIR, 'film_core.wasm'), join(STAGE, 'dist'));
+if (process.env.FILM_SKIP_WASM_BUILD !== '1') {
+  execFileSync(process.execPath, [join(ROOT, 'scripts', 'build-wasm.mjs')], { cwd: ROOT, stdio: 'inherit' });
+}
+execFileSync(process.execPath, [join(ROOT, 'esbuild.config.mjs')], {
+  cwd: ROOT,
+  stdio: 'inherit',
+  env: {
+    ...process.env,
+    FILM_PLUGIN_ID: definition.pluginId,
+    FILM_MIGRATION_ROLE: definition.migrationRole,
+  },
+});
 
-// 3) 压缩为 zip，再重命名 .ccx（Compress-Archive 只接受 .zip 扩展名）
-rmSync(CCX, { force: true });
-const ZIP = join(OUT_DIR, 'FilmHalation.zip');
-rmSync(ZIP, { force: true });
+const stage = join(OUT_DIR, `ccx-stage-${variant}`);
+rmSync(stage, { recursive: true, force: true });
+mkdirSync(join(stage, 'dist'), { recursive: true });
+const manifest = {
+  ...currentManifest,
+  id: definition.pluginId,
+  version: definition.version,
+  entrypoints: currentManifest.entrypoints.map((entry) => ({
+    ...entry,
+    label: { ...entry.label, default: definition.panelLabel },
+  })),
+};
+writeFileSync(join(stage, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
+copyFileSync(join(ROOT, 'index.html'), join(stage, 'index.html'));
+for (const fileName of ['main.js', 'main.js.map', 'film_core.wasm']) {
+  copyFileSync(join(OUT_DIR, fileName), join(stage, 'dist', fileName));
+}
+
+const ccx = join(OUT_DIR, definition.fileName);
+const zip = join(OUT_DIR, `${definition.fileName}.zip`);
+rmSync(ccx, { force: true });
+rmSync(zip, { force: true });
 execFileSync('powershell', [
-  '-NoProfile', '-Command',
-  `Compress-Archive -Path '${join(STAGE, '*')}' -DestinationPath '${ZIP}' -Force`,
+  '-NoProfile',
+  '-Command',
+  `Compress-Archive -Path '${join(stage, '*')}' -DestinationPath '${zip}' -Force`,
 ], { stdio: 'inherit' });
-execFileSync('cmd', ['/c', 'ren', ZIP, 'FilmHalation.ccx'], { stdio: 'inherit' });
-rmSync(STAGE, { recursive: true, force: true });
-console.log(`package: ${CCX} (${existsSync(CCX) ? 'OK' : 'FAILED'})`);
+renameSync(zip, ccx);
+rmSync(stage, { recursive: true, force: true });
+console.log(`package (${variant}): ${ccx} (${existsSync(ccx) ? 'OK' : 'FAILED'})`);

@@ -43,6 +43,7 @@ test('S4 missing fields filled with defaults on parse', () => {
   const { params, version, document } = normalizeDocument(doc);
   assert.equal(params.strength, 25);
   assert.equal(params.sigma, 7.0, 'default sigma filled');
+  assert.equal(params.redLayerThresholdBias, 0, 'new threshold bias defaults to the compatible endpoint');
   assert.equal(version, '2');
   assert.equal(document.schemaVersion, 2);
   assert.equal(document.graph[0].type, 'halation');
@@ -80,16 +81,28 @@ test('S7 toDocument shape: FilmHalation schema v2 graph + bindings', () => {
   });
   assert.equal(doc.plugin, 'FilmHalation');
   assert.equal(doc.schemaVersion, 2);
-  assert.equal(doc.engineVersion, '1.5.0');
+  assert.equal(doc.engineVersion, '1.5.1');
   assert.deepEqual(doc.format, { gauge: '35mm', iso: 250 });
   assert.equal(doc.graph[0].id, 'halation-main');
   assert.equal(doc.bindings.sourceLayer.id, 1);
   assert.deepEqual(Object.keys(doc.graph[0].params), [
     'strength', 'sigma', 'sigmaUnits', 'threshold', 'thresholdUnits', 'thresholdSoftness',
     'sourceSoftness', 'backgroundSoftness', 'smoothness', 'backgroundThreshold',
-    'redshift', 'sigmaRatio', 'globalDiffusion', 'centerAttenuation', 'blendMode', 'diffusionMode',
+    'sourceImpact', 'amplify', 'sourceExpansion', 'redTail', 'blueCompensation', 'colorDensity', 'sourceInteriorProtection',
+    'hotSourceThreshold', 'hotCoreStrength', 'globalSourceThreshold',
+    'spectralSensitivity', 'redLayerThresholdBias', 'redshift', 'sigmaRatio', 'globalDiffusion', 'centerAttenuation', 'blendMode', 'diffusionMode',
     'extraction', 'spillMix', 'rolloff', 'profile',
   ]);
+});
+
+test('S9 temporary source-threshold switch migrates to the continuous bias', () => {
+  assert.equal(createHalationParams({ sourceThresholdMode: 'legacy' }).redLayerThresholdBias, 0);
+  assert.equal(createHalationParams({ sourceThresholdMode: 'red-layer' }).redLayerThresholdBias, 1);
+  assert.equal(
+    createHalationParams({ sourceThresholdMode: 'red-layer', redLayerThresholdBias: 0.35 }).redLayerThresholdBias,
+    0.35,
+    'explicit continuous value wins over the temporary switch',
+  );
 });
 
 test('S8 current schema rejects unknown effect nodes instead of silently dropping them', () => {

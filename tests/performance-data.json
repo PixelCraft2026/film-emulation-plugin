@@ -1,64 +1,67 @@
 {
-  "generatedAt": "2026-08-19T19:25:59.501Z",
+  "generatedAt": "2026-08-23T18:53:50.438Z",
   "node": "v24.19.0",
   "platform": "win32-x64",
   "cpu": "Intel64 Family 6 Model 151 Stepping 2, GenuineIntel",
   "backend": {
     "available": true,
     "backend": "wasm",
-    "version": 66816,
+    "version": 66818,
     "error": null
   },
   "protocol": {
     "warmups": 2,
     "runs": 10,
     "size": "6000x4000",
-    "componentSize": 16
+    "componentSize": 16,
+    "deviceMemoryGB": 16
   },
   "apply24MP": {
     "label": "24MP streamed fast",
     "warmups": 2,
     "runs": 10,
     "samplesMs": [
-      5432.1,
-      5522.4,
-      5548.8,
-      5687.5,
-      5621.1,
-      5508.2,
-      5720.6,
-      5411.9,
-      5570.2,
-      5676.6
+      7972.7,
+      8305.2,
+      8031.7,
+      8125.4,
+      8047,
+      8092.5,
+      8129.4,
+      8040.4,
+      7995.4,
+      8468.6
     ],
-    "p50Ms": 5548.8,
-    "p95Ms": 5720.6,
-    "peakRssMB": 529.8,
-    "peakArrayBuffersMB": 310.5,
-    "checksum": 7836892,
-    "bands": 11
+    "p50Ms": 8047,
+    "p95Ms": 8468.6,
+    "peakRssMB": 2618.1,
+    "peakArrayBuffersMB": 2197.4,
+    "checksum": 8403441,
+    "bands": 1,
+    "memoryMode": "high"
   },
   "preview1024": {
     "label": "1024px preview fast",
     "warmups": 2,
     "runs": 10,
     "samplesMs": [
-      89.9,
-      86.2,
-      96.7,
-      95.1,
-      94,
-      119.3,
-      104.4,
-      103.7,
-      93.9,
-      85.8
+      298,
+      260.4,
+      251.8,
+      253.4,
+      270.4,
+      247.8,
+      246.5,
+      272.4,
+      252.2,
+      255.8
     ],
-    "p50Ms": 94,
-    "p95Ms": 119.3,
+    "p50Ms": 253.4,
+    "p95Ms": 298,
     "peakRssMB": 0,
     "peakArrayBuffersMB": 0,
-    "checksum": 2.000941753387451,
-    "bands": 1
+    "checksum": 4.456587791442871,
+    "bands": 1,
+    "memoryMode": "n/a"
   }
 }
