@@ -11,6 +11,8 @@ import { documentComponentSize } from './bitDepth.js';
 import {
   PREVIEW_EFFECT_MAX_EDGE,
   computePreviewScale,
+  cropInterleavedRgb,
+  cropPreviewPlane,
   downsampleBox,
   downsampleExtractedFields,
   downsamplePlane,
@@ -33,6 +35,39 @@ function assertFinitePreview(rgb) {
   for (let i = 0; i < rgb.length; i++) {
     if (!Number.isFinite(rgb[i])) throw new Error(`Preview produced a non-finite RGB sample at ${i}`);
   }
+}
+
+/**
+ * Grain is multiplicative in linear light.  A 100% preview has two versions
+ * of the same source: Photoshop's ICC-managed sRGB pixels for display, and
+ * native-profile pixels for the Apply-equivalent algorithm path.  Transfer
+ * the native before/after ratio instead of recomputing Grain on the display
+ * pixels; this keeps the visible base color-managed without changing the
+ * density-dependent Grain strength selected by Apply.
+ * @param {Float32Array} displayBase
+ * @param {Float32Array} nativeBase
+ * @param {Float32Array} nativeGrained
+ * @param {number} displayAttenuation
+ * @param {AbortSignal|undefined} signal
+ */
+function transferNativeGrainGain(displayBase, nativeBase, nativeGrained, displayAttenuation, signal) {
+  if (displayBase.length !== nativeBase.length || nativeBase.length !== nativeGrained.length) {
+    throw new Error('Native Grain transfer dimensions do not match.');
+  }
+  const output = new Float32Array(displayBase.length);
+  for (let i = 0; i < output.length; i++) {
+    if ((i & 8191) === 0 && signal?.aborted) throw new Error('Film render cancelled');
+    const before = nativeBase[i];
+    // Grain is exactly identity at a zero channel. Preserve the ICC-managed
+    // display value instead of dividing by a denormal or manufacturing color.
+    if (before === 0) {
+      output[i] = displayBase[i];
+    } else {
+      const fullStrength = displayBase[i] * (nativeGrained[i] / before);
+      output[i] = displayBase[i] + displayAttenuation * (fullStrength - displayBase[i]);
+    }
+  }
+  return output;
 }
 async function readPreviewSource(doc) {
   // Preserve native bit depth so Photoshop does not need to perform the
@@ -69,7 +104,7 @@ async function readPreviewSource(doc) {
  * @param {{display?:object,effect?:object,decode?:(v:number)=>number,encode?:(v:number)=>number}} trc
  *   双源模式分别传 display/effect TRC；单源旧调用可直接传一个 TRC。
  * @param {object|null} cache 上次的 canonical 输入和中间量缓存
- * @param {{display?:object,effect?:object,cacheKey?:string,width?:number,height?:number,rgb?:Float32Array}|null} [source]
+ * @param {{display?:object,effect?:object,cacheKey?:string,width?:number,height?:number,rgb?:Float32Array,previewScale?:number,effectPreviewScale?:number,outputCrop?:{x:number,y:number,width:number,height:number}}|null} [source]
  *   双源模式：1024px ICC display + 2048px native effect；单源旧调用仍兼容。
  * @param {{signal?:AbortSignal,returnDataUrl?:boolean}} [options]
  * @returns {Promise<{dataUrl:string|null,png:Uint8Array,width:number,height:number,ms:number,cache:object,timings:object}>}
@@ -88,7 +123,8 @@ export async function renderPreviewIncremental(doc, paramsOrDocument, trc, cache
   const effectTrc = trc?.effect ?? displayTrc;
   const { width, height, rgb, alpha } = displaySource;
 
-  const scale = computePreviewScale(width, height);
+  const nativeInspection = source?.previewScale === 1;
+  const scale = nativeInspection ? 1 : computePreviewScale(width, height);
   let displayWork;
   if (scale < 1) {
     const dw = Math.max(1, Math.round(width * scale));
@@ -107,7 +143,7 @@ export async function renderPreviewIncremental(doc, paramsOrDocument, trc, cache
   // 效果源保持文档原生 profile，并使用与 Apply 相同的 TRC + primaries 路径。
   // 只有 targetSize 回退返回过大图像时才在此限制到 2048px；正常宿主路径已直接
   // 请求 2048px 代理，避免先把非线性高光压到 1024px。
-  const effectScale = computePreviewScale(effectSource.width, effectSource.height, PREVIEW_EFFECT_MAX_EDGE);
+  const effectScale = nativeInspection ? 1 : computePreviewScale(effectSource.width, effectSource.height, PREVIEW_EFFECT_MAX_EDGE);
   let effectWork;
   if (effectScale < 1) {
     const ew = Math.max(1, Math.round(effectSource.width * effectScale));
@@ -161,19 +197,39 @@ export async function renderPreviewIncremental(doc, paramsOrDocument, trc, cache
     if (effectToSRGB) applyMatrix3(effectLinear, effectToSRGB);
     c.effectLinear = effectLinear;
   }
+  // Keep the rendered base on the same Photoshop ICC-managed sRGB read used by
+  // the Source pane. The native-profile read is intentionally reserved for
+  // Halation extraction. Using it as the visible base can make the right pane
+  // darker on hosts that label native getPixels data differently by bit depth.
+  if (nativeInspection) {
+    if (w !== ew || h !== eh) throw new Error('Native inspection display/effect dimensions do not match.');
+  }
   throwIfCancelled(signal);
 
   // #5：σ 单位按原图尺寸解析（预览小图的 σ 保持原图语义）
   const rp = resolveSigmaParams(params, doc.width || width, doc.height || height);
-  const previewScale = Math.min(
-    displayWork.width / Math.max(1, doc.width || width),
-    displayWork.height / Math.max(1, doc.height || height),
-  );
-  const effectProxyScale = Math.min(
-    effectWork.width / Math.max(1, doc.width || width),
-    effectWork.height / Math.max(1, doc.height || height),
-  );
-  const p = { ...rp, sigma: Math.max(0.05, rp.sigma * previewScale), diffusionMode: 'fast' };
+  const previewScale = Number.isFinite(source?.previewScale)
+    ? source.previewScale
+    : Math.min(
+      displayWork.width / Math.max(1, doc.width || width),
+      displayWork.height / Math.max(1, doc.height || height),
+    );
+  const effectProxyScale = Number.isFinite(source?.effectPreviewScale)
+    ? source.effectPreviewScale
+    : Number.isFinite(source?.previewScale)
+      ? source.previewScale
+      : Math.min(
+        effectWork.width / Math.max(1, doc.width || width),
+        effectWork.height / Math.max(1, doc.height || height),
+      );
+  // Fit remains latency-oriented. Native 100% inspection uses the same
+  // Halation numerical mode as Apply so fine structure can be judged exactly.
+  const renderQuality = nativeInspection ? 'quality' : 'fast';
+  const p = {
+    ...rp,
+    sigma: Math.max(0.05, rp.sigma * previewScale),
+    diffusionMode: nativeInspection ? rp.diffusionMode : 'fast',
+  };
   // Source Expansion 在 2048px 光源代理上执行，其邻域半径必须使用代理尺度；
   // 扩散本身仍在 1024px 显示尺寸执行。
   const extractParams = { ...p, sigma: Math.max(0.05, rp.sigma * effectProxyScale) };
@@ -229,7 +285,9 @@ export async function renderPreviewIncremental(doc, paramsOrDocument, trc, cache
     const haloContext = {
       localGate: G,
       luminance: Y,
-      sourceRgb: baseLinear,
+      // At 100%, use the same native-profile canonical input as Apply for
+      // source-body protection. The visible blend below remains ICC-managed.
+      sourceRgb: nativeInspection ? effectLinear : baseLinear,
     };
     halo = haloStep({ sourceR, sourceG, sourceB, W, U, K }, plane, w, h, p, blurFn, temp, temp2, haloContext);
     densityGate = haloContext.densityGate ?? null;
@@ -275,6 +333,18 @@ export async function renderPreviewIncremental(doc, paramsOrDocument, trc, cache
   c.blendInput = baseLinear;
   c.halationOut = halationOut;
   const laterNodes = filmDocument?.graph.filter((node) => node.type === 'filmResolution' || node.type === 'grain') ?? [];
+  const resolutionNodes = laterNodes.filter((node) => node.type === 'filmResolution');
+  const grainNodes = laterNodes.filter((node) => node.type === 'grain');
+  const transferNativeGrain = nativeInspection && grainNodes.some(
+    (node) => node.enabled !== false && Number(node.params?.amount) !== 0,
+  );
+  // Photoshop's 100% canvas integrates stochastic detail over one logical
+  // display-pixel footprint. Preserve the native Grain field and geometry,
+  // but attenuate only its zero-mean display residual by the high-DPI area
+  // factor. Resizing the whole preview raster changes Grain size and aliases.
+  const grainDisplayAttenuation = nativeInspection
+    ? 1 / Math.max(1, Number(source?.pixelRatio ?? 1))
+    : 1;
   const graphKey = JSON.stringify({
     nodes: laterNodes,
     format: filmDocument?.format ?? null,
@@ -283,32 +353,75 @@ export async function renderPreviewIncremental(doc, paramsOrDocument, trc, cache
     originX,
     originY,
     previewScale,
-    quality: 'fast',
+    quality: renderQuality,
+    grainInput: transferNativeGrain ? 'apply-native' : 'display',
+    grainDisplayAttenuation,
   });
   c.nodeCaches ??= Object.create(null);
+  c.nativeNodeCaches ??= Object.create(null);
+  const stageContext = (nodeCaches) => ({
+    width: w,
+    height: h,
+    fullWidth: doc.width || width,
+    fullHeight: doc.height || height,
+    originX,
+    originY,
+    previewScale,
+    format: filmDocument?.format,
+    quality: renderQuality,
+    seed: laterNodes.find((node) => node.type === 'grain')?.params.seed ?? 0,
+    signal,
+    nodeCaches,
+  });
   const graphResult = c.graphResult
     && c.graphKey === graphKey
     && c.graphInput === halationOut.rgb
     ? c.graphResult
     : laterNodes.length
-      ? processFilmStages(
-        { width: w, height: h, rgb: halationOut.rgb, alpha: displayWork.alpha },
-        laterNodes,
-        {
-          width: w,
-          height: h,
-          fullWidth: doc.width || width,
-          fullHeight: doc.height || height,
-          originX,
-          originY,
-          previewScale,
-          format: filmDocument?.format,
-          quality: 'fast',
-          seed: laterNodes.find((node) => node.type === 'grain')?.params.seed ?? 0,
-          signal,
-          nodeCaches: c.nodeCaches,
-        },
-      )
+      ? transferNativeGrain
+        ? (() => {
+          const visibleBeforeGrain = resolutionNodes.length
+            ? processFilmStages(halationOut, resolutionNodes, stageContext(c.nodeCaches))
+            : halationOut;
+          const nativeHalationOut = {
+            width: w,
+            height: h,
+            rgb: blendStep({ rgb: effectLinear }, halo, null, w, h, p, densityGate),
+            alpha: effectWork.alpha,
+          };
+          const nativeBeforeGrain = resolutionNodes.length
+            ? processFilmStages(nativeHalationOut, resolutionNodes, stageContext(c.nativeNodeCaches))
+            : nativeHalationOut;
+          const nativeGrained = processFilmStages(
+            nativeBeforeGrain,
+            grainNodes,
+            stageContext(c.nativeNodeCaches),
+          );
+          return {
+            width: w,
+            height: h,
+            rgb: transferNativeGrainGain(
+              visibleBeforeGrain.rgb,
+              nativeBeforeGrain.rgb,
+              nativeGrained.rgb,
+              grainDisplayAttenuation,
+              signal,
+            ),
+            alpha: displayWork.alpha,
+            stats: {
+              nodes: [
+                ...(visibleBeforeGrain.stats?.nodes ?? []),
+                ...(nativeGrained.stats?.nodes ?? []),
+              ],
+              grainInput: 'apply-native',
+            },
+          };
+        })()
+        : processFilmStages(
+          { width: w, height: h, rgb: halationOut.rgb, alpha: displayWork.alpha },
+          laterNodes,
+          stageContext(c.nodeCaches),
+        )
       : halationOut;
   throwIfCancelled(signal);
   c.graphKey = graphKey;
@@ -319,12 +432,21 @@ export async function renderPreviewIncremental(doc, paramsOrDocument, trc, cache
   // Panel PNG has no embedded ICC profile. Keep the canonical linear-sRGB
   // result in sRGB primaries and encode with the sRGB TRC so sp-image does not
   // misinterpret Rec.2020/ProPhoto numeric values as sRGB.
-  const display = encodePanelPreviewSRGB(graphResult.rgb);
+  const outputCrop = source?.outputCrop ?? null;
+  const outputRgb = outputCrop
+    ? cropInterleavedRgb(graphResult.rgb, w, h, outputCrop)
+    : graphResult.rgb;
+  const outputAlpha = outputCrop
+    ? cropPreviewPlane(displayWork.alpha, w, h, outputCrop)
+    : displayWork.alpha;
+  const outputWidth = outputCrop ? Math.floor(outputCrop.width) : w;
+  const outputHeight = outputCrop ? Math.floor(outputCrop.height) : h;
+  const display = encodePanelPreviewSRGB(outputRgb);
   // 2.3：面板预览与画布写回保持一致的 soft-knee（>1 值软滚降；0=硬裁剪）
   if (p.rolloff > 0) applyRolloff(display, p.rolloff);
   throwIfCancelled(signal);
   const encodeStarted = Date.now();
-  const png = floatRgbToPng(w, h, display, displayWork.alpha);
+  const png = floatRgbToPng(outputWidth, outputHeight, display, outputAlpha);
   timings.encodeMs = Date.now() - encodeStarted;
   throwIfCancelled(signal);
   let dataUrl = null;
@@ -333,5 +455,5 @@ export async function renderPreviewIncremental(doc, paramsOrDocument, trc, cache
     dataUrl = pngToDataUrl(png);
     timings.base64Ms = Date.now() - base64Started;
   }
-  return { dataUrl, png, width: w, height: h, ms: Date.now() - t0, cache: c, timings };
+  return { dataUrl, png, width: outputWidth, height: outputHeight, ms: Date.now() - t0, cache: c, timings };
 }

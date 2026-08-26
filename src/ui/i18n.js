@@ -58,7 +58,7 @@ export const STRINGS = {
   migrationConfirm: 'Import Selected',
   migrationCancel: 'Cancel',
   preview: 'Preview',
-  previewStage: '1024 PX INSPECTION PREVIEW',
+  previewStage: 'INSPECTION PREVIEW',
   statusReady: 'Ready.',
   statusRendering: 'Rendering…',
   statusApplied: (ms) => `Rendered to a verified Film Halation copy (${ms}ms). Source preserved.`,
@@ -71,7 +71,7 @@ export const STRINGS = {
   statusFailed: (msg) => `Failed: ${msg}`,
   statusProfileNote: (note) => note,
   previewHint:
-    'Dragging updates the 1024px preview. Apply creates or updates a verified pixel-layer copy; the source layer is never written.',
+    'Fit shows the whole image. At 100%, drag the synchronized Source / Preview view to inspect native pixels. Apply never writes the source layer.',
   modeQuality: 'quality',
   modeFast: 'fast',
   blendAdditive: 'additive',

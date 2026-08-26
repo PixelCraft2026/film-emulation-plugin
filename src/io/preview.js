@@ -15,6 +15,86 @@ export const PREVIEW_MAX_EDGE = 1024;
 export const PREVIEW_EFFECT_MAX_EDGE = 2048;
 
 /**
+ * Clamp a point-to-point inspection viewport to a pixel layer's document-space
+ * bounds. Dimensions and coordinates are integers so one source sample maps to
+ * one preview image sample without sub-pixel resampling.
+ * @param {{left:number,top:number,right:number,bottom:number}} outer
+ * @param {{x?:number|null,y?:number|null}} center
+ * @param {{width:number,height:number}} viewport
+ */
+export function inspectionVisibleBounds(outer, center, viewport) {
+  const leftEdge = Math.ceil(Number(outer.left));
+  const topEdge = Math.ceil(Number(outer.top));
+  const rightEdge = Math.floor(Number(outer.right));
+  const bottomEdge = Math.floor(Number(outer.bottom));
+  if (!(rightEdge > leftEdge && bottomEdge > topEdge)) throw new RangeError('Inspection bounds must have positive area');
+  const outerWidth = rightEdge - leftEdge;
+  const outerHeight = bottomEdge - topEdge;
+  const width = Math.min(outerWidth, Math.max(1, Math.floor(Number(viewport.width) || 1)));
+  const height = Math.min(outerHeight, Math.max(1, Math.floor(Number(viewport.height) || 1)));
+  const requestedX = Number.isFinite(center?.x) ? Number(center.x) : (leftEdge + rightEdge) / 2;
+  const requestedY = Number.isFinite(center?.y) ? Number(center.y) : (topEdge + bottomEdge) / 2;
+  const left = Math.max(leftEdge, Math.min(rightEdge - width, Math.round(requestedX - width / 2)));
+  const top = Math.max(topEdge, Math.min(bottomEdge - height, Math.round(requestedY - height / 2)));
+  return {
+    left,
+    top,
+    right: left + width,
+    bottom: top + height,
+    centerX: left + width / 2,
+    centerY: top + height / 2,
+    width,
+    height,
+  };
+}
+
+/** Expand an inspection viewport by the graph support radius, clamped to the layer. */
+export function inspectionReadBounds(visible, outer, padding) {
+  const pad = Math.max(0, Math.ceil(Number(padding) || 0));
+  const left = Math.max(Math.ceil(Number(outer.left)), visible.left - pad);
+  const top = Math.max(Math.ceil(Number(outer.top)), visible.top - pad);
+  const right = Math.min(Math.floor(Number(outer.right)), visible.right + pad);
+  const bottom = Math.min(Math.floor(Number(outer.bottom)), visible.bottom + pad);
+  return { left, top, right, bottom };
+}
+
+/** Extract an integer RGB crop without resampling. */
+export function cropInterleavedRgb(rgb, width, height, crop) {
+  const x = Math.floor(crop.x);
+  const y = Math.floor(crop.y);
+  const cropWidth = Math.floor(crop.width);
+  const cropHeight = Math.floor(crop.height);
+  if (x < 0 || y < 0 || cropWidth < 1 || cropHeight < 1 || x + cropWidth > width || y + cropHeight > height) {
+    throw new RangeError('RGB crop is outside the source frame');
+  }
+  const out = new Float32Array(cropWidth * cropHeight * 3);
+  const rowLength = cropWidth * 3;
+  for (let row = 0; row < cropHeight; row++) {
+    const start = ((y + row) * width + x) * 3;
+    out.set(rgb.subarray(start, start + rowLength), row * rowLength);
+  }
+  return out;
+}
+
+/** Extract an integer single-channel crop without resampling. */
+export function cropPreviewPlane(plane, width, height, crop) {
+  if (!plane) return undefined;
+  const x = Math.floor(crop.x);
+  const y = Math.floor(crop.y);
+  const cropWidth = Math.floor(crop.width);
+  const cropHeight = Math.floor(crop.height);
+  if (x < 0 || y < 0 || cropWidth < 1 || cropHeight < 1 || x + cropWidth > width || y + cropHeight > height) {
+    throw new RangeError('Plane crop is outside the source frame');
+  }
+  const out = new Float32Array(cropWidth * cropHeight);
+  for (let row = 0; row < cropHeight; row++) {
+    const start = (y + row) * width + x;
+    out.set(plane.subarray(start, start + cropWidth), row * cropWidth);
+  }
+  return out;
+}
+
+/**
  * 计算降采样比例：最长边 > maxEdge 时缩至 maxEdge，否则 1（原尺寸）。
  * @param {number} width
  * @param {number} height

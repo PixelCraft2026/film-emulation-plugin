@@ -138,6 +138,41 @@ export function unlockPixelLayer(layer) {
   try { return layer.locked !== true; } catch (error) { return true; }
 }
 
+/**
+ * An Apply target is a rendered pixel copy, not an adjustment layer. Reused
+ * targets can retain user-edited layer presentation and silently attenuate the
+ * pixels written by putPixels, making the canvas disagree with Preview.
+ * Normalize only non-destructive presentation properties; masks, pixels and
+ * source bindings are untouched.
+ * @param {object} layer
+ * @param {any} [normalBlendMode='normal']
+ */
+export function normalizeEffectLayerPresentation(layer, normalBlendMode = 'normal') {
+  if (!layer) return null;
+  const read = (property) => {
+    try { return layer[property]; } catch (error) { return undefined; }
+  };
+  const before = {
+    opacity: read('opacity'),
+    fillOpacity: read('fillOpacity'),
+    blendMode: read('blendMode'),
+    visible: read('visible'),
+  };
+  try { layer.opacity = 100; } catch (error) { /* unsupported host property */ }
+  try { layer.fillOpacity = 100; } catch (error) { /* unsupported host property */ }
+  try { layer.blendMode = normalBlendMode; } catch (error) { /* unsupported host property */ }
+  try { layer.visible = true; } catch (error) { /* unsupported host property */ }
+  return {
+    before,
+    after: {
+      opacity: read('opacity'),
+      fillOpacity: read('fillOpacity'),
+      blendMode: read('blendMode'),
+      visible: read('visible'),
+    },
+  };
+}
+
 /** 不可读图层类型的操作指引（英文，与 V1 英文 UI 一致）。 */
 export function unreadableLayerMessage(layer) {
   let kind = 'unknown';

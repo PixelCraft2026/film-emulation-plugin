@@ -84,6 +84,46 @@ export function createSelect(o) {
   return row;
 }
 
+/**
+ * Effect enable switch. It is a native button with switch semantics instead
+ * of a Spectrum-only custom element so the control remains usable on older
+ * Photoshop UXP hosts as well.
+ * @param {{id:string,label:string,enabled:boolean,onChange:(enabled:boolean)=>void}} o
+ * @returns {{element:HTMLElement,setEnabled:(enabled:boolean)=>void}}
+ */
+export function createEffectSwitch(o) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.id = o.id;
+  button.classList.add('fhal-effect-toggle');
+  button.setAttribute('role', 'switch');
+  button.setAttribute('aria-label', `Enable ${o.label}`);
+  button.title = `${o.label}: enable or disable`;
+
+  const track = document.createElement('span');
+  track.classList.add('fhal-toggle-track');
+  const thumb = document.createElement('span');
+  thumb.classList.add('fhal-toggle-thumb');
+  track.append(thumb);
+  const state = document.createElement('span');
+  state.classList.add('fhal-toggle-state');
+  button.append(track, state);
+
+  const setEnabled = (enabled) => {
+    const value = enabled === true;
+    button.setAttribute('aria-checked', String(value));
+    button.setAttribute('data-enabled', String(value));
+    state.textContent = value ? 'On' : 'Off';
+  };
+  setEnabled(o.enabled);
+  button.addEventListener('click', () => {
+    const next = button.getAttribute('aria-checked') !== 'true';
+    setEnabled(next);
+    o.onChange(next);
+  });
+  return { element: button, setEnabled };
+}
+
 /** 数值显示辅助（红色偏移等小数值）。 */
 export function formatNum(v, digits = 3) {
   return Number(v).toFixed(digits);

@@ -6,9 +6,15 @@
  * 本文件只做视图与事件转发，不含算法与宿主逻辑。
  */
 import { STRINGS } from './i18n.js';
-import { createSlider, createSelect } from './controls.js';
+import { createSlider, createSelect, createEffectSwitch } from './controls.js';
+import {
+  defaultPreviewModeForDomain,
+  inspectionImageLayout,
+  inspectionViewportForCss,
+  normalizePreviewPixelRatio,
+} from './previewMode.js';
+import { replaceGraphNodeParams } from './graphState.js';
 import { createHalationPreset, HALATION_PRESET_LABELS, createFilmResolutionParams, createGrainParams } from '../core/index.js';
-
 
 function setDropdownValue(el, value) {
   if (!el) return;
@@ -24,9 +30,12 @@ function setDropdownValue(el, value) {
  *   format?: object,                      // V1.6 physical format
  *   featureLevel?: 'current'|'v1.5-bridge',
  *   onParamsChange: (partial:object)=>void, // 参数变更（partial 合并）
- *   onGraphChange?: (graph:Array<object>)=>void,
+ *   onGraphChange?: (graph:Array<object>,changedType:string)=>void,
  *   onFormatChange?: (partial:object)=>void,
  *   onRandomizeGrain?: ()=>void,
+ *   onPreviewModeChange?: (mode:'fit'|'actual',domain:string)=>void,
+ *   onPreviewPan?: (delta:{x:number,y:number})=>void,
+ *   onPreviewViewportChange?: (viewport:{width:number,height:number})=>void,
  *   onApply: ()=>void,                    // 触发 Apply
  *   onRebind: ()=>void,                   // 显式把当前像素层重新绑定为 source
  *   migrationRole?: 'export'|'import'|'none',
@@ -45,6 +54,9 @@ export function createPanel(handlers) {
     onGraphChange = () => {},
     onFormatChange = () => {},
     onRandomizeGrain = () => {},
+    onPreviewModeChange = () => {},
+    onPreviewPan = () => {},
+    onPreviewViewportChange = () => {},
     onApply,
     onRebind,
     migrationRole = 'none',
@@ -58,6 +70,7 @@ export function createPanel(handlers) {
     const explicitProfile = Object.prototype.hasOwnProperty.call(partial, 'profile');
     const effective = explicitProfile ? partial : { ...partial, profile: 'custom' };
     currentParams = { ...currentParams, ...effective };
+    currentGraph = replaceGraphNodeParams(currentGraph, 'halation', currentParams);
     if (!explicitProfile) setDropdownValue(document.getElementById('profile'), 'custom');
     onParamsChange(effective);
   };
@@ -105,18 +118,95 @@ export function createPanel(handlers) {
     .fhal-domain-panel { display: none; flex-direction: column; gap: 8px; }
     .fhal-domain-panel[data-active="true"] { display: flex; }
     .fhal-section-heading { padding-bottom: 6px; border-bottom: 1px solid rgba(255,255,255,.09); }
+    .fhal-effect-heading {
+      display: flex; align-items: center; justify-content: space-between; gap: 8px;
+      min-height: 27px; padding-bottom: 6px; border-bottom: 1px solid rgba(255,255,255,.09);
+    }
+    .fhal-effect-heading sp-heading { flex: 1 1 auto; min-width: 0; padding-bottom: 0; border-bottom: 0; }
+    .fhal-effect-toggle {
+      display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto;
+      min-width: 56px; height: 24px; padding: 2px 6px 2px 3px; border: 1px solid rgba(255,255,255,.20);
+      border-radius: 12px; color: rgba(255,255,255,.60); background: #17181a; cursor: pointer;
+      box-sizing: border-box; font: 600 10px/1 "Adobe Clean", "Segoe UI", sans-serif;
+    }
+    .fhal-effect-toggle:hover { border-color: rgba(255,255,255,.42); color: #fff; }
+    .fhal-effect-toggle:focus { outline: 1px solid #55a9d8; outline-offset: 1px; }
+    .fhal-toggle-track {
+      position: relative; display: inline-block; flex: 0 0 17px; width: 17px; height: 17px;
+      border-radius: 50%; background: #5b5d62; box-shadow: inset 0 0 0 1px rgba(0,0,0,.42);
+    }
+    .fhal-toggle-thumb { position: absolute; left: 2px; top: 2px; width: 13px; height: 13px; border-radius: 50%; background: #babcc0; }
+    .fhal-toggle-state { min-width: 20px; text-align: center; }
+    .fhal-effect-toggle[data-enabled="true"] { border-color: rgba(85,169,216,.72); color: #fff; background: #202a30; }
+    .fhal-effect-toggle[data-enabled="true"] .fhal-toggle-track { background: #55a9d8; }
+    .fhal-effect-toggle[data-enabled="true"] .fhal-toggle-thumb { left: 7px; background: #fff; }
     .fhal-physical-group { display: none; flex-direction: column; gap: 6px; margin-bottom: 4px; padding-bottom: 10px; border-bottom: 1px solid rgba(255,255,255,.09); }
     .fhal-physical-group[data-visible="true"] { display: flex; }
     .fhal-preview-stage {
       flex: 1 1 auto; min-width: 300px; min-height: 0; display: flex; flex-direction: column;
-      padding: 12px; box-sizing: border-box; background: #1d1e20;
+      padding: 12px; box-sizing: border-box; overflow: hidden; background: #1d1e20;
     }
+    .fhal-preview-toolbar {
+      flex: 0 0 auto; min-height: 31px; display: flex; align-items: center; justify-content: space-between;
+      gap: 10px; margin-bottom: 7px;
+    }
+    .fhal-preview-title {
+      color: rgba(255,255,255,.62); font: 600 10px/1.2 Consolas, monospace;
+      letter-spacing: .10em; text-transform: uppercase; white-space: nowrap;
+    }
+    .fhal-preview-modes {
+      display: inline-flex; align-items: center; padding: 2px; border-radius: 4px;
+      background: #151619; border: 1px solid rgba(255,255,255,.12);
+    }
+    .fhal-preview-mode {
+      min-width: 48px; height: 25px; padding: 0 10px; border: 0; border-radius: 3px;
+      color: rgba(255,255,255,.60); background: transparent; cursor: pointer;
+      font: 600 11px/1 "Adobe Clean", "Segoe UI", sans-serif;
+    }
+    .fhal-preview-mode:hover { color: #fff; background: rgba(255,255,255,.06); }
+    .fhal-preview-mode:focus { outline: 1px solid #55a9d8; outline-offset: -1px; }
+    .fhal-preview-mode[aria-pressed="true"] { color: #fff; background: #3a3c40; box-shadow: 0 1px 2px rgba(0,0,0,.35); }
     .fhal-preview-frame {
-      flex: 1; min-height: 220px; display: flex; align-items: center; justify-content: center;
+      position: relative; flex: 1; min-height: 220px; min-width: 0; display: flex; flex-direction: row;
+      align-items: stretch; justify-content: stretch;
       overflow: hidden; background: #101113; border: 1px solid rgba(255,255,255,.10);
       box-shadow: inset 0 0 0 1px rgba(0,0,0,.42), 0 8px 28px rgba(0,0,0,.18);
     }
-    #preview-image { width: 100%; height: 100%; object-fit: contain; }
+    .fhal-preview-frame[data-mode="actual"] { cursor: grab; }
+    .fhal-preview-frame[data-dragging="true"] { cursor: grabbing; }
+    .fhal-compare-pane {
+      position: relative; flex: 1 1 100%; width: 100%; max-width: 100%; min-width: 0; min-height: 0;
+      align-self: stretch;
+      display: flex; align-items: center; justify-content: center; box-sizing: border-box;
+      overflow: hidden; background-color: #0f1012;
+      background-image: linear-gradient(45deg, #17181a 25%, transparent 25%), linear-gradient(-45deg, #17181a 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #17181a 75%), linear-gradient(-45deg, transparent 75%, #17181a 75%);
+      background-size: 16px 16px; background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+    }
+    .fhal-preview-frame[data-mode="actual"] .fhal-compare-pane + .fhal-compare-pane { border-left: 1px solid rgba(110,176,214,.62); }
+    .fhal-compare-source { display: none; }
+    .fhal-preview-frame[data-mode="actual"] .fhal-compare-pane {
+      flex: 0 0 50%; width: 50%; max-width: 50%;
+    }
+    .fhal-preview-frame[data-mode="actual"] .fhal-compare-source { display: flex; }
+    .fhal-preview-frame[data-mode="fit"],
+    .fhal-preview-frame[data-mode="fit"] .fhal-compare-preview {
+      background-color: #000; background-image: none;
+    }
+    .fhal-compare-image { display: block; flex: 0 0 auto; user-select: none; pointer-events: none; transform: translate(0,0); }
+    .fhal-preview-frame[data-mode="fit"] .fhal-compare-preview .fhal-compare-image { width: 100%; height: 100%; object-fit: contain; }
+    .fhal-preview-frame[data-mode="actual"] .fhal-compare-image { width: auto; height: auto; max-width: none; max-height: none; object-fit: fill; }
+    .fhal-compare-label {
+      position: absolute; z-index: 2; left: 9px; bottom: 8px; padding: 3px 6px; border-radius: 2px;
+      color: rgba(255,255,255,.82); background: rgba(12,13,15,.70); pointer-events: none;
+      font: 600 9px/1 Consolas, monospace; letter-spacing: .12em;
+    }
+    .fhal-preview-frame[data-mode="fit"] .fhal-compare-label { display: none; }
+    .fhal-pan-hint {
+      display: none; position: absolute; z-index: 3; top: 9px; left: 50%; transform: translateX(-50%);
+      padding: 4px 7px; border-radius: 3px; color: rgba(255,255,255,.68); background: rgba(12,13,15,.72);
+      font: 9px/1.2 "Adobe Clean", "Segoe UI", sans-serif; pointer-events: none;
+    }
+    .fhal-preview-frame[data-mode="actual"]:hover .fhal-pan-hint { display: block; }
     @media (max-width: 760px) {
       .fhal-workspace { flex-direction: column; }
       .fhal-domain-nav {
@@ -134,6 +224,7 @@ export function createPanel(handlers) {
         border-right: 0; border-bottom: 1px solid rgba(128,128,128,.28);
       }
       .fhal-preview-stage { flex: 1 1 48%; min-width: 0; min-height: 220px; }
+      .fhal-preview-title { display: none; }
     }
     sp-heading, sp-label, sp-slider, sp-dropdown, sp-button, sp-body { flex-shrink: 0; }
   `;
@@ -186,6 +277,10 @@ export function createPanel(handlers) {
   physicalGroup.classList.add('fhal-physical-group');
   const domainPanels = { halation: halationPanel, resolution: resolutionPanel, grain: grainPanel };
   const domainButtons = {};
+  const graphToggles = {};
+  const previewModesByDomain = { halation: 'fit', resolution: 'actual', grain: 'actual' };
+  let activeDomain = 'halation';
+  let previewDomainSync = () => {};
   const addDomainButton = (domain, label, code) => {
     const button = document.createElement('button');
     button.type = 'button';
@@ -204,6 +299,7 @@ export function createPanel(handlers) {
     domainNav.append(button);
   };
   const showDomain = (domain) => {
+    activeDomain = domain;
     for (const [name, section] of Object.entries(domainPanels)) {
       section.setAttribute('data-active', String(name === domain));
       section.setAttribute('aria-hidden', String(name !== domain));
@@ -213,6 +309,7 @@ export function createPanel(handlers) {
       button.setAttribute('aria-selected', String(name === domain));
     }
     physicalGroup.setAttribute('data-visible', String(domain === 'resolution' || domain === 'grain'));
+    previewDomainSync(domain, previewModesByDomain[domain] ?? defaultPreviewModeForDomain(domain));
   };
   addDomainButton('halation', 'Halation', 'HAL / 30');
   const currentBuild = __FILM_FEATURE_LEVEL__ === 'current' && featureLevel === 'current';
@@ -248,6 +345,7 @@ export function createPanel(handlers) {
         }
         const next = createHalationPreset(value);
         currentParams = { ...next, redshift: [...next.redshift], sigmaRatio: [...next.sigmaRatio] };
+        currentGraph = replaceGraphNodeParams(currentGraph, 'halation', currentParams);
         panel.__handles?.updateParams(next);
         onParamsChange(next);
       },
@@ -268,19 +366,25 @@ export function createPanel(handlers) {
   if (__FILM_FEATURE_LEVEL__ === 'current' && featureLevel === 'current') {
     const resolution = currentGraph.find((node) => node.type === 'filmResolution')?.params ?? createFilmResolutionParams();
     const grain = currentGraph.find((node) => node.type === 'grain')?.params ?? createGrainParams();
-    const setNode = (type, partial) => {
-      const present = currentGraph.some((node) => node.type === type);
+    const updateNode = (type, partial = {}, enabled) => {
+      const existing = currentGraph.find((node) => node.type === type);
+      const nextEnabled = enabled === undefined ? (existing?.enabled ?? false) : enabled === true;
+      const params = type === 'filmResolution'
+        ? createFilmResolutionParams({ ...(existing?.params ?? {}), ...partial })
+        : createGrainParams({ ...(existing?.params ?? {}), ...partial });
       currentGraph = currentGraph.map((node) => node.type === type
-        ? { ...node, params: type === 'filmResolution' ? createFilmResolutionParams({ ...node.params, ...partial }) : createGrainParams({ ...node.params, ...partial }) }
+        ? { ...node, enabled: nextEnabled, params }
         : node);
-      if (!present) currentGraph.push({
+      if (!existing) currentGraph.push({
         id: type === 'filmResolution' ? 'film-resolution-main' : 'grain-main',
         type,
-        enabled: true,
-        params: type === 'filmResolution' ? createFilmResolutionParams(partial) : createGrainParams(partial),
+        enabled: nextEnabled,
+        params,
       });
-      onGraphChange(currentGraph);
+      onGraphChange(currentGraph, type);
     };
+    const setNode = (type, partial) => updateNode(type, partial);
+    const setNodeEnabled = (type, enabled) => updateNode(type, {}, enabled);
 
     const physicalHeading = document.createElement('sp-heading');
     physicalHeading.textContent = 'Film stock';
@@ -296,11 +400,19 @@ export function createPanel(handlers) {
       onChange: (value) => { currentFormat = { ...currentFormat, gauge: value }; onFormatChange({ gauge: value }); },
     }), createSlider({ id: 'filmIso', label: 'ISO', value: currentFormat.iso, min: 25, max: 3200, step: 1, onInput: (value) => { currentFormat = { ...currentFormat, iso: value }; onFormatChange({ iso: value }); } }));
 
+    const resolutionNode = currentGraph.find((node) => node.type === 'filmResolution');
     const resolutionHeading = document.createElement('sp-heading');
     resolutionHeading.textContent = 'Film Resolution';
-    resolutionHeading.classList.add('fhal-section-heading');
+    const resolutionSwitch = createEffectSwitch({
+      id: 'filmResolutionEnabled', label: 'Film Resolution', enabled: resolutionNode?.enabled === true,
+      onChange: (enabled) => setNodeEnabled('filmResolution', enabled),
+    });
+    graphToggles.filmResolution = resolutionSwitch;
+    const resolutionHeadingRow = document.createElement('div');
+    resolutionHeadingRow.classList.add('fhal-effect-heading');
+    resolutionHeadingRow.append(resolutionHeading, resolutionSwitch.element);
     resolutionPanel.append(
-      resolutionHeading,
+      resolutionHeadingRow,
       createSelect({
         id: 'filmResolutionProfile', label: 'Material', value: resolution.profile,
         options: [{ value: 'negative', label: 'Negative' }, { value: 'positive', label: 'Positive / print' }],
@@ -312,11 +424,19 @@ export function createPanel(handlers) {
       createSlider({ id: 'filmResolutionShoulderLoss', label: 'Highlight loss', value: resolution.shoulderLoss, min: 0, max: 1, step: 0.01, onInput: (value) => setNode('filmResolution', { shoulderLoss: value }) }),
     );
 
+    const grainNode = currentGraph.find((node) => node.type === 'grain');
     const grainHeading = document.createElement('sp-heading');
     grainHeading.textContent = 'Film Grain';
-    grainHeading.classList.add('fhal-section-heading');
+    const grainSwitch = createEffectSwitch({
+      id: 'grainEnabled', label: 'Film Grain', enabled: grainNode?.enabled === true,
+      onChange: (enabled) => setNodeEnabled('grain', enabled),
+    });
+    graphToggles.grain = grainSwitch;
+    const grainHeadingRow = document.createElement('div');
+    grainHeadingRow.classList.add('fhal-effect-heading');
+    grainHeadingRow.append(grainHeading, grainSwitch.element);
     grainPanel.append(
-      grainHeading,
+      grainHeadingRow,
       createSelect({
         id: 'grainProfile', label: 'Material', value: grain.profile,
         options: [{ value: 'negative', label: 'Negative' }, { value: 'positive', label: 'Positive / print' }],
@@ -459,19 +579,209 @@ export function createPanel(handlers) {
   // ---- Preview 图 ----
   const img = document.createElement('img');
   img.id = 'preview-image';
-  img.alt = 'preview';
+  img.alt = 'Rendered film preview';
+  img.draggable = false;
+  img.classList.add('fhal-compare-image');
+  const sourceImg = document.createElement('img');
+  sourceImg.id = 'preview-source-image';
+  sourceImg.alt = 'Original source preview';
+  sourceImg.draggable = false;
+  sourceImg.classList.add('fhal-compare-image');
 
   const previewStage = document.createElement('div');
   previewStage.classList.add('fhal-preview-stage');
-  const previewLabel = document.createElement('sp-label');
+  const previewToolbar = document.createElement('div');
+  previewToolbar.classList.add('fhal-preview-toolbar');
+  const previewLabel = document.createElement('div');
+  previewLabel.classList.add('fhal-preview-title');
   previewLabel.textContent = STRINGS.previewStage;
-  previewLabel.style.marginBottom = '7px';
-  previewLabel.style.letterSpacing = '0.08em';
-  previewLabel.style.opacity = '0.72';
+  const previewModes = document.createElement('div');
+  previewModes.classList.add('fhal-preview-modes');
+  previewModes.setAttribute('role', 'group');
+  previewModes.setAttribute('aria-label', 'Preview scale');
+  const fitButton = document.createElement('button');
+  fitButton.type = 'button';
+  fitButton.classList.add('fhal-preview-mode');
+  fitButton.textContent = 'Fit';
+  fitButton.title = 'Fit on screen';
+  const actualButton = document.createElement('button');
+  actualButton.type = 'button';
+  actualButton.classList.add('fhal-preview-mode');
+  actualButton.textContent = '100%';
+  actualButton.title = 'Inspect source pixels at 100%';
+  previewModes.append(fitButton, actualButton);
+  previewToolbar.append(previewLabel, previewModes);
   const previewFrame = document.createElement('div');
   previewFrame.classList.add('fhal-preview-frame');
-  previewFrame.append(img);
-  previewStage.append(previewLabel, previewFrame);
+  previewFrame.setAttribute('data-mode', 'fit');
+  previewFrame.setAttribute('data-dragging', 'false');
+  previewFrame.tabIndex = 0;
+  previewFrame.setAttribute('aria-label', 'Film preview. In 100 percent mode, drag to inspect another area.');
+  const sourcePane = document.createElement('div');
+  sourcePane.classList.add('fhal-compare-pane', 'fhal-compare-source');
+  const sourceLabel = document.createElement('span');
+  sourceLabel.classList.add('fhal-compare-label');
+  sourceLabel.textContent = 'SOURCE';
+  sourcePane.append(sourceImg, sourceLabel);
+  const previewPane = document.createElement('div');
+  previewPane.classList.add('fhal-compare-pane', 'fhal-compare-preview');
+  const renderedLabel = document.createElement('span');
+  renderedLabel.classList.add('fhal-compare-label');
+  renderedLabel.textContent = 'PREVIEW';
+  previewPane.append(img, renderedLabel);
+  const panHint = document.createElement('span');
+  panHint.classList.add('fhal-pan-hint');
+  panHint.textContent = 'Drag to inspect · Arrow keys move 64 px';
+  previewFrame.append(sourcePane, previewPane, panHint);
+  previewStage.append(previewToolbar, previewFrame);
+
+  let currentPreviewMode = 'fit';
+  let configuredPreviewPixelRatio = null;
+  const reportedPreviewPixelRatio = () => normalizePreviewPixelRatio(
+    previewFrame.uxpContainer?.devicePixelRatio
+      ?? globalThis.window?.devicePixelRatio
+      ?? globalThis.devicePixelRatio
+      ?? 1,
+  );
+  const previewPixelRatio = () => configuredPreviewPixelRatio ?? reportedPreviewPixelRatio();
+  const previewViewport = () => {
+    const target = currentPreviewMode === 'actual' ? previewPane : previewFrame;
+    const cssWidth = Math.max(1, Number(target.clientWidth) || 512);
+    const cssHeight = Math.max(1, Number(target.clientHeight) || 512);
+    return currentPreviewMode === 'actual'
+      ? inspectionViewportForCss(cssWidth, cssHeight, previewPixelRatio())
+      : { width: Math.floor(cssWidth), height: Math.floor(cssHeight), pixelRatio: 1 };
+  };
+  const nativeImageSizes = new Map();
+  const applyActualImageSize = (previewImage) => {
+    if (currentPreviewMode !== 'actual') return;
+    const stored = nativeImageSizes.get(previewImage);
+    const pixelWidth = stored?.width ?? Number(previewImage.naturalWidth || 0);
+    const pixelHeight = stored?.height ?? Number(previewImage.naturalHeight || 0);
+    if (!(pixelWidth > 0 && pixelHeight > 0)) return;
+    const layout = inspectionImageLayout(pixelWidth, pixelHeight, previewPixelRatio());
+    previewImage.style.width = `${layout.width}px`;
+    previewImage.style.height = `${layout.height}px`;
+    previewImage.style.objectFit = layout.objectFit;
+  };
+  sourceImg.addEventListener('load', () => applyActualImageSize(sourceImg));
+  img.addEventListener('load', () => applyActualImageSize(img));
+  const resetPreviewPanVisual = () => {
+    sourceImg.style.transform = 'translate(0px, 0px)';
+    img.style.transform = 'translate(0px, 0px)';
+    previewFrame.setAttribute('data-dragging', 'false');
+  };
+  // Photoshop UXP releases differ in their support for compound selectors and
+  // automatic flex sizing. Keep the mode-defining dimensions inline as a host
+  // compatibility fallback so images can never escape into the controls area.
+  const applyPreviewLayout = (mode) => {
+    const actual = mode === 'actual';
+    previewFrame.style.display = 'flex';
+    previewFrame.style.flexDirection = 'row';
+    previewFrame.style.overflow = 'hidden';
+    previewFrame.style.backgroundColor = actual ? '#101113' : '#000000';
+    for (const pane of [sourcePane, previewPane]) {
+      pane.style.boxSizing = 'border-box';
+      pane.style.minWidth = '0px';
+      pane.style.minHeight = '0px';
+      pane.style.overflow = 'hidden';
+      pane.style.alignSelf = 'stretch';
+      pane.style.flex = actual ? '0 0 50%' : '1 1 100%';
+      pane.style.width = actual ? '50%' : '100%';
+      pane.style.maxWidth = actual ? '50%' : '100%';
+      pane.style.backgroundColor = actual ? '#0f1012' : '#000000';
+      pane.style.backgroundImage = actual ? '' : 'none';
+    }
+    sourcePane.style.display = actual ? 'flex' : 'none';
+    previewPane.style.display = 'flex';
+    previewPane.style.borderLeft = actual ? '1px solid rgba(110,176,214,.62)' : '0px';
+    for (const previewImage of [sourceImg, img]) {
+      previewImage.style.display = 'block';
+      previewImage.style.flex = '0 0 auto';
+      previewImage.style.maxWidth = actual ? 'none' : '100%';
+      previewImage.style.maxHeight = actual ? 'none' : '100%';
+      previewImage.style.width = actual ? 'auto' : '100%';
+      previewImage.style.height = actual ? 'auto' : '100%';
+      previewImage.style.objectFit = actual ? 'fill' : 'contain';
+      if (actual) applyActualImageSize(previewImage);
+    }
+  };
+  const selectPreviewMode = (mode, notify = true) => {
+    currentPreviewMode = mode === 'actual' ? 'actual' : 'fit';
+    previewFrame.setAttribute('data-mode', currentPreviewMode);
+    applyPreviewLayout(currentPreviewMode);
+    fitButton.setAttribute('aria-pressed', String(currentPreviewMode === 'fit'));
+    actualButton.setAttribute('aria-pressed', String(currentPreviewMode === 'actual'));
+    resetPreviewPanVisual();
+    if (notify) onPreviewModeChange(currentPreviewMode, activeDomain);
+  };
+  fitButton.addEventListener('click', () => {
+    previewModesByDomain[activeDomain] = 'fit';
+    selectPreviewMode('fit');
+  });
+  actualButton.addEventListener('click', () => {
+    previewModesByDomain[activeDomain] = 'actual';
+    selectPreviewMode('actual');
+  });
+  previewDomainSync = (domain, mode) => selectPreviewMode(mode, true);
+  selectPreviewMode(previewModesByDomain[activeDomain], false);
+
+  let dragStart = null;
+  const updateDragVisual = (x, y) => {
+    const transform = `translate(${Math.round(x)}px, ${Math.round(y)}px)`;
+    sourceImg.style.transform = transform;
+    img.style.transform = transform;
+  };
+  const finishDrag = (event) => {
+    if (!dragStart) return;
+    const dx = Number(event.clientX) - dragStart.x;
+    const dy = Number(event.clientY) - dragStart.y;
+    dragStart = null;
+    previewFrame.setAttribute('data-dragging', 'false');
+    document.removeEventListener('mousemove', moveDrag);
+    document.removeEventListener('mouseup', finishDrag);
+    const pixelRatio = previewPixelRatio();
+    if (Math.abs(dx) >= 2 || Math.abs(dy) >= 2) onPreviewPan({ x: -Math.round(dx * pixelRatio), y: -Math.round(dy * pixelRatio) });
+    else resetPreviewPanVisual();
+  };
+  const moveDrag = (event) => {
+    if (!dragStart) return;
+    updateDragVisual(Number(event.clientX) - dragStart.x, Number(event.clientY) - dragStart.y);
+    event.preventDefault?.();
+  };
+  previewFrame.addEventListener('mousedown', (event) => {
+    if (currentPreviewMode !== 'actual' || (Number.isFinite(event.button) && event.button !== 0)) return;
+    dragStart = { x: Number(event.clientX), y: Number(event.clientY) };
+    previewFrame.setAttribute('data-dragging', 'true');
+    document.addEventListener('mousemove', moveDrag);
+    document.addEventListener('mouseup', finishDrag);
+    event.preventDefault?.();
+  });
+  previewFrame.addEventListener('keydown', (event) => {
+    if (currentPreviewMode !== 'actual') return;
+    const step = event.shiftKey ? 256 : 64;
+    const deltas = {
+      ArrowLeft: { x: -step, y: 0 },
+      ArrowRight: { x: step, y: 0 },
+      ArrowUp: { x: 0, y: -step },
+      ArrowDown: { x: 0, y: step },
+    };
+    const delta = deltas[event.key];
+    if (!delta) return;
+    event.preventDefault?.();
+    onPreviewPan(delta);
+  });
+  if (typeof ResizeObserver === 'function') {
+    let resizeTimer = null;
+    const observer = new ResizeObserver(() => {
+      if (currentPreviewMode !== 'actual') return;
+      applyActualImageSize(sourceImg);
+      applyActualImageSize(img);
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => onPreviewViewportChange(previewViewport()), 120);
+    });
+    observer.observe(previewPane);
+  }
 
   // ---- 固定底栏：Apply + 状态行 + 提示（不随参数滚动，永不重叠）----
   const footer = document.createElement('div');
@@ -605,15 +915,45 @@ export function createPanel(handlers) {
   };
   panel.__handles = {
     img,
+    sourceImg,
     status,
     applyBtn,
     rebindBtn,
     migrationBtn,
+    getPreviewView() {
+      return { mode: currentPreviewMode, domain: activeDomain, ...previewViewport() };
+    },
+    getReportedPreviewPixelRatio() {
+      return reportedPreviewPixelRatio();
+    },
+    getPreviewPixelRatio() {
+      return previewPixelRatio();
+    },
+    setPreviewPixelRatio(value) {
+      const next = normalizePreviewPixelRatio(value);
+      const changed = Math.abs(next - previewPixelRatio()) > 1e-4;
+      configuredPreviewPixelRatio = next;
+      if (changed) {
+        applyActualImageSize(sourceImg);
+        applyActualImageSize(img);
+      }
+      return changed;
+    },
+    resetPreviewPanVisual,
+    setPreviewPixelDimensions(target, width, height) {
+      const previewImage = target === 'source' ? sourceImg : img;
+      nativeImageSizes.set(previewImage, { width: Number(width), height: Number(height) });
+      applyActualImageSize(previewImage);
+    },
     chooseMigrationConflicts,
     updateGraph(nextGraph) {
       currentGraph = nextGraph.map((node) => ({ ...node, params: { ...node.params } }));
-      const resolution = currentGraph.find((node) => node.type === 'filmResolution')?.params;
-      const grain = currentGraph.find((node) => node.type === 'grain')?.params;
+      const resolutionNode = currentGraph.find((node) => node.type === 'filmResolution');
+      const grainNode = currentGraph.find((node) => node.type === 'grain');
+      const resolution = resolutionNode?.params;
+      const grain = grainNode?.params;
+      graphToggles.filmResolution?.setEnabled(resolutionNode?.enabled === true);
+      graphToggles.grain?.setEnabled(grainNode?.enabled === true);
       if (resolution) {
         setControl('filmResolutionProfile', resolution.profile);
         setControl('filmResolutionAmount', resolution.amount);
@@ -638,6 +978,7 @@ export function createPanel(handlers) {
     /** 参数恢复后刷新全部控件显示（不触发预览回调）。 */
     updateParams(p) {
       currentParams = { ...p, redshift: [...p.redshift], sigmaRatio: [...p.sigmaRatio] };
+      currentGraph = replaceGraphNodeParams(currentGraph, 'halation', currentParams);
       const sigmaSlider = document.getElementById('sigma');
       if (sigmaSlider) {
         sigmaSlider.min = p.sigmaUnits === 'diagonal' ? 0.1 : 0.5;

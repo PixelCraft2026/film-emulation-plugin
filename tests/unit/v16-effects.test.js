@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { PNG } from 'pngjs';
 import {
   createHalationParams,
   createFilmResolutionParams,
@@ -32,6 +33,21 @@ test('V1.6 physical formats and deterministic hash vectors are stable', () => {
   assert.equal(gaussianApprox(0x12345678, nodeHash, -7, 19, 2, 1), -0.5085549354553223);
   const emojiHash = fnv1aUtf8('grain-😀');
   assert.equal(hash32(0xabcdef01, emojiHash, -1, -2, 0, 3, 11), 0x46159d37);
+});
+
+test('V1.6 Resolution and Grain are opt-in and disabled nodes are exact identity', () => {
+  const graph = createDefaultEffectGraph(createHalationParams({ strength: 0 }), 0x12345678);
+  assert.equal(graph.find((node) => node.type === 'filmResolution').enabled, false);
+  assert.equal(graph.find((node) => node.type === 'grain').enabled, false);
+  const rgb = new Float32Array([2, -0.25, 0.18, 0.4, 0.2, 4]);
+  const alpha = new Float32Array([0, 0.63]);
+  const result = processFilmStages(
+    { width: 2, height: 1, rgb, alpha },
+    graph.filter((node) => node.type !== 'halation'),
+    { fullWidth: 2, fullHeight: 1, format: { gauge: '35mm', iso: 250 }, quality: 'quality' },
+  );
+  assert.strictEqual(result.rgb, rgb);
+  assert.strictEqual(result.alpha, alpha);
 });
 
 test('Film Resolution uses non-negative MTF mixing and preserves alpha/HDR', () => {
@@ -67,8 +83,8 @@ test('Grain is deterministic, alpha-mixed, and neutral-mean corrected', () => {
   const alpha = new Float32Array(width * height).fill(1);
   alpha[0] = 0;
   const graph = createDefaultEffectGraph(createHalationParams({ strength: 0 }), 0x12345678).map((node) => {
-    if (node.type === 'filmResolution') return { ...node, params: createFilmResolutionParams({ amount: 0 }) };
-    if (node.type === 'grain') return { ...node, params: createGrainParams({ amount: 1, seed: 0x12345678 }) };
+    if (node.type === 'filmResolution') return { ...node, enabled: true, params: createFilmResolutionParams({ amount: 0 }) };
+    if (node.type === 'grain') return { ...node, enabled: true, params: createGrainParams({ amount: 1, seed: 0x12345678 }) };
     return node;
   });
   const context = { width, height, fullWidth: width, fullHeight: height, format: { gauge: '35mm', iso: 250 }, quality: 'quality', seed: 0x12345678 };
@@ -96,8 +112,8 @@ test('Graph renderer is band-height invariant for coordinate-addressed Grain', (
     alpha[i] = (i % 11) / 10;
   }
   const graph = createDefaultEffectGraph(createHalationParams({ strength: 0 }), 0x9e3779b9).map((node) => {
-    if (node.type === 'filmResolution') return { ...node, params: createFilmResolutionParams({ amount: 0 }) };
-    if (node.type === 'grain') return { ...node, params: createGrainParams({ seed: 0x9e3779b9 }) };
+    if (node.type === 'filmResolution') return { ...node, enabled: true, params: createFilmResolutionParams({ amount: 0 }) };
+    if (node.type === 'grain') return { ...node, enabled: true, params: createGrainParams({ seed: 0x9e3779b9 }) };
     return node;
   });
   const document = { format: { gauge: '35mm', iso: 250 }, graph };
@@ -177,7 +193,7 @@ test('Maximum Grain controls keep HDR and negative Float32 samples finite', () =
 test('V1.6 24MP uses safe High memory on 16GB and aligned bands on unknown hosts', () => {
   const document = {
     format: { gauge: '35mm', iso: 250 },
-    graph: createDefaultEffectGraph(createHalationParams(), 0x12345678),
+    graph: createDefaultEffectGraph(createHalationParams(), 0x12345678).map((node) => node.type === 'halation' ? node : { ...node, enabled: true }),
   };
   const high = streamFilmGeometry(6000, 4000, document, {
     componentSize: 16,
@@ -223,9 +239,9 @@ test('Repeated Resolution and Grain preview adjustments remain finite and cancel
   const doc = { width: 2560, height: 1600 };
   let cache = null;
   for (let iteration = 0; iteration < 10; iteration++) {
-    const graph = createDefaultEffectGraph(createHalationParams({ strength: 0 }), 0x12345678).map((node) => {
-      if (node.type === 'filmResolution') return { ...node, params: createFilmResolutionParams({ amount: 0.5 + iteration * 0.08, response: 1 }) };
-      if (node.type === 'grain') return { ...node, params: createGrainParams({ amount: 0.4 + iteration * 0.1, mode: 'fast', seed: 0x12345678 }) };
+  const graph = createDefaultEffectGraph(createHalationParams({ strength: 0 }), 0x12345678).map((node) => {
+      if (node.type === 'filmResolution') return { ...node, enabled: true, params: createFilmResolutionParams({ amount: 0.5 + iteration * 0.08, response: 1 }) };
+      if (node.type === 'grain') return { ...node, enabled: true, params: createGrainParams({ amount: 0.4 + iteration * 0.1, mode: 'fast', seed: 0x12345678 }) };
       return node;
     });
     const result = await renderPreviewIncremental(doc, { format: { gauge: '35mm', iso: 250 }, graph }, trc, cache, source);
@@ -249,4 +265,258 @@ test('Repeated Resolution and Grain preview adjustments remain finite and cancel
     renderPreviewIncremental(doc, { format: { gauge: '35mm', iso: 250 }, graph: createDefaultEffectGraph(createHalationParams({ strength: 0 })) }, trc, cache, source, { signal: controller.signal }),
     /cancelled/,
   );
+});
+
+test('100% preview renders a padded native tile but publishes only the point-to-point crop', async () => {
+  const width = 10;
+  const height = 8;
+  const rgb = new Float32Array(width * height * 3);
+  const alpha = new Float32Array(width * height).fill(1);
+  for (let i = 0; i < width * height; i++) {
+    const value = 0.05 + i / 200;
+    rgb[i * 3] = value;
+    rgb[i * 3 + 1] = value;
+    rgb[i * 3 + 2] = value;
+  }
+  const graph = createDefaultEffectGraph(createHalationParams({ strength: 0 }), 0x12345678).map((node) => {
+    if (node.type === 'filmResolution') return { ...node, params: createFilmResolutionParams({ amount: 0 }) };
+    if (node.type === 'grain') return { ...node, params: createGrainParams({ amount: 0, seed: 0x12345678 }) };
+    return node;
+  });
+  const source = {
+    display: { width, height, rgb, alpha },
+    effect: { width, height, rgb, alpha },
+    cacheKey: 'native-inspection-tile',
+    originX: 123,
+    originY: 456,
+    previewScale: 1,
+    effectPreviewScale: 1,
+    outputCrop: { x: 2, y: 1, width: 4, height: 3 },
+  };
+  const trc = { display: TRC, effect: TRC };
+  const result = await renderPreviewIncremental(
+    { width: 3000, height: 2000 },
+    { format: { gauge: '35mm', iso: 250 }, graph },
+    trc,
+    null,
+    source,
+    { returnDataUrl: false },
+  );
+  assert.equal(result.width, 4);
+  assert.equal(result.height, 3);
+  assert.equal(result.cache.graphResult.width, width, 'effect support tile remains padded in cache');
+  const decoded = PNG.sync.read(Buffer.from(result.png));
+  assert.equal(decoded.width, 4);
+  assert.equal(decoded.height, 3);
+  const sourcePixel = (1 * width + 2) * 3;
+  assert.ok(Math.abs(decoded.data[0] - Math.round(rgb[sourcePixel] * 255)) <= 1);
+});
+
+test('100% preview keeps the Photoshop color-managed Source as its visible base', async () => {
+  const width = 6;
+  const height = 4;
+  const displayRgb = new Float32Array(width * height * 3);
+  const nativeRgb = new Float32Array(width * height * 3);
+  const alpha = new Float32Array(width * height).fill(1);
+  for (let i = 0; i < width * height; i++) {
+    displayRgb[i * 3] = 0.62;
+    displayRgb[i * 3 + 1] = 0.48;
+    displayRgb[i * 3 + 2] = 0.31;
+    // Deliberately different native-profile numeric values. They may feed
+    // Halation extraction, but must not replace the visible sRGB base.
+    nativeRgb[i * 3] = 0.18;
+    nativeRgb[i * 3 + 1] = 0.12;
+    nativeRgb[i * 3 + 2] = 0.07;
+  }
+  const graph = createDefaultEffectGraph(createHalationParams({ strength: 0 }), 0x12345678);
+  const source = {
+    display: { width, height, rgb: displayRgb, alpha },
+    effect: { width, height, rgb: nativeRgb, alpha },
+    cacheKey: 'native-color-managed-base',
+    previewScale: 1,
+    effectPreviewScale: 1,
+  };
+  const nativeTrc = { decode: (value) => value, encode: (value) => value, baseKey: 'sRGB' };
+  const result = await renderPreviewIncremental(
+    { width: 2400, height: 1600 },
+    { format: { gauge: '35mm', iso: 250 }, graph },
+    { display: TRC, effect: nativeTrc },
+    null,
+    source,
+    { returnDataUrl: false },
+  );
+  const decoded = PNG.sync.read(Buffer.from(result.png));
+  assert.ok(Math.abs(decoded.data[0] - Math.round(displayRgb[0] * 255)) <= 1);
+  assert.ok(Math.abs(decoded.data[1] - Math.round(displayRgb[1] * 255)) <= 1);
+  assert.ok(Math.abs(decoded.data[2] - Math.round(displayRgb[2] * 255)) <= 1);
+});
+
+test('100% Grain preview transfers the Apply-native gain onto the color-managed base', async () => {
+  const width = 36;
+  const height = 28;
+  const rgb = new Float32Array(width * height * 3);
+  const alpha = new Float32Array(width * height).fill(1);
+  const nativeRgb = new Float32Array(width * height * 3);
+  for (let i = 0; i < width * height; i++) {
+    const value = 0.08 + ((i * 37) % 101) / 180;
+    rgb[i * 3] = value;
+    rgb[i * 3 + 1] = value * 0.92;
+    rgb[i * 3 + 2] = value * 0.81;
+    nativeRgb[i * 3] = value * 0.42;
+    nativeRgb[i * 3 + 1] = value * 0.37;
+    nativeRgb[i * 3 + 2] = value * 0.29;
+  }
+  const graph = createDefaultEffectGraph(createHalationParams({ strength: 0 }), 0x9e3779b9)
+    .map((node) => node.type === 'grain'
+      ? {
+        ...node,
+        enabled: true,
+        params: createGrainParams({ amount: 1.2, mode: 'analogue', seed: 0x9e3779b9 }),
+      }
+      : node);
+  const source = {
+    display: { width, height, rgb, alpha },
+    effect: { width, height, rgb: nativeRgb, alpha },
+    cacheKey: 'native-quality-grain',
+    originX: 211,
+    originY: 97,
+    previewScale: 1,
+    effectPreviewScale: 1,
+    pixelRatio: 1.5,
+  };
+  const identityTrc = { decode: (value) => value, encode: (value) => value, baseKey: 'sRGB' };
+  const document = { width: 2400, height: 1600 };
+  const format = { gauge: '35mm', iso: 800 };
+  const result = await renderPreviewIncremental(
+    document,
+    { format, graph },
+    { display: identityTrc, effect: identityTrc },
+    null,
+    source,
+    { returnDataUrl: false },
+  );
+  const resolutionNodes = graph.filter((node) => node.type === 'filmResolution');
+  const grainNodes = graph.filter((node) => node.type === 'grain');
+  const context = {
+    width,
+    height,
+    fullWidth: document.width,
+    fullHeight: document.height,
+    originX: source.originX,
+    originY: source.originY,
+    previewScale: 1,
+    format,
+    quality: 'quality',
+    seed: 0x9e3779b9,
+  };
+  const displayBeforeGrain = processFilmStages(
+    { width, height, rgb, alpha },
+    resolutionNodes,
+    context,
+  );
+  const nativeBeforeGrain = processFilmStages(
+    { width, height, rgb: nativeRgb, alpha },
+    resolutionNodes,
+    context,
+  );
+  const nativeGrained = processFilmStages(
+    nativeBeforeGrain,
+    grainNodes,
+    context,
+  );
+  let rms = 0;
+  for (let i = 0; i < displayBeforeGrain.rgb.length; i++) {
+    const nativeBase = nativeBeforeGrain.rgb[i];
+    const fullStrength = nativeBase === 0
+      ? displayBeforeGrain.rgb[i]
+      : displayBeforeGrain.rgb[i] * (nativeGrained.rgb[i] / nativeBase);
+    const expected = displayBeforeGrain.rgb[i] + (fullStrength - displayBeforeGrain.rgb[i]) / source.pixelRatio;
+    const delta = result.cache.graphResult.rgb[i] - expected;
+    rms += delta * delta;
+  }
+  rms = Math.sqrt(rms / displayBeforeGrain.rgb.length);
+  assert.ok(rms <= 1e-7, `native-gain preview/apply Grain RMS=${rms}`);
+
+  // The old path recomputed the density envelope from the display pixels.
+  // Deliberately different native values must therefore produce a measurable
+  // result change while leaving the display baseline ICC-managed.
+  const oldDisplayPath = processFilmStages(
+    { width, height, rgb, alpha },
+    grainNodes,
+    {
+      ...context,
+    },
+  );
+  let oldPathRms = 0;
+  for (let i = 0; i < oldDisplayPath.rgb.length; i++) {
+    const delta = result.cache.graphResult.rgb[i] - oldDisplayPath.rgb[i];
+    oldPathRms += delta * delta;
+  }
+  oldPathRms = Math.sqrt(oldPathRms / oldDisplayPath.rgb.length);
+  assert.ok(oldPathRms > 1e-4, `regression fixture must distinguish the old display-based Grain path (${oldPathRms})`);
+});
+
+test('100% Grain tile matches the same region of a full-frame Apply render', async () => {
+  const width = 52;
+  const height = 40;
+  const rgb = new Float32Array(width * height * 3);
+  const alpha = new Float32Array(width * height).fill(1);
+  for (let i = 0; i < width * height; i++) {
+    const value = 0.06 + ((i * 53) % 137) / 220;
+    rgb[i * 3] = value;
+    rgb[i * 3 + 1] = value * 0.88;
+    rgb[i * 3 + 2] = value * 0.73;
+  }
+  const graph = createDefaultEffectGraph(createHalationParams({ strength: 0 }), 0x6a09e667)
+    .map((node) => node.type === 'grain'
+      ? { ...node, enabled: true, params: createGrainParams({ amount: 1.1, mode: 'analogue', seed: 0x6a09e667 }) }
+      : node);
+  const document = { format: { gauge: '35mm', iso: 800 }, graph };
+  const linearTrc = { decode: (value) => value, encode: (value) => value, baseKey: 'sRGB' };
+  const applied = processTiledFilmWithTrc(
+    { width, height, rgb, alpha },
+    document,
+    linearTrc,
+    { tileThreshold: Number.MAX_SAFE_INTEGER, quality: 'quality', fullWidth: width, fullHeight: height },
+  );
+  const crop = { x: 13, y: 9, width: 24, height: 18 };
+  const tileRgb = new Float32Array(crop.width * crop.height * 3);
+  const tileAlpha = new Float32Array(crop.width * crop.height);
+  for (let y = 0; y < crop.height; y++) {
+    for (let x = 0; x < crop.width; x++) {
+      const sourcePixel = (crop.y + y) * width + crop.x + x;
+      const tilePixel = y * crop.width + x;
+      tileRgb.set(rgb.subarray(sourcePixel * 3, sourcePixel * 3 + 3), tilePixel * 3);
+      tileAlpha[tilePixel] = alpha[sourcePixel];
+    }
+  }
+  const preview = await renderPreviewIncremental(
+    { width, height },
+    document,
+    { display: linearTrc, effect: linearTrc },
+    null,
+    {
+      display: { width: crop.width, height: crop.height, rgb: tileRgb, alpha: tileAlpha },
+      effect: { width: crop.width, height: crop.height, rgb: tileRgb, alpha: tileAlpha },
+      cacheKey: 'grain-apply-region',
+      originX: crop.x,
+      originY: crop.y,
+      previewScale: 1,
+      effectPreviewScale: 1,
+    },
+    { returnDataUrl: false },
+  );
+  let rms = 0;
+  for (let y = 0; y < crop.height; y++) {
+    for (let x = 0; x < crop.width; x++) {
+      const appliedPixel = ((crop.y + y) * width + crop.x + x) * 3;
+      const previewPixel = (y * crop.width + x) * 3;
+      for (let channel = 0; channel < 3; channel++) {
+        const delta = preview.cache.graphResult.rgb[previewPixel + channel] - applied.rgb[appliedPixel + channel];
+        rms += delta * delta;
+      }
+    }
+  }
+  rms = Math.sqrt(rms / (crop.width * crop.height * 3));
+  assert.ok(rms <= 1e-5, `100% preview/full Apply Grain RMS=${rms}`);
 });

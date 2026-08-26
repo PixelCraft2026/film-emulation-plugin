@@ -1,8 +1,20 @@
 // @ts-nocheck
 /** Film Halation V1.5 — 非破坏性 UXP 编排。 */
 import { createPanel } from './ui/panel.jsx';
+import { mergeIndependentGraphChange } from './ui/graphState.js';
+import { displayScaleForPreview } from './ui/previewMode.js';
 import { renderPreviewIncremental } from './io/previewRender.js';
-import { PREVIEW_MAX_EDGE, PREVIEW_EFFECT_MAX_EDGE, computePreviewScale, downsampleBox, downsamplePlane } from './io/preview.js';
+import {
+  PREVIEW_MAX_EDGE,
+  PREVIEW_EFFECT_MAX_EDGE,
+  computePreviewScale,
+  cropInterleavedRgb,
+  cropPreviewPlane,
+  downsampleBox,
+  downsamplePlane,
+  inspectionReadBounds,
+  inspectionVisibleBounds,
+} from './io/preview.js';
 import { createHalationParams, createHalationPreset, createDefaultEffectGraph, createFilmResolutionParams, createGrainParams, deriveSeed, fmix32, SEED_GOLDEN_RATIO, normalizeFilmFormat } from './core/index.js';
 import { renderDocumentToLayer, renderFilmDocumentToLayer, streamGeometry, streamFilmGeometry } from './io/streamRender.js';
 import { resolveDocumentTRC, resolvePixelTRC, standardProfileName } from './io/colorPipeline.js';
@@ -19,6 +31,7 @@ import {
   isPixelLayer,
   unreadableLayerMessage,
   layerPixelBounds,
+  normalizeEffectLayerPresentation,
   unlockPixelLayer,
   resolveApplyTarget,
 } from './io/layerOps.js';
@@ -89,6 +102,7 @@ async function writeDiagFile(name, data) {
 
 let panel;
 let img;
+let sourceImg;
 let status;
 let applyBtn;
 let migrationBtn;
@@ -102,6 +116,9 @@ try {
     onGraphChange,
     onFormatChange,
     onRandomizeGrain,
+    onPreviewModeChange,
+    onPreviewPan,
+    onPreviewViewportChange,
     onApply: runApply,
     onRebind: runRebind,
     migrationRole: MIGRATION_ROLE,
@@ -109,15 +126,43 @@ try {
     onImportMigration: runImportMigration,
   });
   document.body.append(panel);
-  ({ img, status, applyBtn, migrationBtn } = panel.__handles);
+  ({ img, sourceImg, status, applyBtn, migrationBtn } = panel.__handles);
 } catch (error) {
   console.error('[film-halation] panel creation failed: ' + (error && (error.stack || error.message || error)));
   writeDiagFile('ui-error.json', { message: String(error), at: new Date().toISOString() });
   status = { textContent: '' };
   img = { removeAttribute() {}, src: '' };
+  sourceImg = { removeAttribute() {}, src: '' };
   applyBtn = { disabled: false };
   migrationBtn = { disabled: false };
 }
+
+async function refreshPreviewDisplayScale() {
+  if (!panel?.__handles?.setPreviewPixelRatio) return false;
+  const reported = panel.__handles.getReportedPreviewPixelRatio?.() ?? 1;
+  let configurations = [];
+  try {
+    configurations = await ps.core.getDisplayConfiguration({ physicalResolution: true });
+  } catch (error) {
+    console.warn('[film-halation] display scale query failed; using UXP ratio: ' + (error?.message || error));
+  }
+  const displayList = Array.isArray(configurations) ? configurations : [];
+  const ratio = displayScaleForPreview(displayList, reported);
+  const changed = panel.__handles.setPreviewPixelRatio(ratio);
+  console.log('[film-halation] preview display scale', {
+    reportedRatio: reported,
+    resolvedRatio: ratio,
+    displays: displayList.map((display) => ({ scaleFactor: display.scaleFactor, isPrimary: display.isPrimary })),
+  });
+  return changed;
+}
+
+Promise.resolve()
+  .then(() => refreshPreviewDisplayScale())
+  .then((changed) => {
+    if (changed && panel?.__handles?.getPreviewView?.().mode === 'actual') schedulePreview();
+  })
+  .catch((error) => console.warn('[film-halation] preview display scale initialization failed: ' + (error?.message || error)));
 
 let taskChain = Promise.resolve();
 function enqueueTask(fn) {
@@ -126,7 +171,7 @@ function enqueueTask(fn) {
   return result;
 }
 
-let previewObjectUrl = null;
+const previewObjectUrls = { preview: null, source: null };
 function supportsPreviewObjectUrl() {
   return typeof Blob === 'function'
     && typeof URL !== 'undefined'
@@ -134,31 +179,40 @@ function supportsPreviewObjectUrl() {
     && typeof URL.revokeObjectURL === 'function';
 }
 
-function releasePreviewObjectUrl() {
-  if (!previewObjectUrl) return;
-  try { URL.revokeObjectURL(previewObjectUrl); } catch (error) { /* host cleanup is best-effort */ }
-  previewObjectUrl = null;
+function releasePreviewObjectUrl(target = 'preview') {
+  const url = previewObjectUrls[target];
+  if (!url) return;
+  try { URL.revokeObjectURL(url); } catch (error) { /* host cleanup is best-effort */ }
+  previewObjectUrls[target] = null;
 }
 
 function clearPreviewImage() {
   img.removeAttribute('src');
-  releasePreviewObjectUrl();
+  sourceImg.removeAttribute('src');
+  releasePreviewObjectUrl('preview');
+  releasePreviewObjectUrl('source');
 }
 
-function publishPreviewImage(result, requestId) {
+function publishPreviewImage(result, requestId, target = 'preview') {
+  const element = target === 'source' ? sourceImg : img;
+  const layoutWidth = Number(result.layoutWidth ?? result.width);
+  const layoutHeight = Number(result.layoutHeight ?? result.height);
+  if (layoutWidth > 0 && layoutHeight > 0) {
+    panel?.__handles?.setPreviewPixelDimensions?.(target, layoutWidth, layoutHeight);
+  }
   if (supportsPreviewObjectUrl()) {
     try {
       const nextUrl = URL.createObjectURL(new Blob([result.png], { type: 'image/png' }));
-      const previousUrl = previewObjectUrl;
-      previewObjectUrl = nextUrl;
-      img.onerror = () => {
-        if (previewObjectUrl !== nextUrl || requestId !== previewRequestId) return;
+      const previousUrl = previewObjectUrls[target];
+      previewObjectUrls[target] = nextUrl;
+      element.onerror = () => {
+        if (previewObjectUrls[target] !== nextUrl || requestId !== previewRequestId) return;
         try { URL.revokeObjectURL(nextUrl); } catch (error) { /* ignore */ }
-        previewObjectUrl = null;
-        img.onerror = null;
-        img.src = result.dataUrl || pngToDataUrl(result.png);
+        previewObjectUrls[target] = null;
+        element.onerror = null;
+        element.src = result.dataUrl || pngToDataUrl(result.png);
       };
-      img.src = nextUrl;
+      element.src = nextUrl;
       if (previousUrl) {
         try { URL.revokeObjectURL(previousUrl); } catch (error) { /* ignore */ }
       }
@@ -167,9 +221,9 @@ function publishPreviewImage(result, requestId) {
       console.warn('[film-halation] Blob preview URL unavailable; using data URL fallback: ' + (error?.message || error));
     }
   }
-  releasePreviewObjectUrl();
-  img.onerror = null;
-  img.src = result.dataUrl || pngToDataUrl(result.png);
+  releasePreviewObjectUrl(target);
+  element.onerror = null;
+  element.src = result.dataUrl || pngToDataUrl(result.png);
   return 'data';
 }
 
@@ -186,6 +240,16 @@ function immediateSourcePreviewPng(source) {
   );
 }
 
+function inspectionSourcePreviewPng(source) {
+  const crop = source.outputCrop ?? { x: 0, y: 0, width: source.display.width, height: source.display.height };
+  return floatRgbToPng(
+    crop.width,
+    crop.height,
+    cropInterleavedRgb(source.display.rgb, source.display.width, source.display.height, crop),
+    cropPreviewPlane(source.display.alpha, source.display.width, source.display.height, crop),
+  );
+}
+
 function createPreviewAbortController() {
   if (typeof AbortController === 'function') return new AbortController();
   const signal = { aborted: false };
@@ -196,6 +260,9 @@ function currentDoc() {
   return app.activeDocument;
 }
 
+let previewMode = 'fit';
+let inspectionState = { centerX: null, centerY: null, pendingX: 0, pendingY: 0, viewportWidth: 512, viewportHeight: 512 };
+
 let lastDocId = null;
 setInterval(() => {
   const doc = currentDoc();
@@ -205,8 +272,8 @@ setInterval(() => {
   previewRequestId++;
   previewAbortController?.abort();
   clearPreviewImage();
-  previewCache = null;
-  previewSourceCache = null;
+  clearPreviewCaches();
+  inspectionState = { ...inspectionState, centerX: null, centerY: null, pendingX: 0, pendingY: 0 };
   documentState = { format: { gauge: '35mm', iso: 250 }, bindings: { sourceLayer: null, targetLayer: null } };
   filmDocument = createRuntimeDocument(params, randomSeed(`document:${String(id ?? '')}`));
   if (!doc) {
@@ -227,9 +294,12 @@ function onParamsChange(partial) {
   schedulePreview();
 }
 
-function onGraphChange(nextGraph) {
+function onGraphChange(nextGraph, changedType) {
   if (!IS_CURRENT_BUILD) return;
-  filmDocument = { ...filmDocument, graph: nextGraph };
+  filmDocument = {
+    ...filmDocument,
+    graph: mergeIndependentGraphChange(filmDocument.graph, nextGraph, changedType),
+  };
   schedulePreview();
 }
 
@@ -252,6 +322,36 @@ function onRandomizeGrain() {
   schedulePreview();
 }
 
+function onPreviewModeChange(mode) {
+  previewMode = mode === 'actual' ? 'actual' : 'fit';
+  const view = panel?.__handles?.getPreviewView?.();
+  if (view) inspectionState = { ...inspectionState, viewportWidth: view.width, viewportHeight: view.height };
+  schedulePreview();
+}
+
+function onPreviewPan(delta) {
+  if (previewMode !== 'actual') return;
+  const dx = Number(delta.x || 0);
+  const dy = Number(delta.y || 0);
+  inspectionState = {
+    ...inspectionState,
+    centerX: Number.isFinite(inspectionState.centerX) ? inspectionState.centerX + dx : null,
+    centerY: Number.isFinite(inspectionState.centerY) ? inspectionState.centerY + dy : null,
+    pendingX: Number.isFinite(inspectionState.centerX) ? 0 : inspectionState.pendingX + dx,
+    pendingY: Number.isFinite(inspectionState.centerY) ? 0 : inspectionState.pendingY + dy,
+  };
+  schedulePreview();
+}
+
+function onPreviewViewportChange(viewport) {
+  if (previewMode !== 'actual') return;
+  const width = Math.max(1, Math.floor(Number(viewport.width) || 1));
+  const height = Math.max(1, Math.floor(Number(viewport.height) || 1));
+  if (Math.abs(width - inspectionState.viewportWidth) < 2 && Math.abs(height - inspectionState.viewportHeight) < 2) return;
+  inspectionState = { ...inspectionState, viewportWidth: width, viewportHeight: height };
+  schedulePreview();
+}
+
 let panelTimer = null;
 let previewRequestId = 0;
 let previewAbortController = null;
@@ -271,6 +371,13 @@ function schedulePreview() {
 
 let previewCache = null;
 let previewSourceCache = null;
+const previewSourceCaches = new Map();
+
+function clearPreviewCaches() {
+  previewCache = null;
+  previewSourceCache = null;
+  previewSourceCaches.clear();
+}
 
 function previewHistoryKey(doc) {
   try {
@@ -298,7 +405,7 @@ async function readPreviewVariant(doc, readOptions, sourceWidth, sourceHeight, m
   }
 }
 
-async function boundPreviewSources(doc) {
+async function boundPreviewSources(doc, view) {
   const binding = documentState.bindings.sourceLayer;
   const sourceLayer = resolvePreviewSourceLayer(doc, binding);
   if (!sourceLayer) {
@@ -311,6 +418,40 @@ async function boundPreviewSources(doc) {
   const sourceHeight = bounds.bottom - bounds.top;
   const componentSize = documentComponentSize(doc);
   const historyKey = previewHistoryKey(doc);
+  const actual = view?.mode === 'actual';
+  let visibleBounds = null;
+  let readBounds = bounds;
+  let support = 0;
+  if (actual) {
+    visibleBounds = inspectionVisibleBounds(
+      bounds,
+      {
+        x: (Number.isFinite(inspectionState.centerX) ? inspectionState.centerX : (bounds.left + bounds.right) / 2) + inspectionState.pendingX,
+        y: (Number.isFinite(inspectionState.centerY) ? inspectionState.centerY : (bounds.top + bounds.bottom) / 2) + inspectionState.pendingY,
+      },
+      { width: view.width, height: view.height },
+    );
+    inspectionState = {
+      ...inspectionState,
+      centerX: visibleBounds.centerX,
+      centerY: visibleBounds.centerY,
+      pendingX: 0,
+      pendingY: 0,
+      viewportWidth: visibleBounds.width,
+      viewportHeight: visibleBounds.height,
+    };
+    const supportPlan = streamFilmGeometry(sourceWidth, sourceHeight, filmDocument, {
+      componentSize,
+      fullWidth: Number(doc.width),
+      fullHeight: Number(doc.height),
+      previewScale: 1,
+      quality: 'quality',
+      memoryMode: 'balanced',
+      deviceMemoryGB: Number(globalThis.navigator?.deviceMemory ?? 0),
+    });
+    support = supportPlan.overlap;
+    readBounds = inspectionReadBounds(visibleBounds, bounds, support);
+  }
   const cacheKey = [
     doc.id,
     sourceLayer.id,
@@ -321,34 +462,61 @@ async function boundPreviewSources(doc) {
     componentSize,
     String(doc.colorProfileName || ''),
     historyKey,
+    actual ? 'actual' : 'fit',
+    readBounds.left,
+    readBounds.top,
+    readBounds.right,
+    readBounds.bottom,
+    visibleBounds?.left ?? '',
+    visibleBounds?.top ?? '',
+    visibleBounds?.right ?? '',
+    visibleBounds?.bottom ?? '',
+    actual ? 1 : 0,
   ].join(':');
-  if (previewSourceCache?.cacheKey === cacheKey) return previewSourceCache;
+  const cached = previewSourceCaches.get(cacheKey);
+  if (cached) {
+    previewSourceCache = cached;
+    return cached;
+  }
 
   const nativeReadOptions = {
     layerID: sourceLayer.id,
     layerName: sourceLayer.name,
-    bounds,
+    bounds: readBounds,
     componentSize,
   };
-  // 1024px 底图由 Photoshop ICC 引擎转换到 sRGB，保证面板观感与画布一致。
-  const display = await readPreviewVariant(
-    doc,
-    { ...nativeReadOptions, colorProfile: standardProfileName('sRGB') },
-    sourceWidth,
-    sourceHeight,
-    PREVIEW_MAX_EDGE,
-    'display preview',
-  );
-  // 2048px 效果代理不请求 profile 转换；后续使用与 Apply 相同的 TRC/primaries 路径，
-  // 保留 Rec.2020 等宽色域中的高饱和峰值并在更高分辨率执行非线性提取。
-  const effect = await readPreviewVariant(
-    doc,
-    nativeReadOptions,
-    sourceWidth,
-    sourceHeight,
-    PREVIEW_EFFECT_MAX_EDGE,
-    'effect-source preview',
-  );
+  // 100% inspection reads only the padded local tile at native resolution.
+  // Fit mode retains Photoshop's 1024/2048 pyramid proxies.
+  const readWidth = readBounds.right - readBounds.left;
+  const readHeight = readBounds.bottom - readBounds.top;
+  const display = actual
+    ? await readDocumentPixels(doc, { ...nativeReadOptions, colorProfile: standardProfileName('sRGB') })
+    : await readPreviewVariant(
+      doc,
+      { ...nativeReadOptions, colorProfile: standardProfileName('sRGB') },
+      readWidth,
+      readHeight,
+      PREVIEW_MAX_EDGE,
+      'display preview',
+    );
+  const effect = actual
+    ? await readDocumentPixels(doc, nativeReadOptions)
+    : await readPreviewVariant(
+      doc,
+      nativeReadOptions,
+      readWidth,
+      readHeight,
+      PREVIEW_EFFECT_MAX_EDGE,
+      'effect-source preview',
+    );
+  const outputCrop = visibleBounds
+    ? {
+      x: visibleBounds.left - readBounds.left,
+      y: visibleBounds.top - readBounds.top,
+      width: visibleBounds.width,
+      height: visibleBounds.height,
+    }
+    : null;
   previewSourceCache = {
     display,
     effect,
@@ -356,9 +524,19 @@ async function boundPreviewSources(doc) {
     documentID: doc.id,
     layerID: sourceLayer.id,
     historyKey,
-    originX: bounds.left,
-    originY: bounds.top,
+    originX: readBounds.left,
+    originY: readBounds.top,
+    previewScale: actual ? 1 : undefined,
+    effectPreviewScale: actual ? 1 : undefined,
+    pixelRatio: actual ? Number(view.pixelRatio || 1) : 1,
+    outputCrop,
+    visibleBounds,
+    readBounds,
+    support,
+    mode: actual ? 'actual' : 'fit',
   };
+  previewSourceCaches.set(cacheKey, previewSourceCache);
+  while (previewSourceCaches.size > 6) previewSourceCaches.delete(previewSourceCaches.keys().next().value);
   return previewSourceCache;
 }
 
@@ -366,19 +544,38 @@ async function runPanelPreview(requestId = null, signal = null) {
   const doc = currentDoc();
   if (!doc) return;
   if (signal?.aborted || (requestId !== null && requestId !== previewRequestId)) return;
+  const view = panel?.__handles?.getPreviewView?.() ?? { mode: previewMode, width: 512, height: 512 };
+  previewMode = view.mode === 'actual' ? 'actual' : 'fit';
+  if (previewMode === 'actual') {
+    inspectionState = { ...inspectionState, viewportWidth: view.width, viewportHeight: view.height };
+  }
   const renderParams = filmDocument;
   const totalStarted = Date.now();
   try {
     const readStarted = Date.now();
-    const sources = await ps.core.executeAsModal(async () => boundPreviewSources(doc), {
+    const sources = await ps.core.executeAsModal(async () => boundPreviewSources(doc, view), {
       commandName: 'film-halation-read-preview',
     });
     const readMs = Date.now() - readStarted;
     if (signal?.aborted || (requestId !== null && requestId !== previewRequestId)) return;
     const sourceChanged = !previewCache || previewCache.sourceKey !== sources.cacheKey;
-    if (sourceChanged && supportsPreviewObjectUrl()) {
-      const basePng = immediateSourcePreviewPng(sources.display);
-      publishPreviewImage({ png: basePng, dataUrl: null }, requestId ?? previewRequestId);
+    if (sourceChanged && (supportsPreviewObjectUrl() || sources.mode === 'actual')) {
+      panel?.__handles?.resetPreviewPanVisual?.();
+      const baseResult = sources.mode === 'actual'
+        ? {
+          png: inspectionSourcePreviewPng(sources),
+          dataUrl: null,
+          width: sources.outputCrop.width,
+          height: sources.outputCrop.height,
+        }
+        : {
+          png: immediateSourcePreviewPng(sources.display),
+          dataUrl: null,
+          width: sources.display.width,
+          height: sources.display.height,
+        };
+      if (sources.mode === 'actual') publishPreviewImage(baseResult, requestId ?? previewRequestId, 'source');
+      publishPreviewImage(baseResult, requestId ?? previewRequestId, 'preview');
       status.textContent = STRINGS.statusPreviewRefining;
       // Let UXP paint the color-managed source before the heavier physical
       // effect proxy is processed on the main thread.
@@ -405,6 +602,24 @@ async function runPanelPreview(requestId = null, signal = null) {
       renderMs: result.ms,
       transport,
       pngBytes: result.png.length,
+      mode: sources.mode,
+      pixelRatio: sources.pixelRatio,
+      visibleBounds: sources.visibleBounds,
+      support: sources.support,
+      grain: (() => {
+        const node = renderParams.graph?.find((item) => item.type === 'grain');
+        return node ? {
+          enabled: node.enabled !== false,
+          seed: node.params?.seed,
+          amount: node.params?.amount,
+          size: node.params?.size,
+          mode: node.params?.mode,
+          profile: node.params?.profile,
+          iso: renderParams.format?.iso,
+          originX: sources.originX,
+          originY: sources.originY,
+        } : null;
+      })(),
       ...result.timings,
     });
   } catch (error) {
@@ -435,10 +650,10 @@ async function runApply() {
       status.textContent = STRINGS.statusFailed(result.error);
       return;
     }
+    console.log('[film-halation] Apply render result', result.render);
     previewRequestId++;
     previewAbortController?.abort();
-    previewCache = null;
-    previewSourceCache = null;
+    clearPreviewCaches();
     status.textContent = STRINGS.statusApplied(result.applyMs);
   } catch (error) {
     status.textContent = STRINGS.statusFailed(error.message || error);
@@ -474,8 +689,8 @@ async function runRebind() {
   previewRequestId++;
   previewAbortController?.abort();
   if (!cachedSourceIsSelected) {
-    previewCache = null;
-    previewSourceCache = null;
+    clearPreviewCaches();
+    inspectionState = { ...inspectionState, centerX: null, centerY: null, pendingX: 0, pendingY: 0 };
   }
   await saveParamsForDoc(doc, params, { ...documentState, document: filmDocument });
   status.textContent = STRINGS.statusRebound;
@@ -590,6 +805,11 @@ async function renderToSafeCopy(doc, renderDocument, options) {
   }
 
   unlockPixelLayer(targetLayer);
+  const targetPresentation = normalizeEffectLayerPresentation(
+    targetLayer,
+    ps.constants?.BlendMode?.NORMAL ?? 'normal',
+  );
+  console.log('[film-halation] Apply target presentation', targetPresentation);
   const targetBinding = createLayerBinding(targetLayer, 'render-target-v1');
   try {
     const targetBounds = layerPixelBounds(targetLayer) ?? sourceBounds;

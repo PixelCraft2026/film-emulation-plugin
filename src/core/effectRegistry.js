@@ -190,8 +190,10 @@ export function normalizeEffectGraph(graph, options = {}) {
 export function createDefaultEffectGraph(halationParams, seed = GRAIN_DEFAULTS.seed) {
   return normalizeEffectGraph([
     { id: 'halation-main', type: 'halation', enabled: true, params: createHalationParams(halationParams) },
-    { id: 'film-resolution-main', type: 'filmResolution', enabled: true, params: createFilmResolutionParams() },
-    { id: 'grain-main', type: 'grain', enabled: true, params: createGrainParams({ seed, seedMode: 'randomOnCreate' }) },
+    // V1.6 physical effects are opt-in. Keep their calibrated parameters in
+    // the document so enabling a switch never has to reconstruct user state.
+    { id: 'film-resolution-main', type: 'filmResolution', enabled: false, params: createFilmResolutionParams() },
+    { id: 'grain-main', type: 'grain', enabled: false, params: createGrainParams({ seed, seedMode: 'randomOnCreate' }) },
   ]);
 }
 

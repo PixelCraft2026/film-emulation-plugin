@@ -116,9 +116,12 @@ test('S10 V1.6 graph persists format, grain seed, and minimum engine version', (
   assert.equal(doc.minimumEngineVersion, '1.6.0');
   assert.deepEqual(doc.format, { gauge: '16mm', iso: 500 });
   assert.equal(doc.graph.find((node) => node.type === 'grain').params.seed, 0x12345678);
+  assert.equal(doc.graph.find((node) => node.type === 'filmResolution').enabled, false);
+  assert.equal(doc.graph.find((node) => node.type === 'grain').enabled, false);
   const roundTrip = parseDocument(JSON.stringify(doc)).document;
   assert.equal(roundTrip.graph.length, 3);
   assert.equal(roundTrip.graph.find((node) => node.type === 'filmResolution').type, 'filmResolution');
+  assert.equal(roundTrip.graph.find((node) => node.type === 'grain').enabled, false);
 });
 
 test('S8 current schema rejects unknown effect nodes instead of silently dropping them', () => {

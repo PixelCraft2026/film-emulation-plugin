@@ -21,7 +21,7 @@ Halation 模拟胶片乳剂内部散射、片基层回射以及缺少防光晕�
 - `Tungsten 800 No-Remjet` 只描述无 Remjet 胶片的视觉方向，不是 CineStill 官方预设。
 - 当前输入必须是 RGB 像素层。智能对象、文字、调整层和组需要先进入内容或栅格化。
 - Apply 创建或更新独立效果像素层，绑定的源图层不会被写入。
-- 新建 V1.6 文档默认包含并启用三个效果。由 V1.5 迁移的旧状态只恢复原 Halation；只有在用户调整 V1.6 参数后，才会把相应的新效果加入旧文档状态。
+- 新建 V1.6 文档默认包含三个效果，但只启用 Halation；Resolution 和 Grain 默认关闭。关闭时不会执行对应计算，图像逐样本保持不变，同时保留该模块的参数。由 V1.5 迁移的旧状态只恢复原 Halation；只有在用户开启或调整 V1.6 模块后，才会把相应的新效果加入旧文档状态。
 
 ## 2. 推荐工作流程
 
@@ -30,8 +30,8 @@ Halation 模拟胶片乳剂内部散射、片基层回射以及缺少防光晕�
 3. 在 Resolution 或 Grain 页面先设置共享的 `Film format` 与 `ISO`。默认是 Super 35 4-perf、ISO 250。
 4. 在 Halation 页面选择预设，并用 Basic 区域中的 `Strength`、`Sigma`、`Threshold` 建立整体方向；这些常用参数无需展开 Advanced。
 5. 必要时展开 Advanced，用 `Strong Source Level`、`PSF Smoothness`、`Red Tail`、`Halation Amplify`、`Halation Color Density` 等参数进一步塑形。
-6. 切换到 Resolution，先调 `Resolution loss`，再用 `MTF response`、`Shadow loss` 和 `Highlight loss` 微调不同曝光区域的清晰度。
-7. 切换到 Grain，先调 `Amount` 和 `Size`，再用 `Roughness`、`Chroma` 和 `Correlation` 调整颗粒结构。需要另一套排列时点击 `Randomize grain`。
+6. 切换到 Resolution，按需要打开标题旁的开关；先调 `Resolution loss`，再用 `MTF response`、`Shadow loss` 和 `Highlight loss` 微调不同曝光区域的清晰度。
+7. 切换到 Grain，按需要打开标题旁的开关；先调 `Amount` 和 `Size`，再用 `Roughness`、`Chroma` 和 `Correlation` 调整颗粒结构。需要另一套排列时点击 `Randomize grain`。
 8. 在面板预览确认总体方向后点击 Apply，在 Photoshop 画布 100% 缩放下检查最终颗粒和细节。适配屏幕缩放的预览不适合判断单像素颗粒。
 
 如果文档曾保存过旧参数，Reload 插件不会自动覆盖它们。若要强制载入新版预设值，先切换到另一个预设，再重新选择目标预设。
@@ -641,7 +641,7 @@ Diffused B × Red Shift B
 - 两种模式使用相同三瓣 PSF、通道比例和参数。
 - fast：优先使用 WASM 三盒高斯，失败自动回退 JavaScript；速度优先。
 - quality：窄 sigma 使用精确可分离高斯，宽 sigma 使用递归高斯；多尺度选择更保守。
-- 面板交互预览固定使用 fast，即使下拉框选择 quality。
+- Fit 面板预览固定使用 fast，以保持整图调参响应；100% 原生像素检查会遵循当前 quality 设置并使用与 Apply 相同的数值路径。
 - Apply 尊重用户选择。
 
 在当前验收标准下两种模式应非常接近。只有在高分辨率细边、极大 Sigma 或需要最终输出时才有必要使用 quality。
@@ -793,7 +793,7 @@ Interior Protection → 把局部效果从高亮内部移到源体外缘
 
 ## 8. V1.6 界面布局与共享胶片设置
 
-宽面板分成三个区域：左侧领域导航、中间参数页、右侧 1024px 预览。点击左侧按钮只切换参数页，不会改变物理处理顺序；实际执行顺序始终是 Halation、Resolution、Grain。窄停靠状态会自动改为上下布局。
+宽面板分成三个区域：左侧领域导航、中间参数页、右侧检查预览。点击左侧按钮只切换参数页，不会改变物理处理顺序；实际执行顺序始终是 Halation、Resolution、Grain。Resolution 和 Grain 标题右侧各有一个 On/Off 开关，默认关闭；关闭时跳过该模块且不改变图像，重新打开会继续使用已保存参数。窄停靠状态会自动改为上下布局。
 
 为保持 V1.6–V1.9 的宿主兼容性，Photoshop 面板标签暂时仍显示 `Film Halation`；安装包与文档名称已经是 Film Emulation。这不影响 Resolution 和 Grain 功能。
 
@@ -806,6 +806,13 @@ GRN / 70  Grain
 ```
 
 Halation 页的 Basic 区域直接显示 Preset、Strength、Sigma 和 Threshold。其余低频参数继续位于 Advanced。Resolution 与 Grain 共用 `Film stock` 设置：
+
+预览顶部提供 `Fit` 与 `100%` 两个小按钮：
+
+- Halation 初始使用 Fit，完整展示整张缩略图，便于判断光晕整体分布。
+- Resolution 和 Grain 初始使用 100%，左侧显示 Source，右侧显示 Preview，便于直接比较解析度和颗粒。
+- 每个领域记住本次面板会话中最后选择的模式；用户可随时手动切换。
+- 100% 初次进入时定位源图层中央。按住预览拖动可检查其他区域；方向键每次移动 64px，按住 Shift 时每次移动 256px。
 
 | Film format | 内部有效画幅 | 典型视觉倾向 |
 |---|---:|---|
@@ -876,7 +883,7 @@ Material 只改变颗粒随曝光分布的方式，不替代胶片色彩预设�
 - `Analogue`：分别组合 fine、medium、coarse 三个相关尺度，结构最完整。
 - `Fast`：把 fine 与 medium 合并为一个等效尺度并保留 coarse，减少计算量；颗粒仍由相同的确定性坐标随机源产生。
 
-交互预览会采用速度优先路径；Apply 使用当前选择和渲染质量。需要最终输出时优先使用 Analogue，批量预览或大图调参可使用 Fast。
+Fit 整图预览会采用速度优先路径；100% 原生像素检查与 Apply 使用当前选择和渲染质量。需要最终输出时优先使用 Analogue，快速整图调参或批量工作可使用 Fast。
 
 ### 10.4 Amount、Size、Roughness 与 Chroma
 
@@ -893,17 +900,25 @@ Material 只改变颗粒随曝光分布的方式，不替代胶片色彩预设�
 
 ### 11.1 面板预览
 
-- 最长边 1024px。
+- Fit 模式的显示底图最长边为 1024px，完整画面以 `object-fit: contain` 显示。
 - 光源提取来自最长边 2048px 的效果代理，不是先把原图缩到 1024px 再找光源。
 - Source Expansion 使用 2048px 代理尺度的 sigma。
 - PSF 扩散使用 1024px 显示尺度的 sigma。
 - Film Resolution 与 Grain 在 Halation 的 1024px 线性输出之后执行，并按原图尺寸、预览比例、Film format 和 ISO 换算物理尺度。
-- 预览固定使用速度优先的 graph 渲染质量；Halation 也固定使用 fast 数值实现。
+- Fit 使用速度优先的 graph 渲染质量，Halation 也使用 fast 数值实现；100% 的左右画面共用 Photoshop ICC 转换后的 sRGB 显示底板，同时使用 Quality/Analogue 路径和完整物理尺度。Halation 的高光提取仍保留原生 profile 数据。
 - 预览按 sRGB TRC 编码显示，不把 Rec.2020 数值直接当作 sRGB。
 - 首次读取或绑定新源时，面板会先显示色彩管理后的 1024px 源图，并提示 `Source loaded. Refining film effects…`，随后替换为完整效果，避免处理期间显示空白或黑屏。
 - 同一源图层且 Photoshop 历史状态未改变时，再次 Rebind 会复用读取和效果缓存。
 - 完成后状态显示 `Panel preview 总时间 (read 读取时间, render 渲染时间)`。`read` 主要反映 Photoshop Imaging API 和色彩代理读取；`render` 包含 Halation、Resolution、Grain 与预览编码。
 - 快速连续拖动时，旧渲染会被取消或丢弃，不会覆盖最新参数的结果。
+
+100% 模式不把整张大图读入面板。插件按每个左右视窗的实际尺寸与 Photoshop `DisplayConfiguration.scaleFactor` 读取当前原生像素裁片；这是因为部分 UXP 版本的 `window.devicePixelRatio` 会错误地恒为 1。插件在四周额外读取当前 graph 的卷积/颗粒支持范围，算法在带边界的局部帧上完成后，只发布中央可见区域。因此：
+
+- Source 和 Preview 始终对应同一文档坐标；
+- 不对可见裁片插值，并按高 DPI 比例把一个源像素映射到一个物理显示像素，适合检查单像素 Grain、细线和 MTF；
+- Grain hash 仍使用完整图像绝对坐标，移动视窗不会重新随机颗粒；
+- Halation 即使在裁片边缘附近也能接收视窗外光源的扩散贡献；
+- 极大的 Halation Sigma 会需要更宽支持边界，100% 首次渲染可能比普通 Grain 检查更慢，因此 Halation 默认使用 Fit。
 
 ### 11.2 Apply
 
@@ -966,7 +981,7 @@ Material 只改变颗粒随曝光分布的方式，不替代胶片色彩预设�
 
 ### 13.3 预览和 Apply 有轻微差异
 
-预览是 1024px，并固定使用速度优先路径；Apply 使用全分辨率和用户选择的 Diffusion/Correlation。两者共享相同物理尺度和固定 grain seed，但缩放、颗粒统计场近似、量化和输出位深仍可能造成细微差异。请在 Photoshop 100% 缩放下评价最终结果。
+Fit 预览是 1024px，并固定使用速度优先路径，因此与全分辨率 Apply 可能存在细微差异。100% 模式读取原生裁片，按设备像素比点对点显示；Source 与 Preview 共用 Photoshop ICC 管理后的显示底板，避免左右整体明暗不一致，同时使用用户选择的 Diffusion/Correlation。它与 Apply 仍可能因面板 PNG 与 Photoshop 画布显示/输出位深不同而有极轻微量化差异。最终确认时可将插件 100% 的 Preview 与 Photoshop 100% 画布并排比较。
 
 ### 13.4 图像看起来变暗
 

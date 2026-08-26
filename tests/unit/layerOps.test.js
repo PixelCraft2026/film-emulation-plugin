@@ -11,6 +11,7 @@ import {
   resolvePreviewSourceLayer,
   effectLayerName,
   ensureEffectLayer,
+  normalizeEffectLayerPresentation,
   unlockPixelLayer,
   resolveApplyTarget,
 } from '../../src/io/layerOps.js';
@@ -177,6 +178,28 @@ test('unlockPixelLayer clears every Photoshop pixel-layer protection flag', () =
   assert.equal(layer.pixelsLocked, false);
   assert.equal(layer.transparentPixelsLocked, false);
   assert.equal(layer.positionLocked, false);
+});
+
+test('Apply target presentation is normalized so layer compositing cannot attenuate rendered pixels', () => {
+  const layer = {
+    opacity: 52,
+    fillOpacity: 67,
+    blendMode: 'multiply',
+    visible: false,
+  };
+  const result = normalizeEffectLayerPresentation(layer, 'normal');
+  assert.deepEqual(result.before, {
+    opacity: 52,
+    fillOpacity: 67,
+    blendMode: 'multiply',
+    visible: false,
+  });
+  assert.deepEqual(result.after, {
+    opacity: 100,
+    fillOpacity: 100,
+    blendMode: 'normal',
+    visible: true,
+  });
 });
 
 test('Apply recreates stale/ambiguous output bindings but never guesses a target', () => {

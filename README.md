@@ -13,11 +13,12 @@ Halation → Film Resolution / MTF → Film Grain
 ```
 
 - 宽面板使用“领域导航—参数—预览”三栏布局；左侧 `Halation`、`Resolution`、`Grain` 按钮只切换参数窗口，不改变物理处理顺序。窄面板自动切换为上下布局。
+- 预览提供 Fit 与 100% 两种模式。Halation 默认 Fit；Resolution/Grain 默认 100%。100% 使用左右同步的 Source/Preview 原生像素裁片，默认定位图层中央，可拖拽或用方向键检查其他区域；高 DPI 补偿读取 Photoshop `DisplayConfiguration.scaleFactor`（不依赖部分 UXP 版本中恒为 1 的 `window.devicePixelRatio`），使原图像素与物理屏幕像素点对点显示。
 - Halation 的常用 `Strength`、`Sigma`、`Threshold` 位于 Basic；其余低频控制保留在 Advanced。
 - Film Resolution 和 Grain 共享 Super 8、Super 16、Super 35 4-perf、65mm 5-perf 四种格式以及 ISO 25–3200 的物理尺度。默认是 Super 35 4-perf、ISO 250、Negative material。
 - Film Resolution 提供非负权重的曝光相关 MTF 损失。`amount=0`、禁用节点或极小 sigma 保持逐浮点样本恒等；RGB 共用同一 PSF，alpha 原样保留。
 - Film Grain 使用按完整图像绝对坐标寻址的确定性 hash 场，不依赖 `Math.random()`、时间或分带顺序。相同 seed 在 Preview、Apply、重开、分带以及 JS/WASM 回退时保持同一排列。
-- 新文档默认包含并启用三个节点；旧 schema 和 V1.5 迁移状态保持 Halation-only，不会自动注入 V1.6 效果。
+- 新文档默认包含三个节点，但只启用 Halation；Resolution 和 Grain 标题旁的开关默认关闭。关闭时节点被跳过，输出逐样本保持不变，同时保留已调参数；旧 schema 和 V1.5 迁移状态保持 Halation-only，不会自动注入 V1.6 效果。
 - schema 仍为 v2，只序列化 `{gauge, iso}`；`engineVersion=1.6.0` 与 Halation 算法常量 `ENGINE_VERSION=1.5.1` 分开管理。
 
 详细操作和参数说明见 [Film Emulation V1.6.0 用户手册](docs/FilmHalation_V1.5.1_User_Manual.md)。为保持现有公开文档路径兼容，手册文件名暂时沿用 V1.5.1，文档标题和内容已经更新为 V1.6.0。
@@ -67,6 +68,9 @@ Halation → Film Resolution / MTF → Film Grain
 ## Preview、Rebind 与性能
 
 - 首次载入或绑定新源时，面板先显示色彩管理后的 1024px 源图，再异步替换为完整 Film graph 结果，避免效果计算期间出现黑色空窗。
+- Fit 模式继续使用 1024px 整图和 2048px Halation 效果代理，并采用速度优先的 Fast 预览；100% 模式只读取当前可见原生裁片及 graph 所需支持边界，不读取或渲染整张大图。发布前再裁回视窗尺寸，并按 Photoshop 显示器 `scaleFactor` 校正 CSS 尺寸，确保一个源图像素对应一个物理显示像素。
+- 100% 模式的 Source 与 Preview 使用完全相同的文档坐标。Grain 继续以完整图像绝对坐标寻址，拖动、重新打开和 Apply 不改变颗粒相位。
+- 100% 模式的 Source 与 Preview 共用 Photoshop ICC 转换后的 sRGB 显示底板，避免不同位深的原生 profile 标签造成明暗偏移；Halation 高光提取仍使用原生 profile 数据，Resolution/Grain 使用 Quality/Analogue 路径。三个模块只提交各自节点的参数，调整 Grain 或 Resolution 不会恢复或改写 Halation 设置。
 - 预览 PNG 优先使用 Blob URL，并在完全不透明时输出 RGB PNG，避免大型 Base64 字符串和不必要的 alpha 通道；宿主不支持时自动回退 Data URL。
 - 同一源图层且 Photoshop 历史状态未改变时，重复 Rebind 复用源像素和效果缓存，不重复读取或渲染。
 - Halation 的提取、扩散、合成，Resolution 的 Gaussian 结果，以及 Grain 的单位方差场分别缓存。快速拖动会取消或丢弃过期 generation，旧结果不能覆盖新参数。
@@ -77,8 +81,8 @@ Halation → Film Resolution / MTF → Film Grain
 
 ## 参数和状态
 
-- Film Resolution：`Material`、`Resolution loss`、`MTF response`、`Shadow loss`、`Highlight loss`。Amount 0–1 从源图混合到目标 MTF，1–1.5 继续过渡到 2.2σ 的宽响应，不产生锐化负瓣。
-- Film Grain：`Material`、`Correlation`、`Amount`、`Size`、`Roughness`、`Chroma` 与 `Randomize grain`。Analogue 使用 fine/medium/coarse 三尺度，Fast 合并 fine/medium 并保留 coarse。
+- Film Resolution：标题旁的开关默认关闭；开启后提供 `Material`、`Resolution loss`、`MTF response`、`Shadow loss`、`Highlight loss`。Amount 0–1 从源图混合到目标 MTF，1–1.5 继续过渡到 2.2σ 的宽响应，不产生锐化负瓣。
+- Film Grain：标题旁的开关默认关闭；开启后提供 `Material`、`Correlation`、`Amount`、`Size`、`Roughness`、`Chroma` 与 `Randomize grain`。Analogue 使用 fine/medium/coarse 三尺度，Fast 合并 fine/medium 并保留 coarse。
 - Film format 与 ISO 是 Resolution/Grain 的共享参数；较小格式和较高 ISO 会得到更明显的颗粒尺度和分辨率损失。
 - Source Softness、Background Softness 与 PSF Smoothness 已分别建模。
 - Source Impact 控制曝光响应指数；Strong Source/Strong Core 控制重建高光坐标上的强光分类和核芯密度；Global Source 独立限制全局扩散源。
