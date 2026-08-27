@@ -1,6 +1,6 @@
 // @ts-nocheck
 /**
- * ui/panel — Film Halation 面板（Spectrum UXP，原生 DOM）。
+ * ui/panel — Film Emulation 面板（Spectrum UXP，原生 DOM）。
  * 布局：效果领域导航 / 当前领域参数 / 大幅检查预览 / Apply + 状态行。
  * 控件变更 → handlers.onParamsChange()（main.jsx 负责 debounce 预览与状态刷新）。
  * 本文件只做视图与事件转发，不含算法与宿主逻辑。

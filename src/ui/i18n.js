@@ -3,7 +3,7 @@
  * ui/i18n — 界面文案（英文，V1；i18n 骨架：后续可按 locale 切换）。
  */
 export const STRINGS = {
-  title: 'Film Halation',
+  title: 'Film Emulation',
   basic: 'Basic',
   preset: 'Preset',
   advanced: 'Advanced',
@@ -61,7 +61,7 @@ export const STRINGS = {
   previewStage: 'INSPECTION PREVIEW',
   statusReady: 'Ready.',
   statusRendering: 'Rendering…',
-  statusApplied: (ms) => `Rendered to a verified Film Halation copy (${ms}ms). Source preserved.`,
+  statusApplied: (ms) => `Rendered to a verified Film Emulation copy (${ms}ms). Source preserved.`,
   statusPreviewed: (ms) => `Panel preview (${ms}ms).`,
   statusPreviewedDetailed: (total, read, render) => `Panel preview ${total}ms (read ${read}ms, render ${render}ms).`,
   statusPreviewRefining: 'Source loaded. Refining film effects…',

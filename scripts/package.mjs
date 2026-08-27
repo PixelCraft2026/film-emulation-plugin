@@ -29,7 +29,10 @@ const definition = variant === 'bridge'
       migrationRole: 'export',
       version: '1.5.2',
       fileName: 'FilmHalation-MigrationBridge.ccx',
+      pluginName: 'Film Halation',
+      entrypointId: 'filmHalationPanel',
       panelLabel: 'Film Halation Migration',
+      htmlTitle: 'Film Halation Migration',
       featureLevel: 'v1.5-bridge',
     }
   : {
@@ -37,7 +40,10 @@ const definition = variant === 'bridge'
       migrationRole: 'import',
       version: currentManifest.version,
       fileName: 'FilmEmulation.ccx',
-      panelLabel: 'Film Halation',
+      pluginName: 'Film Emulation',
+      entrypointId: 'filmEmulationPanel',
+      panelLabel: 'Film Emulation',
+      htmlTitle: 'Film Emulation',
       featureLevel: 'current',
     };
 
@@ -73,14 +79,18 @@ mkdirSync(join(stage, 'dist'), { recursive: true });
 const manifest = {
   ...currentManifest,
   id: definition.pluginId,
+  name: definition.pluginName,
   version: definition.version,
   entrypoints: currentManifest.entrypoints.map((entry) => ({
     ...entry,
+    id: definition.entrypointId,
     label: { ...entry.label, default: definition.panelLabel },
   })),
 };
 writeFileSync(join(stage, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
-copyFileSync(join(ROOT, 'index.html'), join(stage, 'index.html'));
+const indexHtml = readFileSync(join(ROOT, 'index.html'), 'utf8')
+  .replace(/<title>[^<]*<\/title>/, `<title>${definition.htmlTitle}</title>`);
+writeFileSync(join(stage, 'index.html'), indexHtml);
 for (const fileName of ['main.js', 'main.js.map', 'film_core.wasm']) {
   copyFileSync(join(OUT_DIR, fileName), join(stage, 'dist', fileName));
 }

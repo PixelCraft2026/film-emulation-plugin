@@ -2,7 +2,9 @@
 
 Photoshop UXP 胶片模拟插件。1.6.0 在保留 V1.5.1 Halation 引擎的同时，加入按胶片格式/ISO 换算的 Film Resolution/MTF 与曝光相关 Film Grain。两种新效果使用 schema v2 graph、固定坐标 hash seed，并在 Preview/Apply 的线性色彩路径中执行。V1.5.1 引擎在非破坏性 V1.5 基础上修正夜景弱光源连成红雾、强光源核芯过软的问题，并增加面向无 Remjet 胶片观感的强光邻域扩张、红层长尾和亮度安全色密度合成。
 
-当前正式插件 ID 为 `com.cheukwing.filmemulation`。为避免 UXP 按插件 ID 隔离的旧参数丢失，仓库同时生成仍使用 `com.cheukwing.filmhalation` 的 V1.5.2 迁移桥接包。
+当前正式产品名、manifest 名和 Photoshop 面板标签统一为 `Film Emulation`，主面板 entrypoint 为 `filmEmulationPanel`，正式插件 ID 为 `com.cheukwing.filmemulation`。为避免 UXP 按插件 ID 隔离的旧参数丢失，仓库同时生成仍使用旧 ID `com.cheukwing.filmhalation` 和旧 entrypoint `filmHalationPanel` 的 V1.5.2 迁移桥接包。
+
+从使用旧 entrypoint 的早期 V1.6 构建升级时，Photoshop 可能把主面板视为一个新的工作区面板；如面板未自动出现，请从插件菜单重新打开并停靠。主插件 ID 和 PluginStorage 未改变，因此这不会重置文档参数。
 
 ## V1.6 功能概览
 
@@ -103,6 +105,7 @@ Halation → Film Resolution / MTF → Film Grain
 ```powershell
 npm install
 npm run typecheck
+npm run test:quick
 npm test
 npm run build:wasm
 npm run build
@@ -111,6 +114,8 @@ npm run validate
 npm run package
 npm run package:migration
 ```
+
+`npm run test:quick` 是编辑循环用的跨层快速集；`npm test` 仍运行全部单元与数值回归，但默认使用紧凑 dot reporter，失败时再用 `npm run test:verbose` 查看逐项名称。分带接缝、Fast/Quality、迁移上限和 JS/WASM 一致性测试不会从完整门禁中删除。
 
 `npm run package` 生成新 ID 的 `dist/FilmEmulation.ccx`。`npm run package:migration` 一次生成 `dist/FilmHalation-MigrationBridge.ccx` 和 `dist/FilmEmulation.ccx`，并保证工作区中的 `dist/main.js` 最终对应新插件导入版。
 

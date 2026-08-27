@@ -1,5 +1,5 @@
 // @ts-nocheck
-/** Film Halation V1.5 — 非破坏性 UXP 编排。 */
+/** Film Emulation V1.6 — 非破坏性 UXP 编排。 */
 import { createPanel } from './ui/panel.jsx';
 import { mergeIndependentGraphChange } from './ui/graphState.js';
 import { displayScaleForPreview } from './ui/previewMode.js';
@@ -21,7 +21,7 @@ import { resolveDocumentTRC, resolvePixelTRC, standardProfileName } from './io/c
 import { readDocumentPixels } from './io/imageAccess.js';
 import { documentComponentSize } from './io/bitDepth.js';
 import {
-  EFFECT_LAYER_NAME,
+  isEffectLayerName,
   ensureEffectLayer,
   resolveTargetLayer,
   resolveLayerBinding,
@@ -96,7 +96,7 @@ async function writeDiagFile(name, data) {
     const file = await folder.createFile(name, { overwrite: true });
     await file.write(JSON.stringify(data, null, 2));
   } catch (error) {
-    console.error('[film-halation] diagnostic write failed: ' + error);
+    console.error('[film-emulation] diagnostic write failed: ' + error);
   }
 }
 
@@ -128,7 +128,7 @@ try {
   document.body.append(panel);
   ({ img, sourceImg, status, applyBtn, migrationBtn } = panel.__handles);
 } catch (error) {
-  console.error('[film-halation] panel creation failed: ' + (error && (error.stack || error.message || error)));
+  console.error('[film-emulation] panel creation failed: ' + (error && (error.stack || error.message || error)));
   writeDiagFile('ui-error.json', { message: String(error), at: new Date().toISOString() });
   status = { textContent: '' };
   img = { removeAttribute() {}, src: '' };
@@ -144,12 +144,12 @@ async function refreshPreviewDisplayScale() {
   try {
     configurations = await ps.core.getDisplayConfiguration({ physicalResolution: true });
   } catch (error) {
-    console.warn('[film-halation] display scale query failed; using UXP ratio: ' + (error?.message || error));
+    console.warn('[film-emulation] display scale query failed; using UXP ratio: ' + (error?.message || error));
   }
   const displayList = Array.isArray(configurations) ? configurations : [];
   const ratio = displayScaleForPreview(displayList, reported);
   const changed = panel.__handles.setPreviewPixelRatio(ratio);
-  console.log('[film-halation] preview display scale', {
+  console.log('[film-emulation] preview display scale', {
     reportedRatio: reported,
     resolvedRatio: ratio,
     displays: displayList.map((display) => ({ scaleFactor: display.scaleFactor, isPrimary: display.isPrimary })),
@@ -162,12 +162,12 @@ Promise.resolve()
   .then((changed) => {
     if (changed && panel?.__handles?.getPreviewView?.().mode === 'actual') schedulePreview();
   })
-  .catch((error) => console.warn('[film-halation] preview display scale initialization failed: ' + (error?.message || error)));
+  .catch((error) => console.warn('[film-emulation] preview display scale initialization failed: ' + (error?.message || error)));
 
 let taskChain = Promise.resolve();
 function enqueueTask(fn) {
   const result = taskChain.then(fn);
-  taskChain = result.catch((error) => console.warn('[film-halation] queued task failed: ' + error));
+  taskChain = result.catch((error) => console.warn('[film-emulation] queued task failed: ' + error));
   return result;
 }
 
@@ -218,7 +218,7 @@ function publishPreviewImage(result, requestId, target = 'preview') {
       }
       return 'blob';
     } catch (error) {
-      console.warn('[film-halation] Blob preview URL unavailable; using data URL fallback: ' + (error?.message || error));
+      console.warn('[film-emulation] Blob preview URL unavailable; using data URL fallback: ' + (error?.message || error));
     }
   }
   releasePreviewObjectUrl(target);
@@ -280,7 +280,7 @@ setInterval(() => {
     status.textContent = 'No active document.';
     return;
   }
-  status.textContent = 'Document changed. Loading Film Halation state…';
+  status.textContent = 'Document changed. Loading Film Emulation state…';
   loadStoredParams(doc, id);
 }, 750);
 
@@ -400,7 +400,7 @@ async function readPreviewVariant(doc, readOptions, sourceWidth, sourceHeight, m
       },
     });
   } catch (error) {
-    console.warn(`[film-halation] ${label} targetSize read failed; retrying full resolution inside modal scope: ${error?.message || error}`);
+    console.warn(`[film-emulation] ${label} targetSize read failed; retrying full resolution inside modal scope: ${error?.message || error}`);
     return readDocumentPixels(doc, readOptions);
   }
 }
@@ -596,7 +596,7 @@ async function runPanelPreview(requestId = null, signal = null) {
     const transport = publishPreviewImage(result, requestId ?? previewRequestId);
     const totalMs = Date.now() - totalStarted;
     status.textContent = STRINGS.statusPreviewedDetailed(totalMs, readMs, result.ms);
-    console.log('[film-halation] Panel preview timing', {
+    console.log('[film-emulation] Panel preview timing', {
       totalMs,
       readMs,
       renderMs: result.ms,
@@ -650,7 +650,7 @@ async function runApply() {
       status.textContent = STRINGS.statusFailed(result.error);
       return;
     }
-    console.log('[film-halation] Apply render result', result.render);
+    console.log('[film-emulation] Apply render result', result.render);
     previewRequestId++;
     previewAbortController?.abort();
     clearPreviewCaches();
@@ -675,8 +675,8 @@ async function runRebind() {
     status.textContent = STRINGS.statusFailed(unreadableLayerMessage(selected));
     return;
   }
-  if (selectedName.startsWith(EFFECT_LAYER_NAME)) {
-    status.textContent = STRINGS.statusFailed('Select the original pixel layer, not a Film Halation effect copy.');
+  if (isEffectLayerName(selectedName)) {
+    status.textContent = STRINGS.statusFailed('Select the original pixel layer, not a Film Emulation effect copy.');
     return;
   }
   const cachedSourceIsSelected = previewSourceCache?.documentID === doc.id
@@ -749,6 +749,12 @@ async function runImportMigration() {
 
 async function renderToSafeCopy(doc, renderDocument, options) {
   const started = Date.now();
+  let componentSize;
+  try {
+    componentSize = documentComponentSize(doc);
+  } catch (error) {
+    return { ok: false, error: `Film render preflight failed; no effect layer was created. ${error.message || error}` };
+  }
   let sourceLayer = resolveLayerBinding(doc, documentState.bindings.sourceLayer);
   if (!sourceLayer) {
     if (documentState.bindings.sourceLayer) {
@@ -758,7 +764,7 @@ async function renderToSafeCopy(doc, renderDocument, options) {
     if (!selected) return { ok: false, error: noTargetLayerMessage(doc) };
     let selectedName = '';
     try { selectedName = String(selected.name || ''); } catch (error) { /* ignore */ }
-    if (selectedName.startsWith(EFFECT_LAYER_NAME)) {
+    if (isEffectLayerName(selectedName)) {
       return { ok: false, error: 'The selected layer looks like an effect copy, but its source binding is missing. Select the original pixel layer and retry.' };
     }
     if (!isPixelLayer(selected)) return { ok: false, error: unreadableLayerMessage(selected) };
@@ -769,14 +775,14 @@ async function renderToSafeCopy(doc, renderDocument, options) {
   try {
     const preflight = IS_CURRENT_BUILD
       ? streamFilmGeometry(sourceBounds.right - sourceBounds.left, sourceBounds.bottom - sourceBounds.top, renderDocument, {
-          componentSize: doc.bitsPerChannel,
+          componentSize,
           fullWidth: Number(doc.width),
           fullHeight: Number(doc.height),
           deviceMemoryGB: Number(globalThis.navigator?.deviceMemory ?? 0),
           memoryMode: 'auto',
         })
       : streamGeometry(sourceBounds.right - sourceBounds.left, sourceBounds.bottom - sourceBounds.top, renderDocument.graph.find((node) => node.type === 'halation').params, {
-          componentSize: doc.bitsPerChannel,
+          componentSize,
           deviceMemoryGB: Number(globalThis.navigator?.deviceMemory ?? 0),
           memoryMode: 'auto',
         });
@@ -787,7 +793,7 @@ async function renderToSafeCopy(doc, renderDocument, options) {
   const savedTargetBinding = documentState.bindings.targetLayer;
   const { target: savedTarget, legacyTarget, recreate } = resolveApplyTarget(doc, savedTargetBinding);
   let targetLayer = savedTarget;
-  if (recreate) console.warn('[film-halation] saved effect target is stale or legacy; creating a new isolated pixel target');
+  if (recreate) console.warn('[film-emulation] saved effect target is stale or legacy; creating a new isolated pixel target');
   if (!targetLayer && !options.allowCreate) return { ok: false, error: 'Safe preview target is not available.' };
   try {
     // Never reuse a stale binding token as a layer name; ensureEffectLayer
@@ -809,19 +815,19 @@ async function renderToSafeCopy(doc, renderDocument, options) {
     targetLayer,
     ps.constants?.BlendMode?.NORMAL ?? 'normal',
   );
-  console.log('[film-halation] Apply target presentation', targetPresentation);
+  console.log('[film-emulation] Apply target presentation', targetPresentation);
   const targetBinding = createLayerBinding(targetLayer, 'render-target-v1');
   try {
     const targetBounds = layerPixelBounds(targetLayer) ?? sourceBounds;
     const trc = resolveDocumentTRC(doc);
     const renderResult = IS_CURRENT_BUILD
       ? await renderFilmDocumentToLayer(doc, sourceLayer, targetLayer, sourceBounds, targetBounds, renderDocument, trc, {
-          componentSize: doc.bitsPerChannel,
+          componentSize,
           seed: renderDocument.graph.find((node) => node.type === 'grain')?.params.seed ?? 0x46534c4d,
           signal: options.signal,
         })
       : await renderDocumentToLayer(doc, sourceLayer, targetLayer, sourceBounds, targetBounds, renderDocument.graph.find((node) => node.type === 'halation').params, trc, {
-          componentSize: doc.bitsPerChannel,
+          componentSize,
           seed: 0x46534c4d,
           signal: options.signal,
         });
@@ -863,9 +869,9 @@ async function loadStoredParams(doc, expectedId = doc?.id) {
     panel.__handles.updateParams(params);
     panel.__handles.updateGraph?.(filmDocument.graph);
     panel.__handles.updateFormat?.(filmDocument.format);
-    status.textContent = 'Loaded Film Halation v2 state. Adjust a slider to preview.';
+    status.textContent = 'Loaded Film Emulation state. Adjust a slider to preview.';
   } catch (error) {
-    console.warn('[film-halation] state load failed: ' + error);
+    console.warn('[film-emulation] state load failed: ' + error);
     status.textContent = STRINGS.statusFailed('Stored settings could not be loaded.');
   }
 }
@@ -873,5 +879,5 @@ async function loadStoredParams(doc, expectedId = doc?.id) {
 const initialDocument = currentDoc();
 if (initialDocument) {
   filmDocument = createRuntimeDocument(params, randomSeed(`document:${String(initialDocument.id ?? '')}`));
-  loadStoredParams(initialDocument).catch((error) => console.warn('[film-halation] initial load failed: ' + error));
+  loadStoredParams(initialDocument).catch((error) => console.warn('[film-emulation] initial load failed: ' + error));
 }

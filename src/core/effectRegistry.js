@@ -54,6 +54,29 @@ function unsupported(type, introducedIn) {
     },
     /** @param {any} params @param {any} context */
     supportRadius(params, context) { return 0; },
+    /** @param {any} params @param {any} context */
+    describeWorkset(params, context = {}) {
+      return Object.freeze({
+        sourceRadius: 0,
+        generatedFieldRadius: 0,
+        phasePeriod: 1,
+        buffers: [],
+        wasm: { supported: false },
+        backends: {
+          'js-reference': { supported: false, resident: false, precision: 'f32' },
+          'wasm-resident': { supported: false, resident: true, precision: 'f32' },
+          'gpu-native': {
+            supported: false,
+            planned: false,
+            resident: true,
+            abi: 'gpu-native-reserved-v1',
+            precision: 'f32',
+            reason: `Effect "${type}" is not implemented in this build`,
+          },
+        },
+        identity: true,
+      });
+    },
     /** @param {any} frame @param {any} params */
     estimateMemory(frame, params) { return 0; },
     /** @param {any} input @param {any} params @param {any} context */
@@ -88,6 +111,37 @@ export const FILM_EFFECT_REGISTRY = Object.freeze({
       const expansion = resolved.sourceExpansion > 0 ? sigma * (0.45 + 0.85 * resolved.sourceExpansion) : 0;
       return Math.ceil(Math.max(local, global, expansion));
     },
+    /** @param {any} params @param {any} context */
+    describeWorkset(params, context = {}) {
+      const validated = createHalationParams(params);
+      const resolved = resolveSigmaParams(validated, context.fullWidth ?? 1, context.fullHeight ?? 1);
+      const sourceRadius = this.supportRadius(validated, context);
+      return Object.freeze({
+        sourceRadius,
+        generatedFieldRadius: 0,
+        phasePeriod: Math.max(1, Math.trunc(context.quality === 'fast' ? 1 : 2)),
+        buffers: [
+          { name: 'extract-y', channels: 1, factor: 1 },
+          { name: 'extract-source', channels: 3, factor: 1 },
+          { name: 'halo', channels: 3, factor: 1 },
+          { name: 'diffuse-scratch', channels: 2, factor: 1 },
+        ],
+        wasm: { supported: true, mode: 'v16-resident' },
+        backends: {
+          'js-reference': { supported: true, resident: false, precision: 'f32' },
+          'wasm-resident': { supported: true, resident: true, abi: 'v16-resident', precision: 'f32' },
+          'gpu-native': {
+            supported: false,
+            planned: true,
+            resident: true,
+            abi: 'gpu-native-reserved-v1',
+            precision: 'f32',
+            reason: 'Reserved for GPU feasibility work after V1.6',
+          },
+        },
+        identity: validated.strength === 0,
+      });
+    },
     /** @param {any} frame @param {any} params */
     estimateMemory(frame, params) {
       return frame.width * frame.height * 4 * 4;
@@ -106,7 +160,7 @@ export const FILM_EFFECT_REGISTRY = Object.freeze({
         context.fullWidth ?? input.width,
         context.fullHeight ?? input.height,
       );
-      return processHalation(input, resolved, context);
+      return processHalation(input, resolved, { ...context, compact: context.compact ?? true });
     },
   }),
   bloom: unsupported('bloom', '1.7.0'),
@@ -122,6 +176,35 @@ export const FILM_EFFECT_REGISTRY = Object.freeze({
     supportRadius(params, context = {}) {
       return filmResolutionSupport(validateFilmResolutionParams(params), context.format, context.fullWidth ?? 1, context.previewScale ?? 1, context.quality);
     },
+    /** @param {any} params @param {any} context */
+    describeWorkset(params, context = {}) {
+      const validated = validateFilmResolutionParams(params);
+      return Object.freeze({
+        sourceRadius: this.supportRadius(validated, context),
+        generatedFieldRadius: 0,
+        phasePeriod: 1,
+        buffers: [
+          { name: 'resolution-source', channels: 3, factor: 1 },
+          { name: 'resolution-blur', channels: 3, factor: 1 },
+          { name: 'resolution-scratch', channels: 2, factor: 1 },
+          { name: 'resolution-weights', channels: 1, factor: 1 },
+        ],
+        wasm: { supported: true, mode: 'v16-resident' },
+        backends: {
+          'js-reference': { supported: true, resident: false, precision: 'f32' },
+          'wasm-resident': { supported: true, resident: true, abi: 'v16-resident', precision: 'f32' },
+          'gpu-native': {
+            supported: false,
+            planned: true,
+            resident: true,
+            abi: 'gpu-native-reserved-v1',
+            precision: 'f32',
+            reason: 'Reserved for GPU feasibility work after V1.6',
+          },
+        },
+        identity: validated.amount === 0,
+      });
+    },
     /** @param {any} frame */
     estimateMemory(frame) {
       return frame.width * frame.height * 7 * 4;
@@ -136,6 +219,34 @@ export const FILM_EFFECT_REGISTRY = Object.freeze({
     defaults: GRAIN_DEFAULTS,
     validate: createGrainParams,
     supportRadius: grainSupport,
+    /** @param {any} params @param {any} context */
+    describeWorkset(params, context = {}) {
+      const validated = createGrainParams(params);
+      return Object.freeze({
+        sourceRadius: 0,
+        generatedFieldRadius: grainSupport(validated, context),
+        phasePeriod: 1,
+        buffers: [
+          { name: 'grain-accum', channels: 3, factor: 1 },
+          { name: 'grain-field', channels: 1, factor: 1 },
+          { name: 'grain-scratch', channels: 3, factor: 1 },
+        ],
+        wasm: { supported: true, mode: 'v16-resident' },
+        backends: {
+          'js-reference': { supported: true, resident: false, precision: 'f32' },
+          'wasm-resident': { supported: true, resident: true, abi: 'v16-resident', precision: 'f32' },
+          'gpu-native': {
+            supported: false,
+            planned: true,
+            resident: true,
+            abi: 'gpu-native-reserved-v1',
+            precision: 'f32',
+            reason: 'Reserved for GPU feasibility work after V1.6',
+          },
+        },
+        identity: validated.amount === 0,
+      });
+    },
     /** @param {any} frame */
     estimateMemory(frame) {
       return frame.width * frame.height * 8 * 4;

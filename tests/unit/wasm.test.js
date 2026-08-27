@@ -10,18 +10,69 @@ import {
   resetWasmBackend,
   tryWasmBoxBlur,
   tryWasmGaussianBlur,
+  tryWasmVvGaussianBlur,
   tryWasmMaxFilter,
   tryWasmHashField,
   tryWasmHashBlurField,
+  tryWasmBeginGrainAccum,
+  tryWasmHashBlurFieldIntoGrain,
+  tryWasmFinishGrainAccum,
   tryWasmApplyGrain,
   maxFilterSeparable,
   gaussianApprox,
   fnv1aUtf8,
+  createV16ResidentBackend,
 } from '../../src/core/index.js';
 import { boxBlur3 } from '../../src/core/diffuse/box.js';
 import { gaussianBlurSep } from '../../src/core/diffuse/conv.js';
 
 const wasmPath = fileURLToPath(new URL('../../assets/film_core.wasm', import.meta.url));
+
+test('V1.6 resident workspace reserves one reusable band capacity and reports copies', async (t) => {
+  if (!existsSync(wasmPath)) {
+    t.skip('assets/film_core.wasm not built; run npm run build:wasm');
+    return;
+  }
+  await installWasmModule(readFileSync(wasmPath));
+  const resident = createV16ResidentBackend({ planHash: 'test-plan' });
+  assert.ok(resident);
+  const first = resident.reserve(64, 32, 8);
+  const second = resident.reserve(32, 32, 8);
+  assert.equal(resident.abiVersion, 0x010600);
+  assert.equal(first.workspaceBytes, second.workspaceBytes);
+  assert.ok(second.workspaceBytes >= 64 * 32 * 8 * 4);
+  assert.equal(resident.stats().copyCount, 0);
+  resident.dispose();
+});
+
+test('WASM resident Grain accumulation matches the coordinate crop reference', async (t) => {
+  if (!existsSync(wasmPath)) {
+    t.skip('assets/film_core.wasm not built; run npm run build:wasm');
+    return;
+  }
+  await installWasmModule(readFileSync(wasmPath));
+  const width = 7;
+  const height = 5;
+  const fieldWidth = width + 4;
+  const fieldHeight = height + 4;
+  const pad = 2;
+  const seed = 0x12345678;
+  const nodeHash = fnv1aUtf8('grain-main');
+  const coefficient = 0.37;
+  assert.equal(tryWasmBeginGrainAccum(width, height), true);
+  assert.equal(tryWasmHashBlurFieldIntoGrain(width, height, fieldWidth, fieldHeight, pad, 1, 3, coefficient, seed, nodeHash, -11, 19, 0, 0, 0, 'quality'), true);
+  const actual = [new Float32Array(width * height), new Float32Array(width * height), new Float32Array(width * height)];
+  assert.equal(tryWasmFinishGrainAccum(actual), true);
+  const field = new Float32Array(fieldWidth * fieldHeight);
+  assert.equal(tryWasmHashBlurField(field, fieldWidth, fieldHeight, seed, nodeHash, -11, 19, 0, 0, 0, 'quality'), true);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const expected = field[(y + pad) * fieldWidth + x + pad] * coefficient;
+      const index = y * width + x;
+      for (const channel of actual) assert.ok(Math.abs(channel[index] - expected) <= 1e-6, `${x},${y}`);
+    }
+  }
+});
 
 test('WASM three-box blur matches the JavaScript fallback', async (t) => {
   if (!existsSync(wasmPath)) {
@@ -107,6 +158,36 @@ test('WASM Gaussian and fused Grain hash-blur paths match JavaScript', async (t)
     rms = Math.sqrt(rms / n);
     assert.ok(rms <= 1e-5, `${label} RMS=${rms}`);
   }
+  resetWasmBackend();
+});
+
+test('WASM van Vliet-Young Quality blur matches the JavaScript reference', async (t) => {
+  if (!existsSync(wasmPath)) {
+    t.skip('assets/film_core.wasm not built; run npm run build:wasm');
+    return;
+  }
+  const status = await installWasmModule(readFileSync(wasmPath));
+  assert.equal(status.available, true, status.error || 'WASM available');
+  const width = 83;
+  const height = 47;
+  const n = width * height;
+  const source = new Float32Array(n);
+  for (let i = 0; i < n; i++) source[i] = (((i * 2246822519) >>> 5) / 0x7fffffff) * 1.8 - 0.2;
+  const expected = new Float32Array(n);
+  const actual = new Float32Array(n);
+  const { vvGauss } = await import('../../src/core/diffuse/vv.js');
+  vvGauss(source, expected, new Float32Array(n), new Float32Array(n), width, height, 7.25);
+  assert.equal(tryWasmVvGaussianBlur(source, actual, width, height, 7.25), true);
+  let rms = 0;
+  let max = 0;
+  for (let i = 0; i < n; i++) {
+    const delta = actual[i] - expected[i];
+    rms += delta * delta;
+    max = Math.max(max, Math.abs(delta));
+  }
+  rms = Math.sqrt(rms / n);
+  assert.ok(rms <= 2e-6, `RMS=${rms}`);
+  assert.ok(max <= 1e-5, `max=${max}`);
   resetWasmBackend();
 });
 

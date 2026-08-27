@@ -164,7 +164,7 @@ export function processTiledFilmWithTrc(input, document, trc, opts = {}) {
   const { fromSRGB } = primariesMatrices(outputTrc && outputTrc.baseKey);
   const timings = opts.profileTimings ? {} : null;
   const enabled = graph.filter((node) => node.enabled !== false);
-  const support = Math.max(0, ...enabled.map((node) => getEffectDefinition(node.type).supportRadius(
+  const support = opts.renderPlan?.overlap ?? Math.max(0, ...enabled.map((node) => getEffectDefinition(node.type).supportRadius(
     node.params,
     { fullWidth, fullHeight, previewScale, quality, format: document.format },
   )));
@@ -183,6 +183,9 @@ export function processTiledFilmWithTrc(input, document, trc, opts = {}) {
     seed,
     memoryPlan: opts.memoryPlan,
     signal: opts.signal,
+    nodeCaches: opts.nodeCaches,
+    nativeNodeCaches: opts.nativeNodeCaches,
+    profileTimings: !!timings,
   };
 
   const renderOne = (work, originY) => {
@@ -194,6 +197,12 @@ export function processTiledFilmWithTrc(input, document, trc, opts = {}) {
       height: work.height,
       originX: opts.originX ?? 0,
       originY,
+      renderPlan: opts.renderPlan,
+      backend: opts.backend ?? 'auto',
+      memoryMode: opts.memoryMode,
+      deviceMemoryGB: opts.deviceMemoryGB,
+      componentSize: opts.componentSize,
+      arena: opts.arena,
     });
     if (fromSRGB) applyMatrix3(result.rgb, fromSRGB);
     return { result, encoded: encodeFromLinear(result.rgb, outputTrc) };

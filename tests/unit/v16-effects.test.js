@@ -201,6 +201,12 @@ test('V1.6 24MP uses safe High memory on 16GB and aligned bands on unknown hosts
     quality: 'fast',
   });
   assert.equal(high.memoryMode, 'high');
+  const enumDepth = streamFilmGeometry(6000, 4000, document, {
+    componentSize: 'bitDepth16',
+    deviceMemoryGB: 16,
+    memoryMode: 'auto',
+  });
+  assert.equal(enumDepth.plan.componentSize, 16);
   assert.equal(high.bands.length, 1);
   assert.equal(high.overlap, 0);
   assert.ok(high.estimatedBytes * high.safetyMargin <= high.budgetBytes);

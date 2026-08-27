@@ -1,168 +1,372 @@
 {
-  "generatedAt": "2026-08-25T22:51:26.555Z",
+  "generatedAt": "2026-08-27T13:39:20.133Z",
   "node": "v24.19.0",
   "platform": "win32-x64",
   "cpu": "Intel64 Family 6 Model 151 Stepping 2, GenuineIntel",
+  "gitRevision": "1ca943a4b703cbec74a28c5276c312baa07715b3",
+  "wasmSha256": "0f9e93612f8ece628577ac7a7975c3bd470ed062a9dd54b38eb01d5d4118ee73",
   "backend": {
     "available": true,
     "backend": "wasm",
+    "executionMode": "auto",
     "version": 67072,
-    "error": null
+    "error": null,
+    "metrics": {
+      "copyInBytes": 0,
+      "copyOutBytes": 0,
+      "copyCount": 0,
+      "workspaceBytes": 0,
+      "capacityFloats": 0,
+      "grainCapacityFloats": 0
+    }
   },
   "protocol": {
     "warmups": 2,
     "runs": 10,
     "size": "6000x4000",
+    "width": 6000,
+    "height": 4000,
     "componentSize": 16,
-    "deviceMemoryGB": 16
+    "profile": "sRGB",
+    "quality": "quality",
+    "memoryMode": "balanced",
+    "deviceMemoryGB": 16,
+    "graphFixtures": [
+      "v16-shipping-default",
+      "v16-full"
+    ]
   },
   "apply24MP": {
     "label": "24MP streamed fast",
     "warmups": 2,
     "runs": 10,
     "samplesMs": [
-      13086.3,
-      15638.6,
-      16174.8,
-      14686.4,
-      13327.4,
-      13107.6,
-      13173.9,
-      13063.8,
-      13094.1,
-      13197.3
+      13688.2,
+      14764.1,
+      14278,
+      14188.1,
+      14125.8,
+      14300.9,
+      14312.1,
+      14342.4,
+      14054.4,
+      14294.1
     ],
-    "p50Ms": 13173.9,
-    "p95Ms": 16174.8,
-    "peakRssMB": 1683.4,
-    "peakArrayBuffersMB": 1281.9,
+    "p50Ms": 14278,
+    "p95Ms": 14764.1,
+    "peakRssMB": 2644.2,
+    "peakArrayBuffersMB": 1930.8,
     "checksum": 8354496,
     "bands": 1,
     "memoryMode": "high",
-    "nodeTimingsMs": {}
+    "graphHash": null,
+    "planHash": null,
+    "nodeTimingsMs": {},
+    "copies": {
+      "inputBytes": 0,
+      "outputBytes": 0,
+      "count": 0
+    },
+    "passes": {
+      "fullPixelPasses": 0,
+      "perNode": {}
+    },
+    "timings": {
+      "total": 14278,
+      "read": 0,
+      "process": 14278,
+      "quantize": 0,
+      "write": 0,
+      "perNode": {},
+      "perStage": {}
+    },
+    "fallback": null
   },
   "preview1024": {
     "label": "1024px preview fast",
     "warmups": 2,
     "runs": 10,
     "samplesMs": [
-      439,
-      427.8,
-      386.5,
-      385.3,
+      425.7,
+      421.7,
+      396.1,
+      441.8,
+      434.2,
       421.9,
-      388.5,
-      410.1,
-      456.4,
-      388,
-      392.5
+      426.1,
+      434.6,
+      399.4,
+      447
     ],
-    "p50Ms": 392.5,
-    "p95Ms": 456.4,
+    "p50Ms": 425.7,
+    "p95Ms": 447,
     "peakRssMB": 0,
     "peakArrayBuffersMB": 0,
     "checksum": 4.315698623657227,
     "bands": 1,
     "memoryMode": "n/a",
-    "nodeTimingsMs": {}
+    "graphHash": null,
+    "planHash": null,
+    "nodeTimingsMs": {},
+    "copies": {
+      "inputBytes": 0,
+      "outputBytes": 0,
+      "count": 0
+    },
+    "passes": {
+      "fullPixelPasses": 0,
+      "perNode": {}
+    },
+    "timings": {
+      "total": 425.7,
+      "read": 0,
+      "process": 425.7,
+      "quantize": 0,
+      "write": 0,
+      "perNode": {},
+      "perStage": {}
+    },
+    "fallback": null
   },
-  "v16Apply24MP": {
-    "label": "24MP V1.6 graph fast",
+  "v16ShippingDefault": {
+    "label": "24MP V1.6 shipping-default Quality Balanced",
     "warmups": 2,
     "runs": 10,
     "samplesMs": [
-      24297.6,
-      24162.5,
-      24005,
-      24413,
-      24120.4,
-      24257.6,
-      24618.5,
-      24247.7,
-      24373.6,
-      24197
+      17356.8,
+      17263.2,
+      16696.6,
+      16661.4,
+      16406.8,
+      16528.2,
+      16527.4,
+      16427,
+      16731.2,
+      16672
     ],
-    "p50Ms": 24247.7,
-    "p95Ms": 24618.5,
-    "peakRssMB": 1532.7,
-    "peakArrayBuffersMB": 1098.8,
-    "checksum": 7123143,
-    "bands": 1,
-    "memoryMode": "high",
+    "p50Ms": 16661.4,
+    "p95Ms": 17356.8,
+    "peakRssMB": 2240.3,
+    "peakArrayBuffersMB": 1563.5,
+    "checksum": 8354496,
+    "bands": 2,
+    "memoryMode": "balanced",
+    "graphHash": "522ace2d",
+    "planHash": "fc44cf6c",
     "nodeTimingsMs": {
       "halation": {
         "samples": [
-          13375.2,
-          13288.3,
-          13038.4,
-          13409.1,
-          13223.8,
-          13323.8,
-          13578.5,
-          13177.1,
-          13358.5,
-          13202.6
+          16882.5,
+          16777.4,
+          16252,
+          16202.9,
+          15957.6,
+          16056,
+          16084.6,
+          15968.1,
+          16171.3,
+          16238.6
         ],
-        "p50": 13288.3,
-        "p95": 13578.5
-      },
-      "filmResolution": {
-        "samples": [
-          2588.2,
-          2554.3,
-          2646.9,
-          2629.3,
-          2533.6,
-          2595.1,
-          2635.8,
-          2577.7,
-          2586,
-          2586.9
-        ],
-        "p50": 2586.9,
-        "p95": 2646.9
-      },
-      "grain": {
-        "samples": [
-          7948.1,
-          7955.7,
-          7934,
-          7986,
-          7929.9,
-          7909,
-          8018.3,
-          8013.5,
-          8035.7,
-          7985.8
-        ],
-        "p50": 7955.7,
-        "p95": 8035.7
+        "p50": 16171.3,
+        "p95": 16882.5
       }
-    }
+    },
+    "copies": {
+      "inputBytes": 347040000,
+      "outputBytes": 347040000,
+      "count": 4
+    },
+    "passes": {
+      "fullPixelPasses": 16,
+      "perNode": {
+        "halation-main": 16
+      }
+    },
+    "timings": {
+      "total": 16661.4,
+      "read": 0,
+      "process": 16661.4,
+      "quantize": 0,
+      "write": 0,
+      "perNode": {
+        "halation": 16171.285300000047
+      },
+      "perStage": {
+        "extractMs": 9941.629299999971,
+        "diffuseMs": 2762.099199999997,
+        "haloMs": 2048.946799999976,
+        "blendMs": 1485.6388999999617
+      }
+    },
+    "fallback": null
   },
-  "v16Preview1024": {
-    "label": "1024px V1.6 graph fast",
+  "v16Full": {
+    "label": "24MP V1.6 full Quality Balanced",
     "warmups": 2,
     "runs": 10,
     "samplesMs": [
-      562.4,
-      551.4,
-      552.9,
-      523.4,
-      523.4,
-      534.5,
-      511.4,
-      544.5,
-      525.6,
-      504.1
+      32304.8,
+      32233.7,
+      31951.1,
+      31976.4,
+      31934.9,
+      32528.2,
+      32308.3,
+      31971.7,
+      31932.7,
+      31896.7
     ],
-    "p50Ms": 525.6,
-    "p95Ms": 562.4,
+    "p50Ms": 31971.7,
+    "p95Ms": 32528.2,
+    "peakRssMB": 2116.6,
+    "peakArrayBuffersMB": 895.3,
+    "checksum": 7816705,
+    "bands": 2,
+    "memoryMode": "balanced",
+    "graphHash": "879d3d59",
+    "planHash": "4adf8ea6",
+    "nodeTimingsMs": {
+      "halation": {
+        "samples": [
+          16807.3,
+          16885.9,
+          16671.6,
+          16765.5,
+          16503.4,
+          17182.3,
+          16624.6,
+          16686.2,
+          16522,
+          16545.9
+        ],
+        "p50": 16671.6,
+        "p95": 17182.3
+      },
+      "filmResolution": {
+        "samples": [
+          4672.1,
+          4565.3,
+          4551,
+          4545.6,
+          4575.2,
+          4653,
+          4665.1,
+          4603.6,
+          4604.3,
+          4513.8
+        ],
+        "p50": 4575.2,
+        "p95": 4672.1
+      },
+      "grain": {
+        "samples": [
+          10392.1,
+          10372,
+          10276.3,
+          10183.7,
+          10404.6,
+          10222.6,
+          10509.6,
+          10240.4,
+          10321.5,
+          10352.7
+        ],
+        "p50": 10321.5,
+        "p95": 10509.6
+      }
+    },
+    "copies": {
+      "inputBytes": 1043712000,
+      "outputBytes": 1043712000,
+      "count": 12
+    },
+    "passes": {
+      "fullPixelPasses": 48,
+      "perNode": {
+        "halation-main": 16,
+        "film-resolution-main": 16,
+        "grain-main": 16
+      }
+    },
+    "timings": {
+      "total": 31971.7,
+      "read": 0,
+      "process": 31971.7,
+      "quantize": 0,
+      "write": 0,
+      "perNode": {
+        "halation": 16671.645900000003,
+        "filmResolution": 4575.182499999879,
+        "grain": 10321.508700000006
+      },
+      "perStage": {
+        "extractMs": 10204.852199999965,
+        "diffuseMs": 2774.3926999999676,
+        "haloMs": 2025.7048999998951,
+        "blendMs": 1540.6923000001116
+      }
+    },
+    "fallback": null
+  },
+  "v16Preview1024Cached": {
+    "label": "1024px V1.6 full cached preview",
+    "warmups": 2,
+    "runs": 10,
+    "samplesMs": [
+      80.4,
+      75.9,
+      81.1,
+      93,
+      86,
+      79.9,
+      98.9,
+      77,
+      79.5,
+      81.1
+    ],
+    "p50Ms": 80.4,
+    "p95Ms": 98.9,
     "peakRssMB": 0,
     "peakArrayBuffersMB": 0,
-    "checksum": 2.856403350830078,
+    "checksum": 4.274524688720703,
     "bands": 1,
     "memoryMode": "n/a",
-    "nodeTimingsMs": {}
+    "graphHash": "879d3d59",
+    "planHash": "85a66b79",
+    "nodeTimingsMs": {},
+    "copies": {
+      "inputBytes": 0,
+      "outputBytes": 0,
+      "count": 0
+    },
+    "passes": {
+      "fullPixelPasses": 0,
+      "perNode": {}
+    },
+    "timings": {
+      "total": 80.4,
+      "read": 0,
+      "process": 80.4,
+      "quantize": 0,
+      "write": 0,
+      "perNode": {},
+      "perStage": {}
+    },
+    "fallback": null
+  },
+  "backendFinal": {
+    "available": true,
+    "backend": "wasm",
+    "executionMode": "auto",
+    "version": 67072,
+    "error": null,
+    "metrics": {
+      "copyInBytes": 35169605632,
+      "copyOutBytes": 35169605632,
+      "copyCount": 1974,
+      "workspaceBytes": 775200000,
+      "capacityFloats": 135660000,
+      "grainCapacityFloats": 58140000
+    }
   }
 }

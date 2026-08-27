@@ -10,6 +10,7 @@ import {
   resolveLayerBinding,
   resolvePreviewSourceLayer,
   effectLayerName,
+  isEffectLayerName,
   ensureEffectLayer,
   normalizeEffectLayerPresentation,
   unlockPixelLayer,
@@ -156,7 +157,10 @@ test('ensureEffectLayer creates a blank pixel target without duplicate/clipboard
 
   const created = await ensureEffectLayer(doc, source, null, photoshop);
   assert.equal(created, target);
-  assert.match(createdOptions.name, /^Film Halation \[/);
+  assert.match(createdOptions.name, /^Film Emulation \[/);
+  assert.equal(isEffectLayerName(createdOptions.name), true, 'new effect layer prefix is recognized');
+  assert.equal(isEffectLayerName('Film Halation [legacy]'), true, 'legacy output remains protected from source rebinding');
+  assert.equal(isEffectLayerName('Source'), false);
   assert.equal(target.name, createdOptions.name);
   assert.equal(movedRelative, source);
   assert.equal(movedPlacement, 'before');

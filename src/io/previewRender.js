@@ -4,7 +4,7 @@
  * 显示编码 → PNG data URL（面板内显示，不触碰文档，满足 A3 预览 <500ms）。
  * 注意：UXP 无 canvas/内置 PNG 编码，用 ui/pngEncoder 的最小编码器。
  */
-import { extractStep, diffuseStep, haloStep, blendStep, processFilmStages, applyMatrix3, resolveSigmaParams } from '../core/index.js';
+import { extractStep, diffuseStep, haloStep, blendStep, processFilmStages, applyMatrix3, resolveSigmaParams, stablePlanStringify, getWasmBackendStatus } from '../core/index.js';
 import { readDocumentPixels } from './imageAccess.js';
 import { decodeToLinear, encodePanelPreviewSRGB, primariesMatrices, standardProfileName } from './colorPipeline.js';
 import { documentComponentSize } from './bitDepth.js';
@@ -91,7 +91,7 @@ async function readPreviewSource(doc) {
     });
   } catch (e) {
     targetSizeUnsupported = true;
-    console.warn('[film-halation] getPixels targetSize unsupported, falling back to full read: ' + (e && e.message ? e.message : e));
+    console.warn('[film-emulation] getPixels targetSize unsupported, falling back to full read: ' + (e && e.message ? e.message : e));
     return readDocumentPixels(doc, { componentSize, colorProfile: PANEL_COLOR_PROFILE });
   }
 }
@@ -177,6 +177,8 @@ export async function renderPreviewIncremental(doc, paramsOrDocument, trc, cache
     && cache.eh === eh
     && sourceKey
     && cache.sourceKey === sourceKey
+    && cache.displayProfileKey === (displayTrc.baseKey ?? '')
+    && cache.effectProfileKey === (effectTrc.baseKey ?? '')
     ? cache
     : {};
 
@@ -313,6 +315,8 @@ export async function renderPreviewIncremental(doc, paramsOrDocument, trc, cache
   c.ew = ew;
   c.eh = eh;
   c.sourceKey = sourceKey;
+  c.displayProfileKey = displayTrc.baseKey ?? '';
+  c.effectProfileKey = effectTrc.baseKey ?? '';
 
   // 注意：halo 是缓存中间量，blend 必须分配新输出（不能就地写坏缓存）
   const kBlend = key(p);
@@ -345,7 +349,9 @@ export async function renderPreviewIncremental(doc, paramsOrDocument, trc, cache
   const grainDisplayAttenuation = nativeInspection
     ? 1 / Math.max(1, Number(source?.pixelRatio ?? 1))
     : 1;
+  const backendStatus = getWasmBackendStatus();
   const graphKey = JSON.stringify({
+    graph: stablePlanStringify(filmDocument?.graph ?? []),
     nodes: laterNodes,
     format: filmDocument?.format ?? null,
     fullWidth: doc.width || width,
@@ -356,6 +362,8 @@ export async function renderPreviewIncremental(doc, paramsOrDocument, trc, cache
     quality: renderQuality,
     grainInput: transferNativeGrain ? 'apply-native' : 'display',
     grainDisplayAttenuation,
+    backendAbi: backendStatus.version ?? 'js-reference',
+    backendMode: backendStatus.executionMode ?? 'auto',
   });
   c.nodeCaches ??= Object.create(null);
   c.nativeNodeCaches ??= Object.create(null);

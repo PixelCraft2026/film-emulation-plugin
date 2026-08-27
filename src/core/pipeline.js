@@ -1,6 +1,6 @@
 // @ts-nocheck
 /**
- * Film Halation V1.5.1 物理管线。
+ * Film Emulation 的 Halation V1.5.1 物理管线。
  *
  * 线性 RGB → 曝光相关光谱源场 → 同一三瓣 PSF（Fast/Quality）→ 局部暗侧门控 →
  * 宽半径红层 Global Diffusion → HDR 安全合成。
@@ -24,7 +24,7 @@ import { vvGauss } from './diffuse/vv.js';
 import { boxDownsample, bilinearUpsample } from './diffuse/resample.js';
 import { channelSigmas } from './redshift.js';
 import { blend } from './composite.js';
-import { tryWasmBoxBlur, getWasmBackendStatus } from './wasmBackend.js';
+import { tryWasmBoxBlur, tryWasmVvGaussianBlur, getWasmBackendStatus } from './wasmBackend.js';
 
 /** V1.5.1 默认三瓣 PSF：扎实核芯、肩部和低能量红色尾部。 */
 export const PSF_LOBES = Object.freeze([
@@ -109,7 +109,9 @@ function blurPrimitive(src, dst, tempA, tempB, width, height, sigma, params) {
   } else if (sigma < 4) {
     gaussianBlurSep(src, dst, tempA, tempB, width, height, sigma);
   } else {
-    vvGauss(src, dst, tempA, tempB, width, height, sigma);
+    if (!tryWasmVvGaussianBlur(src, dst, width, height, sigma)) {
+      vvGauss(src, dst, tempA, tempB, width, height, sigma);
+    }
   }
 }
 
@@ -410,6 +412,15 @@ export function blendStep(input, halo, gate, width, height, params, densityGate 
 export function processHalation(input, params, options = {}) {
   validateParams(params);
   const { width, height } = input;
+  if (params.strength === 0) {
+    return {
+      width,
+      height,
+      rgb: input.rgb,
+      alpha: input.alpha,
+      stats: { identity: true, backend: 'js', fullPixelPasses: 0, inputBytes: 0, outputBytes: 0, timings: options.profileTimings ? {} : null },
+    };
+  }
   const timings = options.profileTimings ? {} : null;
   let started = timings ? nowMs() : 0;
   const extracted = extractStep(input, params, options);
@@ -447,12 +458,21 @@ export function processHalation(input, params, options = {}) {
     width,
     height,
     rgb,
-    alpha: input.alpha ? new Float32Array(input.alpha) : undefined,
+    // Alpha is read-only throughout the physical pipeline.  Keeping the
+    // caller's plane by reference avoids a full-frame copy on every graph node.
+    alpha: input.alpha,
     S: extracted.S,
     G: extracted.G,
     W: extracted.W,
     U: options.compact ? undefined : extracted.U,
     halo: options.compact ? undefined : halo,
-    stats: { backend: getWasmBackendStatus().backend, psf: 'triple-gaussian-exposure-aware', timings },
+    stats: {
+      backend: getWasmBackendStatus().backend,
+      psf: 'triple-gaussian-exposure-aware',
+      timings,
+      fullPixelPasses: 8,
+      inputBytes: input.rgb.byteLength,
+      outputBytes: rgb.byteLength,
+    },
   };
 }

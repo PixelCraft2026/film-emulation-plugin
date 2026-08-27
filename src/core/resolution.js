@@ -2,6 +2,7 @@ import { boxBlur3, boxRadiusForSigma } from './diffuse/box.js';
 import { gaussianBlurSep, gaussianKernel1D } from './diffuse/conv.js';
 import { normalizeFilmFormat, pixelsPerMm } from './format.js';
 import { tryWasmBoxBlur, tryWasmGaussianBlur } from './wasmBackend.js';
+import { acquireF32, releaseF32 } from './bufferArena.js';
 
 export const FILM_RESOLUTION_DEFAULTS = Object.freeze({
   amount: 1,
@@ -88,12 +89,12 @@ function blurPlane(src, dst, tempA, tempB, width, height, sigma, quality) {
 /** @param {any} input @param {any} rawParams @param {Record<string, any>} [context={}] */
 export function processFilmResolution(input, rawParams, context = {}) {
   const params = validateFilmResolutionParams(rawParams);
-  if (params.amount === 0) return { ...input, stats: { sigmaPx: 0, identity: true, backend: 'js' } };
+  if (params.amount === 0) return { ...input, stats: { sigmaPx: 0, identity: true, backend: 'js', fullPixelPasses: 0, inputBytes: 0, outputBytes: 0 } };
   const fullWidth = context.fullWidth ?? input.width;
   const previewScale = context.previewScale ?? 1;
   const format = normalizeFilmFormat(context.format);
   const target = filmResolutionTarget(params, format, fullWidth, previewScale);
-  if (target.sigmaPx < 0.15) return { ...input, stats: { ...target, identity: true, backend: 'js' } };
+  if (target.sigmaPx < 0.15) return { ...input, stats: { ...target, identity: true, backend: 'js', fullPixelPasses: 0, inputBytes: 0, outputBytes: 0 } };
 
   const n = input.width * input.height;
   const weights = new Float32Array(n);
@@ -156,35 +157,62 @@ export function processFilmResolution(input, rawParams, context = {}) {
       height: input.height,
       rgb: output,
       alpha: input.alpha,
-      stats: { ...target, identity: false, backend: usedWasm ? 'wasm' : 'js', cacheHit },
+      stats: {
+        ...target,
+        identity: false,
+        backend: usedWasm ? 'wasm' : 'js',
+        cacheHit,
+        fullPixelPasses: needsWide ? 8 : 5,
+        inputBytes: input.rgb.byteLength,
+        outputBytes: output.byteLength,
+      },
     };
   }
 
-  const source = new Float32Array(n);
-  const first = new Float32Array(n);
-  const wide = needsWide ? new Float32Array(n) : null;
-  const tempA = new Float32Array(n);
-  const tempB = new Float32Array(n);
-  for (let channel = 0; channel < 3; channel++) {
-    for (let i = 0; i < n; i++) source[i] = input.rgb[i * 3 + channel];
-    usedWasm = blurPlane(source, first, tempA, tempB, input.width, input.height, target.sigmaPx, quality) === 'wasm' || usedWasm;
-    if (needsWide && wide) usedWasm = blurPlane(source, wide, tempA, tempB, input.width, input.height, target.sigmaPx * 2.2, quality) === 'wasm' || usedWasm;
-    for (let i = 0; i < n; i++) {
-      if ((i & 4095) === 0 && signal?.aborted) throw new Error('Film render cancelled');
-      const amount = weights[i];
-      const wideValue = wide ? wide[i] : first[i];
-      const value = amount <= 1
-        ? source[i] + amount * (first[i] - source[i])
-        : (2 - amount) * first[i] + (amount - 1) * wideValue;
-      output[i * 3 + channel] = value;
+  /** @type {any[]} */
+  const scratchTokens = [];
+  /** @param {number} length @param {string} tag */
+  const scratch = (length, tag) => {
+    const token = acquireF32(context, length, tag);
+    scratchTokens.push(token);
+    return token.array;
+  };
+  try {
+    const source = scratch(n, 'resolution-source');
+    const first = scratch(n, 'resolution-first');
+    const wide = needsWide ? scratch(n, 'resolution-wide') : null;
+    const tempA = scratch(n, 'resolution-temp-a');
+    const tempB = scratch(n, 'resolution-temp-b');
+    for (let channel = 0; channel < 3; channel++) {
+      for (let i = 0; i < n; i++) source[i] = input.rgb[i * 3 + channel];
+      usedWasm = blurPlane(source, first, tempA, tempB, input.width, input.height, target.sigmaPx, quality) === 'wasm' || usedWasm;
+      if (needsWide && wide) usedWasm = blurPlane(source, wide, tempA, tempB, input.width, input.height, target.sigmaPx * 2.2, quality) === 'wasm' || usedWasm;
+      for (let i = 0; i < n; i++) {
+        if ((i & 4095) === 0 && signal?.aborted) throw new Error('Film render cancelled');
+        const amount = weights[i];
+        const wideValue = wide ? wide[i] : first[i];
+        const value = amount <= 1
+          ? source[i] + amount * (first[i] - source[i])
+          : (2 - amount) * first[i] + (amount - 1) * wideValue;
+        output[i * 3 + channel] = value;
+      }
     }
+  } finally {
+    for (const token of scratchTokens) releaseF32(context, token);
   }
   return {
     width: input.width,
     height: input.height,
     rgb: output,
     alpha: input.alpha,
-    stats: { ...target, identity: false, backend: usedWasm ? 'wasm' : 'js' },
+    stats: {
+      ...target,
+      identity: false,
+      backend: usedWasm ? 'wasm' : 'js',
+      fullPixelPasses: needsWide ? 8 : 5,
+      inputBytes: input.rgb.byteLength,
+      outputBytes: output.byteLength,
+    },
   };
 }
 

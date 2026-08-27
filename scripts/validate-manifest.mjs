@@ -33,9 +33,25 @@ if (manifest.id !== 'com.cheukwing.filmemulation') {
   console.error(`manifest.json validation FAILED — expected new plugin id, got ${manifest.id}`);
   process.exit(1);
 }
+const panels = manifest.entrypoints.filter((entry) => entry.type === 'panel');
+if (
+  manifest.name !== 'Film Emulation'
+  || panels.length !== 1
+  || panels[0].id !== 'filmEmulationPanel'
+  || panels[0].label?.default !== 'Film Emulation'
+) {
+  console.error('manifest.json validation FAILED — current plugin/panel identity must be Film Emulation / filmEmulationPanel');
+  process.exit(1);
+}
 if (packageJson.name !== 'film-emulation' || packageJson.version !== manifest.version) {
   console.error('manifest/package identity mismatch');
   process.exit(1);
 }
 
-console.log('manifest.json validation OK (id=%s, minVersion=%s)', manifest.id, psHost.minVersion);
+console.log(
+  'manifest.json validation OK (name=%s, id=%s, panel=%s, minVersion=%s)',
+  manifest.name,
+  manifest.id,
+  panels[0].id,
+  psHost.minVersion,
+);

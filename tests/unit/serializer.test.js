@@ -77,7 +77,7 @@ test('S7 toDocument shape: FilmHalation schema v2 graph + bindings', () => {
   const doc = toDocument(params, {
     bindings: {
       sourceLayer: { id: 1, name: 'Source', token: '' },
-      targetLayer: { id: 2, name: 'Film Halation [x]', token: 'x' },
+      targetLayer: { id: 2, name: 'Film Emulation [x]', token: 'x' },
     },
   });
   assert.equal(doc.plugin, 'FilmHalation');

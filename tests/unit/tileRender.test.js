@@ -22,6 +22,8 @@ test('automatic memory preflight selects High for common files and Balanced for 
   assert.ok(largeUnknown.bands.length > 1);
   const high16GB = streamGeometry(6000, 4000, params, { componentSize: 16, deviceMemoryGB: 16, memoryMode: 'auto' });
   assert.equal(high16GB.memoryMode, 'high');
+  const enum16GB = streamGeometry(6000, 4000, params, { componentSize: 'bitDepth16', deviceMemoryGB: 16, memoryMode: 'auto' });
+  assert.equal(enum16GB.memoryMode, 'high');
   assert.equal(high16GB.estimatedBytes, estimateHighMemoryBytes(6000, 4000, 16));
   const forcedBalanced = streamGeometry(3492, 2328, params, { memoryMode: 'balanced' });
   assert.equal(forcedBalanced.memoryMode, 'balanced');
@@ -36,7 +38,12 @@ function buildDisplayInput(w, h) {
     rgb[i * 3 + 1] = v * 0.8;
     rgb[i * 3 + 2] = v * 0.6;
   }
-  for (const [x, y] of [[40, 40], [120, 30], [30, 180]]) {
+  const emitters = [
+    [Math.floor(w * 0.25), Math.floor(h * 0.2)],
+    [Math.floor(w * 0.75), Math.floor(h * 0.125)],
+    [Math.floor(w * 0.18), Math.floor(h * 0.75)],
+  ];
+  for (const [x, y] of emitters) {
     const p = (y * w + x) * 3;
     rgb[p] = 1.0;
     rgb[p + 1] = 1.0;
@@ -64,10 +71,10 @@ function l2AndMax(a, b) {
 }
 
 test('processTiledWithTrc matches full-image render (quality, tiled branch)', () => {
-  const input = buildDisplayInput(200, 240);
+  const input = buildDisplayInput(128, 192);
   const params = createHalationParams({ strength: 100, diffusionMode: 'quality' });
   const full = fullReference(input, params);
-  // tileThreshold=10000 强制走分块分支（48000px > 10000）
+  // tileThreshold=10000 强制走分块分支（24576px > 10000）。
   const tiled = processTiledWithTrc(input, params, TRC, { bandHeight: 64, overlapPx: 40, tileThreshold: 10000 });
   assert.equal(tiled.width, input.width);
   assert.equal(tiled.height, input.height);
@@ -79,7 +86,7 @@ test('processTiledWithTrc matches full-image render (quality, tiled branch)', ()
 });
 
 test('processTiledWithTrc matches full-image render (fast, tiled branch)', () => {
-  const input = buildDisplayInput(200, 240);
+  const input = buildDisplayInput(128, 192);
   const params = createHalationParams({ strength: 100, diffusionMode: 'fast' });
   const full = fullReference(input, params);
   const tiled = processTiledWithTrc(input, params, TRC, { bandHeight: 64, overlapPx: 40, tileThreshold: 10000 });
@@ -133,9 +140,9 @@ test('zero-strength Rec.2020 profile roundtrip preserves the source values', () 
 });
 
 test('default overlap covers sigmaRatio>1 (3.2): tiled matches full with large channel σ', () => {
-  // σ=12, sigmaRatio=[2,1.5,1] → 红色通道 σ=24，核支撑 5σ=120px。
-  // 旧默认 overlap=ceil(5·12)=60 不足（红尾截断 ~8%）；新默认按 σ·maxRatio=120。
-  const input = buildDisplayInput(160, 480); // 多带（bandHeight 默认 256）
+  // σ=12, sigmaRatio=[2,1.5,1] → 红色通道基础 σ=24，并继续计入红尾 lobe 支持。
+  // 旧默认 overlap=ceil(5·12)=60 不足（红尾截断 ~8%）；当前完整支持得到 176px。
+  const input = buildDisplayInput(96, 400); // 默认 overlap=176、bandHeight=352，仍覆盖两带接缝。
   const params = createHalationParams({ strength: 100, diffusionMode: 'quality', sigma: 12, sigmaRatio: [2, 1.5, 1] });
   const full = fullReference(input, params);
   const tiled = processTiledWithTrc(input, params, TRC, { tileThreshold: 10000 });
@@ -147,7 +154,7 @@ test('default overlap covers sigmaRatio>1 (3.2): tiled matches full with large c
 });
 
 test('No-Remjet source expansion, red tail and density composite remain band-seam free', () => {
-  const input = buildDisplayInput(160, 600);
+  const input = buildDisplayInput(96, 400); // 默认 overlap=88、bandHeight=256，覆盖两带接缝。
   const params = createHalationParams({
     ...createHalationPreset('tungsten-800'),
     sigmaUnits: 'pixels',
@@ -162,9 +169,9 @@ test('No-Remjet source expansion, red tail and density composite remain band-sea
 
 test('banded low-res diffusion aligns with full-image low-res (3.1 相位对齐)', () => {
   // σ=48 → scale=8：quality 低分辨率路径在分块/整图下都应一致。
-  // 默认 overlap=ceil(240/8)·8=240，bandHeight=ceil(480/8)·8=480，H=1000（8 的倍数）
+  // 当前三瓣红尾得到 overlap=344、bandHeight=688，H=720（8 的倍数）
   // → 带起点/带高均为 scale 整数倍，带内格子与整图格子逐格重合。
-  const input = buildDisplayInput(160, 1000);
+  const input = buildDisplayInput(96, 720);
   const params = createHalationParams({ strength: 100, diffusionMode: 'quality', sigma: 48 });
   const full = fullReference(input, params);
   const tiled = processTiledWithTrc(input, params, TRC, { tileThreshold: 10000 });
@@ -174,14 +181,14 @@ test('banded low-res diffusion aligns with full-image low-res (3.1 相位对齐)
 });
 
 test('#2 bottom edge: non-multiple height (H mod scale ≠ 0) keeps banded/full consistency', () => {
-  // H=1004 不是 scale=8 的倍数：末格偏短（[1000,1004)），相位对齐 + 末格公式
+  // H=724 不是 scale=8 的倍数：末格偏短（[720,724)），相位对齐 + 末格公式
   // 保证带末格与整图末格覆盖相同全局行（#2 验证，V1.2 整数格设计已覆盖）。
-  const input = buildDisplayInput(160, 1004);
+  const input = buildDisplayInput(96, 724);
   const params = createHalationParams({ strength: 100, diffusionMode: 'quality', sigma: 48 });
   const full = fullReference(input, params);
   const tiled = processTiledWithTrc(input, params, TRC, { tileThreshold: 10000 });
   const { l2, maxDiff } = l2AndMax(full, tiled.rgb);
-  console.log(`INFO bottom-edge H=1004 L2=${l2.toExponential(2)} max=${maxDiff.toExponential(2)}`);
+  console.log(`INFO bottom-edge H=724 L2=${l2.toExponential(2)} max=${maxDiff.toExponential(2)}`);
   // vvGauss 带内瞬态 ~2e-6；若末格相位错误会出现 ~1e-3 的底部条带误差
   assert.ok(l2 < 1e-5, `non-multiple height L2=${l2.toExponential(2)}`);
 });

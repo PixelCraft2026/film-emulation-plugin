@@ -5,8 +5,10 @@ import {
   psfLobesFor,
   normalizeEffectGraph,
   getEffectDefinition,
+  createFilmRenderPlan,
 } from '../core/index.js';
 import { splitBands } from './tiles.js';
+import { normalizeComponentSize } from './bitDepth.js';
 
 /** Conservative peak working-set estimate for the full-image JS/WASM pipeline. */
 export function estimateHighMemoryBytes(width, height, componentSize = 16) {
@@ -31,7 +33,7 @@ export function streamGeometry(width, height, params, options = {}) {
   const overlap = scale > 1 ? Math.ceil(rawOverlap / scale) * scale : rawOverlap;
   const rawBand = Math.max(384, overlap * 2);
   const bandHeight = scale > 1 ? Math.ceil(rawBand / scale) * scale : rawBand;
-  const componentSize = Number(options.componentSize ?? 16);
+  const componentSize = normalizeComponentSize(options.componentSize ?? 16);
   const estimatedBytes = estimateHighMemoryBytes(width, height, componentSize);
   const deviceMemoryGB = Math.max(0, Number(options.deviceMemoryGB ?? 0));
   // navigator.deviceMemory is not guaranteed in UXP. Unknown-memory hosts receive a
@@ -64,80 +66,48 @@ export function streamGeometry(width, height, params, options = {}) {
 
 /** Graph-aware preflight and row-band plan for the V1.6 renderer. */
 export function streamFilmGeometry(width, height, document, options = {}) {
-  const graph = normalizeEffectGraph(document?.graph);
-  const componentSize = Number(options.componentSize ?? 16);
-  const quality = options.quality ?? 'quality';
-  const format = document.format;
-  const fullWidth = options.fullWidth ?? width;
-  const fullHeight = options.fullHeight ?? height;
-  const previewScale = options.previewScale ?? 1;
-  const enabled = graph.filter((node) => node.enabled !== false);
-  const overlap = Math.max(0, ...enabled.map((node) => getEffectDefinition(node.type).supportRadius(
-    node.params,
-    { fullWidth, fullHeight, previewScale, quality, format },
-  )));
-  const halation = enabled.find((node) => node.type === 'halation');
-  const halationParams = halation ? resolveSigmaParams(halation.params, fullWidth, fullHeight) : null;
-  const phaseScale = halationParams
-    ? lowResScale(halationParams, halationParams.sigma * Math.max(...halationParams.sigmaRatio))
-    : 1;
-  const alignedOverlap = Math.ceil(overlap / phaseScale) * phaseScale;
-  const baseBytes = estimateHighMemoryBytes(width, height, componentSize);
-  // Nodes execute sequentially.  `baseBytes` is already the complete legacy
-  // render envelope (I/O, canonical frames and WASM capacity), so adding a
-  // later node's whole scratch set double-counts buffers that cease to be live
-  // after Halation.  Keep an explicit stage estimate and take the larger peak.
-  const sequentialScratchBytes = Math.max(0, ...enabled
-    .filter((node) => node.type !== 'halation')
-    .map((node) => getEffectDefinition(node.type).estimateMemory({ width, height }, node.params)));
-  const pixels = width * height;
-  const componentBytes = componentSize === 32 ? 4 : componentSize === 8 ? 1 : 2;
-  const ioBytes = pixels * 4 * componentBytes * 2;
-  const canonicalAndWasmBytes = pixels * 4 * 10;
-  const estimatedStageBytes = Math.ceil(ioBytes + canonicalAndWasmBytes + sequentialScratchBytes);
-  const estimatedBytes = Math.max(baseBytes, estimatedStageBytes);
-  const deviceMemoryGB = Math.max(0, Number(options.deviceMemoryGB ?? 0));
-  const budgetBytes = Math.floor((deviceMemoryGB >= 24 ? 6 : deviceMemoryGB >= 16 ? 4 : 1.5) * 1024 ** 3);
-  const hardBudgetBytes = Math.floor((deviceMemoryGB >= 24 ? 2.5 : 1.5) * 1024 ** 3);
-  const requestedMode = options.memoryMode ?? 'auto';
-  const highMemory = requestedMode === 'high'
-    || (requestedMode === 'auto' && estimatedBytes <= budgetBytes * 0.82);
-  const minimumBandHeight = 64;
-  const bandBytesPerPixel = 4 * 20;
-  const safetyMargin = 1.15;
-  const usableBandBytes = Math.min(budgetBytes * 0.55, hardBudgetBytes / safetyMargin);
-  const maxRowsWithOverlap = Math.max(
-    minimumBandHeight + 2 * alignedOverlap,
-    Math.floor(usableBandBytes / Math.max(1, width * bandBytesPerPixel)),
-  );
-  const maxSafeBandHeight = Math.max(minimumBandHeight, maxRowsWithOverlap - 2 * alignedOverlap);
-  let bandHeight = Math.min(height, maxSafeBandHeight);
-  bandHeight = Math.max(minimumBandHeight, Math.floor(bandHeight / phaseScale) * phaseScale);
-  if (highMemory) bandHeight = height;
-  const bands = splitBands(width, height, bandHeight, highMemory ? 0 : alignedOverlap);
-  const estimatedBandBytes = Math.ceil(width * Math.min(height, bandHeight + alignedOverlap * 2) * bandBytesPerPixel);
-  const hardBudgetExceeded = highMemory
-    ? estimatedBytes * safetyMargin > budgetBytes
-    : estimatedBandBytes * safetyMargin > hardBudgetBytes;
+  const componentSize = normalizeComponentSize(options.componentSize ?? 16);
+  const plan = createFilmRenderPlan({
+    width,
+    height,
+    graph: document?.graph,
+    format: document?.format,
+    componentSize,
+    quality: options.quality ?? 'quality',
+    fullWidth: options.fullWidth ?? width,
+    fullHeight: options.fullHeight ?? height,
+    previewScale: options.previewScale ?? 1,
+    deviceMemoryGB: options.deviceMemoryGB ?? 0,
+    memoryMode: options.memoryMode ?? 'auto',
+  });
+  const halation = plan.enabled.find((node) => node.type === 'halation');
+  const resolvedHalation = halation ? resolveSigmaParams(halation.params, plan.fullWidth, plan.fullHeight) : null;
+  const phaseScale = resolvedHalation
+    ? lowResScale(resolvedHalation, resolvedHalation.sigma * Math.max(...resolvedHalation.sigmaRatio))
+    : plan.phasePeriod;
   return {
     document,
-    graph,
-    params: graph.find((node) => node.type === 'halation')?.params,
-    overlap: highMemory ? 0 : alignedOverlap,
-    bandHeight,
-    bands,
-    memoryMode: highMemory ? 'high' : 'balanced',
-    estimatedBytes,
-    estimatedStageBytes,
-    estimatedBandBytes,
-    budgetBytes,
-    hardBudgetBytes,
-    hardBudgetExceeded,
-    quality,
-    fullWidth,
-    fullHeight,
-    previewScale,
+    graph: plan.graph,
+    plan,
+    planHash: plan.planHash,
+    graphHash: plan.graphHash,
+    params: halation?.params,
+    overlap: plan.overlap,
+    bandHeight: plan.bandHeight,
+    bands: plan.bands,
+    memoryMode: plan.memoryMode,
+    estimatedBytes: plan.memory.plannedPeakBytes,
+    estimatedStageBytes: plan.memory.arenaBytes + plan.memory.wasmBytes,
+    estimatedBandBytes: plan.memory.estimatedBandBytes,
+    budgetBytes: plan.budgetBytes,
+    hardBudgetBytes: plan.hardBudgetBytes,
+    hardBudgetExceeded: plan.hardBudgetExceeded,
+    quality: plan.quality,
+    fullWidth: plan.fullWidth,
+    fullHeight: plan.fullHeight,
+    previewScale: plan.previewScale,
     phaseScale,
-    safetyMargin,
+    phasePeriod: plan.phasePeriod,
+    safetyMargin: plan.safetyMargin,
   };
 }

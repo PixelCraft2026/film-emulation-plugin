@@ -795,7 +795,7 @@ Interior Protection → 把局部效果从高亮内部移到源体外缘
 
 宽面板分成三个区域：左侧领域导航、中间参数页、右侧检查预览。点击左侧按钮只切换参数页，不会改变物理处理顺序；实际执行顺序始终是 Halation、Resolution、Grain。Resolution 和 Grain 标题右侧各有一个 On/Off 开关，默认关闭；关闭时跳过该模块且不改变图像，重新打开会继续使用已保存参数。窄停靠状态会自动改为上下布局。
 
-为保持 V1.6–V1.9 的宿主兼容性，Photoshop 面板标签暂时仍显示 `Film Halation`；安装包与文档名称已经是 Film Emulation。这不影响 Resolution 和 Grain 功能。
+V1.6 正式包在 Photoshop 中显示为 `Film Emulation`，主面板 entrypoint 为 `filmEmulationPanel`。旧 ID 的迁移桥仍显示 `Film Halation Migration` 并保留 `filmHalationPanel`，因此迁移桥和正式插件会作为两个不同面板出现。从早期 V1.6 构建升级后，如主面板未自动出现，请从插件菜单重新打开并停靠；这不会清除文档参数。
 
 左侧编号表示内部物理阶段：
 

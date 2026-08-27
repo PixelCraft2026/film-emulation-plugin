@@ -114,7 +114,7 @@ function resolveReadableLayer(doc, explicitLayerID, layerName) {
       const byName = resolveLayerBinding(doc, { id: explicitLayerID, name: layerName, token: '' });
       if (byName) {
         console.warn(
-          `[film-halation] layerID=${explicitLayerID} not found by id; matched by name "${layerName}" (id=${byName.id})`,
+          `[film-emulation] layerID=${explicitLayerID} not found by id; matched by name "${layerName}" (id=${byName.id})`,
         );
         return byName;
       }
@@ -124,7 +124,7 @@ function resolveReadableLayer(doc, explicitLayerID, layerName) {
     // 原生 getPixels/putPixels 裁决（单图层验证过 PS 能接受该 id）；返回 null，调用方
     // 回退到 opts.layerID 原值并打印图层清单供诊断。
     console.warn(
-      `[film-halation] layerID=${explicitLayerID} not found by id/name lookup (UXP id mismatch?); layers=${describeLayerList(doc)}`,
+      `[film-emulation] layerID=${explicitLayerID} not found by id/name lookup (UXP id mismatch?); layers=${describeLayerList(doc)}`,
     );
     return null;
   }
@@ -189,7 +189,7 @@ export async function readDocumentPixels(doc, opts = {}) {
   const blocks = targetSize ? [{ top: 0, h: region.bottom - region.top }] : splitBlocks(width, height, MAX_BLOCK_PX);
   let returnedColorProfile = '';
   console.log(
-    `[film-halation] read: doc=${doc.width}x${doc.height} region=${region.left},${region.top},${region.right},${region.bottom} blocks=${blocks.length} -> ${width}x${height}${raw ? ` (raw ${componentSize}-bit)` : ''}${targetSize ? ` (targetSize ${width}x${height})` : ''}`,
+    `[film-emulation] read: doc=${doc.width}x${doc.height} region=${region.left},${region.top},${region.right},${region.bottom} blocks=${blocks.length} -> ${width}x${height}${raw ? ` (raw ${componentSize}-bit)` : ''}${targetSize ? ` (targetSize ${width}x${height})` : ''}`,
   );
   for (const b of blocks) {
     const { imageData, level } = await getPixelsWithRetry(
@@ -371,7 +371,7 @@ async function resolveWriteProfile(baseKey) {
     if (!profileCache) profileCache = await ps.app.getColorProfiles('RGB');
     return matchProfileName(profileCache, baseKey);
   } catch (e) {
-    console.error('[film-halation] getColorProfiles failed:', e && (e.message || e));
+    console.error('[film-emulation] getColorProfiles failed:', e && (e.message || e));
     return null;
   }
 }

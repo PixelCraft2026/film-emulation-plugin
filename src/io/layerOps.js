@@ -14,8 +14,15 @@
  * 零 UXP 依赖，Node 可直接单测；photoshop 仅在 ensureEffectLayer 内懒加载。
  */
 
-/** 效果图层固定名前缀（可识别、可查找；参数持久化不依赖它，见 storage 层）。 */
-export const EFFECT_LAYER_NAME = 'Film Halation';
+/** 新输出使用统一产品名；旧前缀只用于安全识别既有 V1.5/V1.6 图层。 */
+export const EFFECT_LAYER_NAME = 'Film Emulation';
+export const LEGACY_EFFECT_LAYER_NAMES = Object.freeze(['Film Halation']);
+
+/** 识别新旧效果层前缀，避免升级后把旧效果副本误当成新的源图层。 */
+export function isEffectLayerName(name) {
+  const value = String(name || '');
+  return [EFFECT_LAYER_NAME, ...LEGACY_EFFECT_LAYER_NAMES].some((prefix) => value.startsWith(prefix));
+}
 
 /** 构造稳定、可人工识别的效果层名。 */
 export function effectLayerName(token) {
@@ -77,17 +84,17 @@ export function resolveTargetLayer(doc) {
   try {
     sel = doc.activeLayers;
   } catch (e) {
-    console.warn('[film-halation] doc.activeLayers access failed: ' + e);
+    console.warn('[film-emulation] doc.activeLayers access failed: ' + e);
   }
   try {
     all = doc.layers;
   } catch (e) {
-    console.warn('[film-halation] doc.layers access failed: ' + e);
+    console.warn('[film-emulation] doc.layers access failed: ' + e);
   }
   if (sel && typeof sel.length === 'number' && sel.length > 0) {
     const l = sel[0];
     if (l && typeof l.id === 'number') return l;
-    console.warn(`[film-halation] activeLayers[0] invalid (length=${sel.length}), falling back to top layer`);
+    console.warn(`[film-emulation] activeLayers[0] invalid (length=${sel.length}), falling back to top layer`);
   }
   if (all && typeof all.length === 'number' && all.length > 0) {
     const top = all[all.length - 1];
@@ -307,7 +314,7 @@ export async function ensureEffectLayer(doc, sourceLayer, binding = null, photos
   const constants = photoshop.constants;
   const bound = resolveLayerBinding(doc, binding);
   if (bound) {
-    if (!isPixelLayer(bound)) throw new Error('Bound Film Halation target is no longer a pixel layer. Relink it before applying.');
+    if (!isPixelLayer(bound)) throw new Error('Bound Film Emulation target is no longer a pixel layer. Relink it before applying.');
     return bound;
   }
 
@@ -327,7 +334,7 @@ export async function ensureEffectLayer(doc, sourceLayer, binding = null, photos
   }
   try { layer.name = name; } catch (e) { /* createLayer normally applies the name */ }
   try { layer.move(sourceLayer, constants.ElementPlacement.PLACEBEFORE); } catch (e) {
-    console.warn('[film-halation] safe-copy move failed: ' + e);
+    console.warn('[film-emulation] safe-copy move failed: ' + e);
   }
   return layer;
 }

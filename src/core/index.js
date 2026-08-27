@@ -1,5 +1,5 @@
 /**
- * Film Halation core — 唯一公共出口（zero-dependency 纯算法库）。
+ * Film Emulation core — 唯一公共出口（zero-dependency 纯算法库）。
  *
  * 约束（TDD §3）：
  *  - 零 UXP / Photoshop / DOM 依赖，纯函数，Node 可直接运行与测试；
@@ -66,16 +66,35 @@ export { channelSigmas, applyRedShift } from './redshift.js';
 export { computeHalo, alphaFor, blend, screenGain } from './composite.js';
 export { makeBlurFn, processHalation, extractStep, diffuseStep, haloStep, blendStep, lowResScale, lobeScale, psfLobesFor, LOWRES_MIN_SIGMA, LOWRES_MAX_SCALE, PSF_LOBES, LOCAL_GATE_RELIEF_GAIN } from './pipeline.js';
 export { ENGINE_VERSION, FILM_GRAPH_VERSION, EFFECT_ORDER, processFilm, processFilmStages } from './film.js';
+export { createFilmRenderPlan, stableStringify as stablePlanStringify } from './renderPlan.js';
+export { BufferArena, allocateF32, acquireF32, releaseF32 } from './bufferArena.js';
+export { createFilmExecutor } from './executor.js';
+export {
+  BACKEND_IDS,
+  GPU_BACKEND_ABI,
+  GPU_UNAVAILABLE_CODE,
+  createBackendTransferStats,
+  createBackendMemoryStats,
+  normalizeBackendCapabilities,
+  createUnavailableGpuBackend,
+} from './backendContract.js';
 export {
   installWasmModule,
   tryWasmBoxBlur,
   tryWasmGaussianBlur,
+  tryWasmVvGaussianBlur,
   tryWasmMaxFilter,
   tryWasmHashField,
   tryWasmHashBlurField,
+  tryWasmBeginGrainAccum,
+  tryWasmHashBlurFieldIntoGrain,
+  tryWasmFinishGrainAccum,
   tryWasmApplyGrain,
   tryWasmHalation,
+  createV16ResidentBackend,
   getWasmBackendStatus,
+  setWasmExecutionMode,
+  getWasmExecutionMode,
   resetWasmBackend,
 } from './wasmBackend.js';
 export { blueNoise, BLUE_NOISE_SIZE } from './dither.js';

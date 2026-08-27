@@ -159,15 +159,15 @@ export async function runProbe() {
     worker: await probeWorker(),
   };
   const json = JSON.stringify(report, null, 2);
-  console.log('[film-halation] capability report:\n' + json);
+  console.log('[film-emulation] capability report:\n' + json);
   try {
     const { localFileSystem } = require('uxp').storage;
     const folder = await localFileSystem.getDataFolder();
     const file = await folder.createFile('capability-report.json', { overwrite: true });
     await file.write(json);
-    console.log('[film-halation] capability report written to plugin data folder');
+    console.log('[film-emulation] capability report written to plugin data folder');
   } catch (e) {
-    console.log('[film-halation] could not persist report: ' + e);
+    console.log('[film-emulation] could not persist report: ' + e);
   }
   return report;
 }

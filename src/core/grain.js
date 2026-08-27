@@ -8,6 +8,9 @@ import {
   tryWasmApplyGrain,
   tryWasmHashBlurField,
   tryWasmHashField,
+  tryWasmBeginGrainAccum,
+  tryWasmHashBlurFieldIntoGrain,
+  tryWasmFinishGrainAccum,
 } from './wasmBackend.js';
 
 export const GRAIN_DEFAULTS = Object.freeze({
@@ -215,7 +218,10 @@ function lumaAt(rgb, pixel) {
 /** @param {any} input @param {any} rawParams @param {Record<string, any>} [context={}] */
 export function processGrain(input, rawParams, context = {}) {
   const params = validateGrainParams(rawParams);
-  if (params.amount === 0) return { ...input, stats: { identity: true, backend: 'js' } };
+  if (params.amount === 0) return {
+    ...input,
+    stats: { identity: true, backend: 'js', fullPixelPasses: 0, inputBytes: 0, outputBytes: 0 },
+  };
   const format = normalizeFilmFormat(context.format);
   const fullWidth = context.fullWidth ?? input.width;
   const previewScale = context.previewScale ?? 1;
@@ -235,9 +241,13 @@ export function processGrain(input, rawParams, context = {}) {
   const sharedWeight = Math.sqrt(1 - 0.18 * params.chroma);
   const independentWeight = Math.sqrt(0.18 * params.chroma);
   const signal = context.signal;
+  // Quality keeps full-resolution fields for ordinary previews and documents,
+  // but large Apply images use a 1/2-resolution statistical field.  Grain is
+  // coordinate-addressed and the field is bilinearly reconstructed, so this
+  // reduces work without changing source RGB, alpha or deterministic seed.
   const fieldScale = context.quality === 'fast'
     ? (previewScale < 0.25 ? 4 : previewScale < 1 ? 2 : 1)
-    : 1;
+    : (previewScale === 1 && fullWidth >= 4096 ? 2 : 1);
   const fieldPreviewScale = previewScale / fieldScale;
   const lowSigmas = weights.map((item) => item.sigma / fieldScale);
   const maxPad = Math.max(...lowSigmas.map((sigma) => fieldRadius(sigma, params.mode)));
@@ -283,9 +293,15 @@ export function processGrain(input, rawParams, context = {}) {
     ? previewCache.grainAccums
     : [new Float32Array(n), new Float32Array(n), new Float32Array(n)];
   let usedWasm = false;
+  let sharedFieldsGenerated = 0;
+  let independentFieldsGenerated = 0;
 
   if (!cacheHit) {
-    const filtered = new Float32Array(fieldPixels);
+    let fusedAccum = Number.isInteger(fieldScale)
+      && Number.isInteger(fieldOriginX)
+      && Number.isInteger(fieldOriginY)
+      && tryWasmBeginGrainAccum(input.width, input.height);
+    let filtered = fusedAccum ? null : new Float32Array(fieldPixels);
     /** @type {Float32Array|null} */
     let raw = null;
     /** @type {Float32Array|null} */
@@ -294,6 +310,7 @@ export function processGrain(input, rawParams, context = {}) {
     let tempB = null;
     const fieldParams = { ...params, signal };
     const ensureJsScratch = () => {
+      if (!filtered) filtered = new Float32Array(fieldPixels);
       if (!raw) {
         raw = new Float32Array(fieldPixels);
         tempA = new Float32Array(fieldPixels);
@@ -301,7 +318,39 @@ export function processGrain(input, rawParams, context = {}) {
       }
     };
     /** @param {number} scaleIndex @param {number} channelIndex @param {number} sigma */
-    const generateCorrelated = (scaleIndex, channelIndex, sigma) => {
+    /** @param {number} scaleIndex @param {number} channelIndex @param {number} sigma @param {number} coefficient */
+    const generateCorrelated = (scaleIndex, channelIndex, sigma, coefficient) => {
+      if (fusedAccum) {
+        const fused = tryWasmHashBlurFieldIntoGrain(
+          input.width,
+          input.height,
+          fieldWidth,
+          fieldHeight,
+          maxPad,
+          fieldScale,
+          channelIndex === 0 ? 3 : channelIndex - 1,
+          coefficient,
+          params.seed,
+          nodeHash,
+          fieldOriginX,
+          fieldOriginY,
+          scaleIndex,
+          channelIndex,
+          sigma,
+          params.mode,
+          fieldPreviewScale,
+        );
+        if (fused) {
+          usedWasm = true;
+          return true;
+        }
+        // A failed field operation may leave earlier fields in the resident
+        // accumulator. Download them before switching this complete band to
+        // the JS path; never mix an incomplete native field into the result.
+        tryWasmFinishGrainAccum(accum);
+        fusedAccum = false;
+      }
+      if (!filtered) ensureJsScratch();
       const fusedWasm = fieldPreviewScale === 1
         && Number.isInteger(fieldOriginX)
         && Number.isInteger(fieldOriginY)
@@ -320,15 +369,17 @@ export function processGrain(input, rawParams, context = {}) {
         );
       if (fusedWasm) {
         usedWasm = true;
-        return;
+        return false;
       }
       ensureJsScratch();
       const rawPlane = raw;
       const scratchA = tempA;
       const scratchB = tempB;
       if (!rawPlane || !scratchA || !scratchB) throw new Error('Grain scratch allocation failed');
+      if (!filtered) throw new Error('Grain filtered field allocation failed');
       usedWasm = makeField(fieldWidth, fieldHeight, fieldOriginX, fieldOriginY, fieldPreviewScale, fieldParams, nodeHash, scaleIndex, channelIndex, rawPlane) || usedWasm;
       usedWasm = blurField(rawPlane, filtered, scratchA, scratchB, fieldWidth, fieldHeight, sigma, params.mode) || usedWasm;
+      return false;
     };
 
     for (let scale = 0; scale < weights.length; scale++) {
@@ -336,18 +387,31 @@ export function processGrain(input, rawParams, context = {}) {
       // Generate a true halo around each band. The correlation kernel sees
       // coordinate-hash samples beyond the document edge instead of a clamp.
       const fieldSigma = config.sigma;
-      generateCorrelated(scale, 0, fieldSigma);
+      sharedFieldsGenerated++;
+      const sharedGenerated = generateCorrelated(scale, 0, fieldSigma, config.sharedCoefficient);
       const sharedCoefficient = config.sharedCoefficient;
-      if (fieldScale === 1) addSharedFieldCrop(accum, filtered, sharedCoefficient, input.width, input.height, fieldWidth, maxPad, signal);
-      else addSharedFieldResampled(accum, filtered, sharedCoefficient, input.width, input.height, fieldWidth, fieldHeight, maxPad, fieldScale, signal);
+      if (!sharedGenerated) {
+        if (!filtered) throw new Error('Grain filtered field allocation failed');
+        if (fieldScale === 1) addSharedFieldCrop(accum, filtered, sharedCoefficient, input.width, input.height, fieldWidth, maxPad, signal);
+        else addSharedFieldResampled(accum, filtered, sharedCoefficient, input.width, input.height, fieldWidth, fieldHeight, maxPad, fieldScale, signal);
+      }
 
       const independentCoefficient = config.independentCoefficient;
-      for (let channel = 0; channel < 3; channel++) {
-        generateCorrelated(scale, channel + 1, fieldSigma);
-        if (fieldScale === 1) addFieldCrop(accum[channel], filtered, independentCoefficient, input.width, input.height, fieldWidth, maxPad, signal);
-        else addFieldResampled(accum[channel], filtered, independentCoefficient, input.width, input.height, fieldWidth, fieldHeight, maxPad, fieldScale, signal);
+      // Chroma=0 is a true shared-field mode. Avoid generating and filtering
+      // three independent fields whose coefficient is exactly zero.
+      if (independentCoefficient > 0) {
+        for (let channel = 0; channel < 3; channel++) {
+          independentFieldsGenerated++;
+          const independentGenerated = generateCorrelated(scale, channel + 1, fieldSigma, independentCoefficient);
+          if (!independentGenerated) {
+            if (!filtered) throw new Error('Grain filtered field allocation failed');
+            if (fieldScale === 1) addFieldCrop(accum[channel], filtered, independentCoefficient, input.width, input.height, fieldWidth, maxPad, signal);
+            else addFieldResampled(accum[channel], filtered, independentCoefficient, input.width, input.height, fieldWidth, fieldHeight, maxPad, fieldScale, signal);
+          }
+        }
       }
     }
+    if (fusedAccum) tryWasmFinishGrainAccum(accum);
     if (previewCache) {
       // Do not publish partial state when an AbortSignal interrupted generation.
       previewCache.grainKey = grainKey;
@@ -356,10 +420,18 @@ export function processGrain(input, rawParams, context = {}) {
   }
 
   const output = new Float32Array(input.rgb.length);
-  // Interleaving three planar fields is worthwhile for preview-sized frames,
-  // but the seven-plane WASM capacity is slower and larger for 24MP Apply.
-  const wasmComposite = n <= 2 * 1024 * 1024
-    && tryWasmApplyGrain(input.rgb, accum, input.alpha, output, params.amount, format.iso, params.profile);
+  // The V1.6 WASM grain ABI keeps RGB, three unit fields and alpha in one
+  // resident capacity.  It is faster for both preview and large Apply bands;
+  // the JS loop remains the deterministic fallback when allocation fails.
+  const wasmComposite = tryWasmApplyGrain(
+    input.rgb,
+    accum,
+    input.alpha,
+    output,
+    params.amount,
+    format.iso,
+    params.profile,
+  );
   usedWasm = wasmComposite || usedWasm;
   if (!wasmComposite) {
     for (let i = 0; i < n; i++) {
@@ -390,7 +462,13 @@ export function processGrain(input, rawParams, context = {}) {
       backend: usedWasm ? 'wasm' : 'js',
       baseDiameterPx: basePx,
       cacheHit,
+      fieldsGenerated: sharedFieldsGenerated + independentFieldsGenerated,
+      sharedFieldsGenerated,
+      independentFieldsGenerated,
       scratchBytes: cacheHit ? 0 : (3 * n + fieldPixels) * 4,
+      fullPixelPasses: cacheHit ? 2 : 8,
+      inputBytes: input.rgb.byteLength,
+      outputBytes: output.byteLength,
     },
   };
 }
