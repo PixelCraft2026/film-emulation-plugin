@@ -14,6 +14,27 @@ import {
   validateGrainParams,
   grainSupport,
 } from './grain.js';
+import {
+  createDefringeParams,
+  DEFRINGE_DEFAULTS,
+  processDefringe,
+  validateDefringeParams,
+  defringeSupport,
+} from './defringe.js';
+import {
+  createBloomParams,
+  BLOOM_DEFAULTS,
+  processBloom,
+  validateBloomParams,
+  bloomSupport,
+} from './bloom.js';
+import {
+  createHighlightProtectionParams,
+  HIGHLIGHT_PROTECTION_DEFAULTS,
+  processHighlightProtection,
+  validateHighlightProtectionParams,
+} from './highlightProtection.js';
+import { createLumaMask, LUMA_MASK_DEFAULTS } from './mask.js';
 
 export const EFFECT_ORDER = Object.freeze([
   'defringe',
@@ -54,7 +75,7 @@ function unsupported(type, introducedIn) {
     },
     /** @param {any} params @param {any} context */
     supportRadius(params, context) { return 0; },
-    /** @param {any} params @param {any} context */
+    /** @param {any} params @param {any} [context] */
     describeWorkset(params, context = {}) {
       return Object.freeze({
         sourceRadius: 0,
@@ -86,9 +107,78 @@ function unsupported(type, introducedIn) {
   });
 }
 
+const V17_WASM_CAPABILITY = Object.freeze({
+  'js-reference': { supported: true, resident: false, precision: 'f32' },
+  'wasm-resident': { supported: true, resident: true, abi: 'v17-command-v1', precision: 'f32' },
+  'wasm-resident-simd': {
+    supported: true,
+    resident: true,
+    abi: 'v17-command-v1',
+    precision: 'f32',
+    qualified: false,
+    reason: 'Requires simd128 validation and >=10% QA speedup',
+  },
+  'gpu-native': {
+    supported: false,
+    planned: true,
+    resident: true,
+    abi: 'gpu-native-reserved-v1',
+    precision: 'f32',
+    reason: 'Reserved for GPU feasibility work after V1.7',
+  },
+});
+
+/**
+ * @param {{sourceRadius?:number, generatedFieldRadius?:number, phasePeriod?:number,
+ * buffers?:any[], identity?:boolean, transientsRead?:string[], transientsWrite?:string[],
+ * residentArenaPlanes?:number, residentTransientPlanes?:number}} options
+ */
+function v17Workset({ sourceRadius = 0, generatedFieldRadius = 0, phasePeriod = 1, buffers = [], identity = false, transientsRead = [], transientsWrite = [], residentArenaPlanes = 0, residentTransientPlanes = 0 }) {
+  return Object.freeze({
+    sourceRadius,
+    generatedFieldRadius,
+    phasePeriod,
+    buffers,
+    transientsRead,
+    transientsWrite,
+    residentArenaPlanes,
+    residentTransientPlanes,
+    wasm: { supported: true, mode: 'v17-command-v1' },
+    backends: V17_WASM_CAPABILITY,
+    identity,
+  });
+}
+
 /** @type {Record<string, any>} */
 export const FILM_EFFECT_REGISTRY = Object.freeze({
-  defringe: unsupported('defringe', '1.7.0'),
+  defringe: Object.freeze({
+    type: 'defringe',
+    introducedIn: '1.7.0',
+    physicalStage: STAGES.defringe,
+    implemented: true,
+    compositeMode: 'replacement',
+    defaults: DEFRINGE_DEFAULTS,
+    validate: validateDefringeParams,
+    supportRadius: defringeSupport,
+    /** @param {any} params @param {any} [context] */
+    describeWorkset(params, context = {}) {
+      const validated = validateDefringeParams(params);
+      return v17Workset({
+        sourceRadius: defringeSupport(validated, context),
+        buffers: [
+          { name: 'defringe-y', channels: 1, factor: 1, kind: 'plane', lifetime: 'node' },
+          { name: 'defringe-cg', channels: 1, factor: 1, kind: 'plane', lifetime: 'node' },
+          { name: 'defringe-blur', channels: 1, factor: 1, kind: 'scratch', lifetime: 'node' },
+        ],
+        residentArenaPlanes: 7,
+        identity: validated.amount === 0 || validated.edgeSensitivity === 0,
+      });
+    },
+    /** @param {{width:number,height:number}} frame */
+    estimateMemory(frame) { return frame.width * frame.height * 5 * 4; },
+    /** @param {any} input @param {any} params @param {any} context */
+    process: processDefringe,
+  }),
   vignette: unsupported('vignette', '1.8.0'),
   halation: Object.freeze({
     type: 'halation',
@@ -111,7 +201,7 @@ export const FILM_EFFECT_REGISTRY = Object.freeze({
       const expansion = resolved.sourceExpansion > 0 ? sigma * (0.45 + 0.85 * resolved.sourceExpansion) : 0;
       return Math.ceil(Math.max(local, global, expansion));
     },
-    /** @param {any} params @param {any} context */
+    /** @param {any} params @param {any} [context] */
     describeWorkset(params, context = {}) {
       const validated = createHalationParams(params);
       const resolved = resolveSigmaParams(validated, context.fullWidth ?? 1, context.fullHeight ?? 1);
@@ -126,10 +216,13 @@ export const FILM_EFFECT_REGISTRY = Object.freeze({
           { name: 'halo', channels: 3, factor: 1 },
           { name: 'diffuse-scratch', channels: 2, factor: 1 },
         ],
-        wasm: { supported: true, mode: 'v16-resident' },
+        residentArenaPlanes: 19,
+        residentTransientPlanes: 1,
+        wasm: { supported: true, mode: 'v17-command-v1' },
         backends: {
           'js-reference': { supported: true, resident: false, precision: 'f32' },
-          'wasm-resident': { supported: true, resident: true, abi: 'v16-resident', precision: 'f32' },
+          'wasm-resident': { supported: true, resident: true, abi: 'v17-command-v1', precision: 'f32' },
+          'wasm-resident-simd': { supported: true, resident: true, abi: 'v17-command-v1', precision: 'f32', qualified: false, reason: 'Requires simd128 validation and >=10% QA speedup' },
           'gpu-native': {
             supported: false,
             planned: true,
@@ -163,8 +256,61 @@ export const FILM_EFFECT_REGISTRY = Object.freeze({
       return processHalation(input, resolved, { ...context, compact: context.compact ?? true });
     },
   }),
-  bloom: unsupported('bloom', '1.7.0'),
-  highlightProtection: unsupported('highlightProtection', '1.7.0'),
+  bloom: Object.freeze({
+    type: 'bloom',
+    introducedIn: '1.7.0',
+    physicalStage: STAGES.bloom,
+    implemented: true,
+    compositeMode: 'additive',
+    defaults: BLOOM_DEFAULTS,
+    validate: validateBloomParams,
+    supportRadius: bloomSupport,
+    /** @param {any} params @param {any} [context] */
+    describeWorkset(params, context = {}) {
+      const validated = validateBloomParams(params);
+      return v17Workset({
+        sourceRadius: bloomSupport(validated, context),
+        phasePeriod: 8,
+        buffers: [
+          { name: 'bloom-source', channels: 3, factor: 1, kind: 'plane', lifetime: 'node' },
+          { name: 'bloom-base', channels: 3, factor: 1, kind: 'transient', lifetime: 'until-consumed', alias: 'bloomBase' },
+          { name: 'bloom-contribution', channels: 3, factor: 1, kind: 'transient', lifetime: 'until-consumed', alias: 'bloomContribution' },
+          { name: 'bloom-scratch', channels: 2, factor: 1, kind: 'scratch', lifetime: 'node' },
+        ],
+        transientsWrite: ['bloomBase', 'bloomContribution'],
+        residentArenaPlanes: 10,
+        residentTransientPlanes: 3,
+        identity: validated.amplify === 0,
+      });
+    },
+    /** @param {{width:number,height:number}} frame */
+    estimateMemory(frame) { return frame.width * frame.height * 8 * 4; },
+    /** @param {any} input @param {any} params @param {any} context */
+    process: processBloom,
+  }),
+  highlightProtection: Object.freeze({
+    type: 'highlightProtection',
+    introducedIn: '1.7.0',
+    physicalStage: STAGES.highlightProtection,
+    implemented: true,
+    compositeMode: 'replacement',
+    defaults: HIGHLIGHT_PROTECTION_DEFAULTS,
+    validate: validateHighlightProtectionParams,
+    supportRadius() { return 0; },
+    /** @param {any} params */
+    describeWorkset(params) {
+      const validated = validateHighlightProtectionParams(params);
+      return v17Workset({
+        buffers: [],
+        transientsRead: ['bloomBase', 'bloomContribution'],
+        residentTransientPlanes: 3,
+        identity: validated.amount === 0,
+      });
+    },
+    estimateMemory() { return 0; },
+    /** @param {any} input @param {any} params @param {any} context */
+    process: processHighlightProtection,
+  }),
   filmResolution: Object.freeze({
     type: 'filmResolution',
     introducedIn: '1.6.0',
@@ -189,10 +335,20 @@ export const FILM_EFFECT_REGISTRY = Object.freeze({
           { name: 'resolution-scratch', channels: 2, factor: 1 },
           { name: 'resolution-weights', channels: 1, factor: 1 },
         ],
-        wasm: { supported: true, mode: 'v16-resident' },
+        residentArenaPlanes: 6,
+        residentTransientPlanes: 1,
+        wasm: { supported: true, mode: 'v17-command-v1' },
         backends: {
           'js-reference': { supported: true, resident: false, precision: 'f32' },
-          'wasm-resident': { supported: true, resident: true, abi: 'v16-resident', precision: 'f32' },
+          'wasm-resident': { supported: true, resident: true, abi: 'v17-command-v1', precision: 'f32' },
+          'wasm-resident-simd': {
+            supported: true,
+            resident: true,
+            abi: 'v17-command-v1',
+            precision: 'f32',
+            qualified: false,
+            reason: 'Requires simd128 validation and >=10% QA speedup',
+          },
           'gpu-native': {
             supported: false,
             planned: true,
@@ -231,10 +387,23 @@ export const FILM_EFFECT_REGISTRY = Object.freeze({
           { name: 'grain-field', channels: 1, factor: 1 },
           { name: 'grain-scratch', channels: 3, factor: 1 },
         ],
-        wasm: { supported: true, mode: 'v16-resident' },
+        // Grain's downsampled generated field includes coordinate-addressed
+        // padding. Nineteen planes covers the validated parameter envelope
+        // while remaining below wasm32's single-allocation limit per band.
+        residentArenaPlanes: 19,
+        residentTransientPlanes: 1,
+        wasm: { supported: true, mode: 'v17-command-v1' },
         backends: {
           'js-reference': { supported: true, resident: false, precision: 'f32' },
-          'wasm-resident': { supported: true, resident: true, abi: 'v16-resident', precision: 'f32' },
+          'wasm-resident': { supported: true, resident: true, abi: 'v17-command-v1', precision: 'f32' },
+          'wasm-resident-simd': {
+            supported: true,
+            resident: true,
+            abi: 'v17-command-v1',
+            precision: 'f32',
+            qualified: false,
+            reason: 'Requires simd128 validation and >=10% QA speedup',
+          },
           'gpu-native': {
             supported: false,
             planned: true,
@@ -276,7 +445,8 @@ export function validateEffectNode(node) {
   if (!definition) throw new Error(`Unknown effect node type: ${String(node.type)}`);
   if (!definition.implemented) definition.validate(node.params);
   const params = definition.validate(node.params ?? definition.defaults);
-  return { id: node.id, type: node.type, enabled: node.enabled !== false, params };
+  const mask = createLumaMask(node.mask ?? LUMA_MASK_DEFAULTS);
+  return { id: node.id, type: node.type, enabled: node.enabled !== false, params, mask };
 }
 
 /** @param {any[]} graph @param {{requireHalation?:boolean}} [options] */
@@ -300,15 +470,21 @@ export function normalizeEffectGraph(graph, options = {}) {
 /** @param {any} halationParams @param {number} [seed=GRAIN_DEFAULTS.seed] */
 export function createDefaultEffectGraph(halationParams, seed = GRAIN_DEFAULTS.seed) {
   return normalizeEffectGraph([
-    { id: 'halation-main', type: 'halation', enabled: true, params: createHalationParams(halationParams) },
+    { id: 'defringe-main', type: 'defringe', enabled: false, params: createDefringeParams(), mask: createLumaMask() },
+    { id: 'halation-main', type: 'halation', enabled: true, params: createHalationParams(halationParams), mask: createLumaMask() },
+    { id: 'bloom-main', type: 'bloom', enabled: false, params: createBloomParams(), mask: createLumaMask() },
+    { id: 'highlight-protection-main', type: 'highlightProtection', enabled: false, params: createHighlightProtectionParams(), mask: createLumaMask() },
     // V1.6 physical effects are opt-in. Keep their calibrated parameters in
     // the document so enabling a switch never has to reconstruct user state.
-    { id: 'film-resolution-main', type: 'filmResolution', enabled: false, params: createFilmResolutionParams() },
-    { id: 'grain-main', type: 'grain', enabled: false, params: createGrainParams({ seed, seedMode: 'randomOnCreate' }) },
+    { id: 'film-resolution-main', type: 'filmResolution', enabled: false, params: createFilmResolutionParams(), mask: createLumaMask() },
+    { id: 'grain-main', type: 'grain', enabled: false, params: createGrainParams({ seed, seedMode: 'randomOnCreate' }), mask: createLumaMask() },
   ]);
 }
 
 /** @param {any[]} graph */
 export function graphMinimumEngineVersion(graph) {
-  return graph.some((node) => node.type === 'filmResolution' || node.type === 'grain') ? '1.6.0' : '1.5.1';
+  return graph.some((node) => ['defringe', 'bloom', 'highlightProtection'].includes(node.type)
+    || (node.mask && node.mask.mode !== 'none'))
+    ? '1.7.0'
+    : graph.some((node) => node.type === 'filmResolution' || node.type === 'grain') ? '1.6.0' : '1.5.1';
 }

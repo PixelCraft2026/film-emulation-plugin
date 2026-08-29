@@ -4,9 +4,13 @@ import { normalizeEffectGraph, getEffectDefinition, graphMinimumEngineVersion, E
 import { createFilmRenderPlan } from './renderPlan.js';
 import { getWasmBackendStatus } from './wasmBackend.js';
 import { createBackendTransferStats } from './backendContract.js';
+import { computeLumaMask, applyEffectMask, applyContributionMask } from './mask.js';
 
 export const ENGINE_VERSION = '1.5.1';
-export const FILM_GRAPH_VERSION = '1.6.0';
+// Graph semantics version.  The package remains V1.6 until the Photoshop
+// gates are complete, but a graph containing any V1.7 node or mask must carry
+// the V1.7 engine requirement in its serialized/runtime stats.
+export const FILM_GRAPH_VERSION = '1.7.0';
 
 /**
  * @param {{width:number,height:number,rgb:Float32Array,alpha?:Float32Array}} input
@@ -39,7 +43,7 @@ export function processFilm(input, document, context = {}) {
   return {
     ...result,
     stats: {
-      engineVersion: graphMinimumEngineVersion(graph) === ENGINE_VERSION ? ENGINE_VERSION : FILM_GRAPH_VERSION,
+      engineVersion: graphMinimumEngineVersion(graph),
       halationEngineVersion: ENGINE_VERSION,
       minimumEngineVersion: graphMinimumEngineVersion(graph),
       seed: context.seed ?? 0,
@@ -85,6 +89,7 @@ function runEffectNodes(input, graph, context) {
     // RGB/alpha clone at every graph or preview-stage invocation.
     rgb: input.rgb,
     alpha: input.alpha,
+    transient: input.transient ?? {},
   };
   const nodes = [];
   const perNodeTimings = {};
@@ -109,6 +114,7 @@ function runEffectNodes(input, graph, context) {
       fullHeight: context.fullHeight ?? input.height,
       nodeId: node.id,
       cache,
+      transient: current.transient,
     });
     const elapsedMs = (globalThis.performance?.now?.() ?? Date.now()) - started;
     perNodeTimings[node.id] = elapsedMs;
@@ -118,7 +124,27 @@ function runEffectNodes(input, graph, context) {
     fullPixelPasses += result.stats?.fullPixelPasses ?? 1;
     inputBytes += result.stats?.inputBytes ?? 0;
     outputBytes += result.stats?.outputBytes ?? 0;
-    current = { width: result.width, height: result.height, rgb: result.rgb, alpha: result.alpha };
+    const nodeMask = node.mask?.mode === 'luma' ? computeLumaMask(
+      current.rgb,
+      current.width,
+      current.height,
+      node.mask,
+    ) : null;
+    let outputRgb = result.rgb;
+    let transient = result.transient ?? current.transient ?? {};
+    if (nodeMask) {
+      if (node.type === 'bloom' && transient.bloomContribution instanceof Float32Array) {
+        const maskedContribution = applyContributionMask(transient.bloomContribution, nodeMask);
+        transient = { ...transient, bloomContribution: maskedContribution };
+        outputRgb = new Float32Array(result.rgb.length);
+        for (let index = 0; index < outputRgb.length; index += 1) {
+          outputRgb[index] = current.rgb[index] + maskedContribution[index];
+        }
+      } else {
+        outputRgb = applyEffectMask(current.rgb, result.rgb, nodeMask, definition.compositeMode ?? 'replacement');
+      }
+    }
+    current = { width: result.width, height: result.height, rgb: outputRgb, alpha: result.alpha, transient };
     nodes.push({
       id: node.id,
       type: node.type,

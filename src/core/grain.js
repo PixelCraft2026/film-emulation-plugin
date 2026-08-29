@@ -1,15 +1,18 @@
 import { boxBlur3, boxRadiusForSigma } from './diffuse/box.js';
-import { gaussianBlurSep, gaussianKernel1D } from './diffuse/conv.js';
+import { gaussianKernel1D } from './diffuse/conv.js';
+import { gaussianBlurSep } from './diffuse/conv.js';
 import { normalizeFilmFormat, physicalMicronsToPixels } from './format.js';
 import { fnv1aUtf8, gaussianApprox } from './seed.js';
 import {
   tryWasmBoxBlur,
   tryWasmGaussianBlur,
   tryWasmApplyGrain,
+  tryWasmApplyResidentGrain,
   tryWasmHashBlurField,
   tryWasmHashField,
   tryWasmBeginGrainAccum,
   tryWasmHashBlurFieldIntoGrain,
+  tryWasmGrainScaleIntoAccum,
   tryWasmFinishGrainAccum,
 } from './wasmBackend.js';
 
@@ -289,10 +292,14 @@ export function processGrain(input, rawParams, context = {}) {
       independentCoefficient: Math.sqrt(item.weight) * independentWeight * normalization,
     };
   });
-  const accum = cacheHit
-    ? previewCache.grainAccums
-    : [new Float32Array(n), new Float32Array(n), new Float32Array(n)];
+  /** @type {Float32Array[]|null} */
+  let accum = cacheHit ? previewCache.grainAccums : null;
+  const ensureAccums = () => {
+    if (!accum) accum = [new Float32Array(n), new Float32Array(n), new Float32Array(n)];
+    return accum;
+  };
   let usedWasm = false;
+  let residentAccumReady = false;
   let sharedFieldsGenerated = 0;
   let independentFieldsGenerated = 0;
 
@@ -347,7 +354,7 @@ export function processGrain(input, rawParams, context = {}) {
         // A failed field operation may leave earlier fields in the resident
         // accumulator. Download them before switching this complete band to
         // the JS path; never mix an incomplete native field into the result.
-        tryWasmFinishGrainAccum(accum);
+        tryWasmFinishGrainAccum(ensureAccums());
         fusedAccum = false;
       }
       if (!filtered) ensureJsScratch();
@@ -384,6 +391,39 @@ export function processGrain(input, rawParams, context = {}) {
 
     for (let scale = 0; scale < weights.length; scale++) {
       const config = scaleConfigs[scale];
+      // The four fields at one physical scale share the same coordinate/hash
+      // prefix. Generate, correlate and accumulate them in one native call
+      // when chroma requires all four; this preserves the exact field values
+      // and Gaussian kernel while removing three duplicate prefix walks and
+      // three JS/WASM boundary calls per scale.
+      if (fusedAccum && config.independentCoefficient > 0) {
+        const fusedScale = tryWasmGrainScaleIntoAccum(
+          input.width,
+          input.height,
+          fieldWidth,
+          fieldHeight,
+          maxPad,
+          fieldScale,
+          config.sharedCoefficient,
+          config.independentCoefficient,
+          params.seed,
+          nodeHash,
+          fieldOriginX,
+          fieldOriginY,
+          scale,
+          config.sigma,
+          params.mode,
+          fieldPreviewScale,
+        );
+        if (fusedScale) {
+          usedWasm = true;
+          sharedFieldsGenerated++;
+          independentFieldsGenerated += 3;
+          continue;
+        }
+        tryWasmFinishGrainAccum(ensureAccums());
+        fusedAccum = false;
+      }
       // Generate a true halo around each band. The correlation kernel sees
       // coordinate-hash samples beyond the document edge instead of a clamp.
       const fieldSigma = config.sigma;
@@ -392,8 +432,9 @@ export function processGrain(input, rawParams, context = {}) {
       const sharedCoefficient = config.sharedCoefficient;
       if (!sharedGenerated) {
         if (!filtered) throw new Error('Grain filtered field allocation failed');
-        if (fieldScale === 1) addSharedFieldCrop(accum, filtered, sharedCoefficient, input.width, input.height, fieldWidth, maxPad, signal);
-        else addSharedFieldResampled(accum, filtered, sharedCoefficient, input.width, input.height, fieldWidth, fieldHeight, maxPad, fieldScale, signal);
+        const planes = ensureAccums();
+        if (fieldScale === 1) addSharedFieldCrop(planes, filtered, sharedCoefficient, input.width, input.height, fieldWidth, maxPad, signal);
+        else addSharedFieldResampled(planes, filtered, sharedCoefficient, input.width, input.height, fieldWidth, fieldHeight, maxPad, fieldScale, signal);
       }
 
       const independentCoefficient = config.independentCoefficient;
@@ -405,17 +446,21 @@ export function processGrain(input, rawParams, context = {}) {
           const independentGenerated = generateCorrelated(scale, channel + 1, fieldSigma, independentCoefficient);
           if (!independentGenerated) {
             if (!filtered) throw new Error('Grain filtered field allocation failed');
-            if (fieldScale === 1) addFieldCrop(accum[channel], filtered, independentCoefficient, input.width, input.height, fieldWidth, maxPad, signal);
-            else addFieldResampled(accum[channel], filtered, independentCoefficient, input.width, input.height, fieldWidth, fieldHeight, maxPad, fieldScale, signal);
+            const planes = ensureAccums();
+            if (fieldScale === 1) addFieldCrop(planes[channel], filtered, independentCoefficient, input.width, input.height, fieldWidth, maxPad, signal);
+            else addFieldResampled(planes[channel], filtered, independentCoefficient, input.width, input.height, fieldWidth, fieldHeight, maxPad, fieldScale, signal);
           }
         }
       }
     }
-    if (fusedAccum) tryWasmFinishGrainAccum(accum);
+    if (fusedAccum) {
+      if (previewCache) tryWasmFinishGrainAccum(ensureAccums());
+      else residentAccumReady = true;
+    }
     if (previewCache) {
       // Do not publish partial state when an AbortSignal interrupted generation.
       previewCache.grainKey = grainKey;
-      previewCache.grainAccums = accum;
+      previewCache.grainAccums = ensureAccums();
     }
   }
 
@@ -423,17 +468,39 @@ export function processGrain(input, rawParams, context = {}) {
   // The V1.6 WASM grain ABI keeps RGB, three unit fields and alpha in one
   // resident capacity.  It is faster for both preview and large Apply bands;
   // the JS loop remains the deterministic fallback when allocation fails.
-  const wasmComposite = tryWasmApplyGrain(
-    input.rgb,
-    accum,
-    input.alpha,
-    output,
-    params.amount,
-    format.iso,
-    params.profile,
-  );
+  let wasmComposite = residentAccumReady
+    ? tryWasmApplyResidentGrain(input.rgb, input.alpha, output, params.amount, format.iso, params.profile)
+    : tryWasmApplyGrain(
+      input.rgb,
+      ensureAccums(),
+      input.alpha,
+      output,
+      params.amount,
+      format.iso,
+      params.profile,
+    );
+  if (residentAccumReady && !wasmComposite) {
+    // A resident composite failure must not silently fall through with newly
+    // allocated zero fields. Recover the complete accumulator first, then
+    // retry the established planar-field composite/JS fallback path.
+    const planes = ensureAccums();
+    if (!tryWasmFinishGrainAccum(planes)) {
+      throw new Error('WASM Grain resident handoff failed');
+    }
+    residentAccumReady = false;
+    wasmComposite = tryWasmApplyGrain(
+      input.rgb,
+      planes,
+      input.alpha,
+      output,
+      params.amount,
+      format.iso,
+      params.profile,
+    );
+  }
   usedWasm = wasmComposite || usedWasm;
   if (!wasmComposite) {
+    const planes = ensureAccums();
     for (let i = 0; i < n; i++) {
       if ((i & 4095) === 0 && signal?.aborted) throw new Error('Film render cancelled');
       const envelope = exposureEnvelope(lumaAt(input.rgb, i), params.profile);
@@ -442,7 +509,7 @@ export function processGrain(input, rawParams, context = {}) {
       const alpha = input.alpha ? input.alpha[i] : 1;
       const p = i * 3;
       for (let channel = 0; channel < 3; channel++) {
-        const z = Math.LN2 * sigmaD * accum[channel][i];
+        const z = Math.LN2 * sigmaD * planes[channel][i];
         // The coordinate hash is bounded but variance normalization can produce
         // very rare extreme tails at maximum ISO/size. Keep the Float32 output
         // finite without clipping ordinary photographic grain excursions.
@@ -475,6 +542,10 @@ export function processGrain(input, rawParams, context = {}) {
 
 /** @param {any} rawParams @param {Record<string, any>} [context={}] */
 export function grainSupport(rawParams, context = {}) {
+  // A few callers inspect a graph by numeric index while V1.7 adds nodes
+  // ahead of Grain.  Non-Grain descriptors have no generated halo and should
+  // not be interpreted as malformed Grain parameters.
+  if (!rawParams || rawParams.amount === undefined || rawParams.size === undefined) return 0;
   const params = validateGrainParams(rawParams);
   if (params.amount === 0) return 0;
   const format = normalizeFilmFormat(context.format);

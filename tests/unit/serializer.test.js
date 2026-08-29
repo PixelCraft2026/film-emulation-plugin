@@ -106,20 +106,20 @@ test('S9 temporary source-threshold switch migrates to the continuous bias', () 
   );
 });
 
-test('S10 V1.6 graph persists format, grain seed, and minimum engine version', () => {
+test('S10 V1.7 graph persists format, masks, grain seed, and minimum engine version', () => {
   const graph = createDefaultEffectGraph(createHalationParams({ strength: 20 }), 0x12345678);
   const doc = toDocument(graph[0].params, {
     graph,
     format: { gauge: '16mm', iso: 500 },
   });
-  assert.equal(doc.engineVersion, '1.6.0');
-  assert.equal(doc.minimumEngineVersion, '1.6.0');
+  assert.equal(doc.engineVersion, '1.7.0');
+  assert.equal(doc.minimumEngineVersion, '1.7.0');
   assert.deepEqual(doc.format, { gauge: '16mm', iso: 500 });
   assert.equal(doc.graph.find((node) => node.type === 'grain').params.seed, 0x12345678);
   assert.equal(doc.graph.find((node) => node.type === 'filmResolution').enabled, false);
   assert.equal(doc.graph.find((node) => node.type === 'grain').enabled, false);
   const roundTrip = parseDocument(JSON.stringify(doc)).document;
-  assert.equal(roundTrip.graph.length, 3);
+  assert.equal(roundTrip.graph.length, 6);
   assert.equal(roundTrip.graph.find((node) => node.type === 'filmResolution').type, 'filmResolution');
   assert.equal(roundTrip.graph.find((node) => node.type === 'grain').enabled, false);
 });

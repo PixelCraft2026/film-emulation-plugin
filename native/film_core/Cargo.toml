@@ -7,6 +7,14 @@ license = "Proprietary"
 [lib]
 crate-type = ["cdylib"]
 
+[features]
+default = []
+# Builds the independent simd128 artifact.  Kernels retain the scalar
+# numerics and exact seed/hash semantics; the capability bit is only exposed
+# by this explicitly requested artifact and JS still performs a qualification
+# probe before Auto selects it.
+simd = []
+
 [profile.release]
 opt-level = 3
 lto = true

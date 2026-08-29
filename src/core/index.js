@@ -66,7 +66,26 @@ export { channelSigmas, applyRedShift } from './redshift.js';
 export { computeHalo, alphaFor, blend, screenGain } from './composite.js';
 export { makeBlurFn, processHalation, extractStep, diffuseStep, haloStep, blendStep, lowResScale, lobeScale, psfLobesFor, LOWRES_MIN_SIGMA, LOWRES_MAX_SCALE, PSF_LOBES, LOCAL_GATE_RELIEF_GAIN } from './pipeline.js';
 export { ENGINE_VERSION, FILM_GRAPH_VERSION, EFFECT_ORDER, processFilm, processFilmStages } from './film.js';
-export { createFilmRenderPlan, stableStringify as stablePlanStringify } from './renderPlan.js';
+export {
+  createFilmRenderPlan,
+  createPhysicalLayout,
+  stableStringify as stablePlanStringify,
+  TRANSIENT_SLOTS,
+  STAGE_OPCODES,
+  RESIDENT_MIGRATION_ORDER,
+  RESIDENT_LAYOUT_VERSION,
+  RESIDENT_LAYOUT_ALIGNMENT_FLOATS,
+} from './renderPlan.js';
+export {
+  COMMAND_MAGIC,
+  COMMAND_BUFFER_VERSION,
+  EXECUTOR_ABI_VERSION,
+  COMMAND_HEADER_BYTES,
+  NODE_COMMAND_BYTES,
+  COMMAND_ERRORS,
+  createGraphCommandBuffer,
+  validateGraphCommandBuffer,
+} from './commandBuffer.js';
 export { BufferArena, allocateF32, acquireF32, releaseF32 } from './bufferArena.js';
 export { createFilmExecutor } from './executor.js';
 export {
@@ -88,13 +107,17 @@ export {
   tryWasmHashBlurField,
   tryWasmBeginGrainAccum,
   tryWasmHashBlurFieldIntoGrain,
+  tryWasmGrainScaleIntoAccum,
   tryWasmFinishGrainAccum,
   tryWasmApplyGrain,
+  tryWasmApplyResidentGrain,
   tryWasmHalation,
   createV16ResidentBackend,
+  createV17ResidentBackend,
   getWasmBackendStatus,
   setWasmExecutionMode,
   getWasmExecutionMode,
+  setWasmSimdQualification,
   resetWasmBackend,
 } from './wasmBackend.js';
 export { blueNoise, BLUE_NOISE_SIZE } from './dither.js';
@@ -125,6 +148,38 @@ export {
   processGrain,
   grainSupport,
 } from './grain.js';
+export {
+  LUMA_MASK_DEFAULTS,
+  maskSmoothstep,
+  validateLumaMask,
+  createLumaMask,
+  lumaMaskValue,
+  computeLumaMask,
+  applyEffectMask,
+  applyContributionMask,
+} from './mask.js';
+export {
+  DEFRINGE_DEFAULTS,
+  createDefringeParams,
+  validateDefringeParams,
+  processDefringe,
+  defringeSupport,
+} from './defringe.js';
+export {
+  BLOOM_DEFAULTS,
+  BLOOM_LOBES,
+  createBloomParams,
+  validateBloomParams,
+  processBloom,
+  bloomRadiusPx,
+  bloomSupport,
+} from './bloom.js';
+export {
+  HIGHLIGHT_PROTECTION_DEFAULTS,
+  createHighlightProtectionParams,
+  validateHighlightProtectionParams,
+  processHighlightProtection,
+} from './highlightProtection.js';
 export {
   FILM_EFFECT_REGISTRY,
   getEffectDefinition,

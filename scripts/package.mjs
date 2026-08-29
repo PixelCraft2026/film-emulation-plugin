@@ -65,7 +65,10 @@ const bundleText = readFileSync(join(OUT_DIR, 'main.js'), 'utf8');
 if (!bundleText.includes(definition.featureLevel)) {
   throw new Error(`Bundle feature gate missing for ${definition.featureLevel}`);
 }
-const v16UiMarkers = ['Film Resolution', 'Randomize grain', 'GRN / 70'];
+// Use current user-visible controls as the feature gate. The navigation was
+// intentionally simplified from internal labels such as "GRN / 70" to
+// "Grain", so the old stage-code marker would reject a valid current bundle.
+const v16UiMarkers = ['Film Resolution', 'Randomize grain', 'Apply memory'];
 if (variant === 'bridge' && v16UiMarkers.some((marker) => bundleText.includes(marker))) {
   throw new Error('Migration bridge bundle exposes V1.6 UI text');
 }
@@ -91,7 +94,7 @@ writeFileSync(join(stage, 'manifest.json'), `${JSON.stringify(manifest, null, 2)
 const indexHtml = readFileSync(join(ROOT, 'index.html'), 'utf8')
   .replace(/<title>[^<]*<\/title>/, `<title>${definition.htmlTitle}</title>`);
 writeFileSync(join(stage, 'index.html'), indexHtml);
-for (const fileName of ['main.js', 'main.js.map', 'film_core.wasm']) {
+for (const fileName of ['main.js', 'main.js.map', 'film_core.wasm', 'film_core_simd.wasm']) {
   copyFileSync(join(OUT_DIR, fileName), join(stage, 'dist', fileName));
 }
 

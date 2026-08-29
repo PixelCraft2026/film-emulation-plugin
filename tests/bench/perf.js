@@ -8,23 +8,28 @@ import {
   createHalationPreset,
   createDefaultEffectGraph,
   createFilmRenderPlan,
+  createFilmExecutor,
+  createV17ResidentBackend,
   resolveSigmaParams,
   installWasmModule,
   getWasmBackendStatus,
   processHalation,
 } from '../../src/core/index.js';
 import { processTiledWithTrc } from '../../src/io/tileRender.js';
-import { processTiledFilmWithTrc } from '../../src/io/tileRender.js';
+import { processFilmBandWithTrcAsync } from '../../src/io/tileRender.js';
 import { streamGeometry, streamFilmGeometry } from '../../src/io/streamGeometry.js';
 import { renderPreviewIncremental } from '../../src/io/previewRender.js';
 
-const WIDTH = 6000;
-const HEIGHT = 4000;
+const WIDTH = Number(process.env.FILM_BENCH_WIDTH ?? 6000);
+const HEIGHT = Number(process.env.FILM_BENCH_HEIGHT ?? 4000);
 const WARMUPS = Number(process.env.FILM_BENCH_WARMUPS ?? 2);
 const RUNS = Number(process.env.FILM_BENCH_RUNS ?? 10);
 const DEVICE_MEMORY_GB = Number(process.env.FILM_BENCH_MEMORY_GB ?? 16);
 const SUITE = String(process.env.FILM_BENCH_SUITE ?? 'all');
-if (!['all', 'legacy', 'v16'].includes(SUITE)) throw new Error(`Unknown FILM_BENCH_SUITE: ${SUITE}`);
+const FILM_MEMORY_MODE = String(process.env.FILM_BENCH_MEMORY_MODE ?? 'balanced');
+const ENABLED_NODE = String(process.env.FILM_BENCH_NODE ?? '');
+if (!['all', 'legacy', 'v16', 'resident-shipping', 'resident-full', 'preview'].includes(SUITE)) throw new Error(`Unknown FILM_BENCH_SUITE: ${SUITE}`);
+if (!['auto', 'balanced', 'high'].includes(FILM_MEMORY_MODE)) throw new Error(`Unknown FILM_BENCH_MEMORY_MODE: ${FILM_MEMORY_MODE}`);
 const LINEAR_TRC = { decode: (value) => value, encode: (value) => value, baseKey: 'sRGB' };
 const wasmPath = fileURLToPath(new URL('../../assets/film_core.wasm', import.meta.url));
 if (existsSync(wasmPath)) await installWasmModule(readFileSync(wasmPath));
@@ -123,14 +128,14 @@ const defaultGraphDocument = {
 const shippingGraphDocument = defaultGraphDocument;
 const fullGraphDocument = {
   ...defaultGraphDocument,
-  graph: defaultGraphDocument.graph.map((node) => ({ ...node, enabled: true })),
+  graph: defaultGraphDocument.graph.map((node) => ({ ...node, enabled: !ENABLED_NODE || node.type === ENABLED_NODE })),
 };
 
-function renderFilm24MP(document = shippingGraphDocument) {
+async function renderFilm24MP(document = shippingGraphDocument) {
   const geometry = streamFilmGeometry(WIDTH, HEIGHT, document, {
     componentSize: 16,
     deviceMemoryGB: DEVICE_MEMORY_GB,
-    memoryMode: 'balanced',
+    memoryMode: FILM_MEMORY_MODE,
     quality: 'quality',
   });
   let checksum = 0;
@@ -140,22 +145,29 @@ function renderFilm24MP(document = shippingGraphDocument) {
   const copies = { inputBytes: 0, outputBytes: 0, count: 0 };
   const passes = { fullPixelPasses: 0, perNode: {} };
   let fallback = null;
-  for (const band of geometry.bands) {
-    const source = makeBand(WIDTH, band.start, band.end);
-    const result = processTiledFilmWithTrc(source, document, LINEAR_TRC, {
-      tileThreshold: Number.MAX_SAFE_INTEGER,
-      fullWidth: WIDTH,
-      fullHeight: HEIGHT,
-      originY: band.start,
-      quality: 'quality',
-      seed: 0x12345678,
-      renderPlan: geometry.plan,
-      bandHeight: geometry.bandHeight,
-      overlapPx: geometry.overlap,
-      memoryMode: geometry.memoryMode,
-      componentSize: 16,
-      profileTimings: true,
-    });
+  let selectedBackend = null;
+  const resident = createV17ResidentBackend(geometry.plan);
+  const executor = createFilmExecutor(geometry.plan, { backend: 'auto', residentBackend: resident });
+  try {
+    for (const band of geometry.bands) {
+      const source = makeBand(WIDTH, band.start, band.end);
+      const result = await processFilmBandWithTrcAsync(source, document, LINEAR_TRC, {
+        fullWidth: WIDTH,
+        fullHeight: HEIGHT,
+        originY: band.start,
+        quality: 'quality',
+        seed: 0x12345678,
+        renderPlan: geometry.plan,
+        memoryMode: geometry.memoryMode,
+        componentSize: 16,
+        profileTimings: true,
+        executor,
+        backend: 'auto',
+        outputRows: { start: band.y0 - band.start, end: band.y1 - band.start },
+        intent: 'apply',
+        yieldIntervalMs: 50,
+      });
+      selectedBackend = result.stats?.backend ?? selectedBackend;
     for (const node of result.stats?.nodes ?? []) {
       nodeTimings[node.type] = (nodeTimings[node.type] ?? 0) + node.elapsedMs;
     }
@@ -166,14 +178,17 @@ function renderFilm24MP(document = shippingGraphDocument) {
     passes.fullPixelPasses += result.stats?.passes?.fullPixelPasses ?? 0;
     for (const [id, value] of Object.entries(result.stats?.passes?.perNode ?? {})) passes.perNode[id] = (passes.perNode[id] ?? 0) + value;
     if (result.stats?.fallback) fallback = result.stats.fallback;
-    const firstSampleY = band.y0 + ((17 - (band.y0 % 17)) % 17);
-    for (let absoluteY = firstSampleY; absoluteY < band.y1; absoluteY += 17) {
-      const y = absoluteY - band.start;
-      const p = (y * WIDTH + ((absoluteY * 101) % WIDTH)) * 3;
-      checksum = (checksum + Math.round(result.rgb[p] * 1e6)) >>> 0;
+      const firstSampleY = band.y0 + ((17 - (band.y0 % 17)) % 17);
+      for (let absoluteY = firstSampleY; absoluteY < band.y1; absoluteY += 17) {
+        const y = absoluteY - band.y0;
+        const p = (y * WIDTH + ((absoluteY * 101) % WIDTH)) * 3;
+        checksum = (checksum + Math.round(result.rgb[p] * 1e6)) >>> 0;
+      }
+      const current = memoryMB();
+      peak = { rss: Math.max(peak.rss, current.rss), arrayBuffers: Math.max(peak.arrayBuffers, current.arrayBuffers) };
     }
-    const current = memoryMB();
-    peak = { rss: Math.max(peak.rss, current.rss), arrayBuffers: Math.max(peak.arrayBuffers, current.arrayBuffers) };
+  } finally {
+    executor.dispose();
   }
   return {
     checksum,
@@ -187,7 +202,8 @@ function renderFilm24MP(document = shippingGraphDocument) {
     passes,
     stageTimings,
     fallback,
-    stats: { copies, passes, timings: { perStage: stageTimings }, fallback },
+    backend: selectedBackend,
+    stats: { backend: selectedBackend, copies, passes, timings: { perStage: stageTimings }, fallback },
   };
 }
 
@@ -241,6 +257,7 @@ async function measure(label, render, warmups = WARMUPS, runs = RUNS) {
   let memoryMode = 'n/a';
   let graphHash = null;
   let planHash = null;
+  let backend = null;
   const nodeSamples = {};
   const statsSamples = [];
   for (let i = 0; i < runs; i++) {
@@ -253,6 +270,7 @@ async function measure(label, render, warmups = WARMUPS, runs = RUNS) {
     memoryMode = typeof result === 'number' ? 'n/a' : result.memoryMode;
     graphHash = typeof result === 'number' ? graphHash : result.graphHash ?? graphHash;
     planHash = typeof result === 'number' ? planHash : result.planHash ?? planHash;
+    backend = typeof result === 'number' ? backend : result.backend ?? result.stats?.backend ?? backend;
     const renderStats = result?.renderStats ?? result?.stats ?? null;
     if (renderStats) statsSamples.push(renderStats);
     for (const [type, value] of Object.entries(result?.nodeTimings ?? {})) {
@@ -274,6 +292,7 @@ async function measure(label, render, warmups = WARMUPS, runs = RUNS) {
     memoryMode,
     graphHash,
     planHash,
+    backend,
     nodeTimingsMs: Object.fromEntries(Object.entries(nodeSamples).map(([type, values]) => [type, {
       samples: values.map((value) => Math.round(value * 10) / 10),
       p50: Math.round(percentile(values, 0.5) * 10) / 10,
@@ -321,7 +340,7 @@ const report = {
     componentSize: 16,
     profile: 'sRGB',
     quality: 'quality',
-    memoryMode: 'balanced',
+    memoryMode: FILM_MEMORY_MODE,
     deviceMemoryGB: DEVICE_MEMORY_GB,
     graphFixtures: ['v16-shipping-default', 'v16-full'],
   },
@@ -330,9 +349,12 @@ if (SUITE === 'all' || SUITE === 'legacy') {
   report.apply24MP = await measure('24MP streamed fast', () => render24MP(defaultParams));
   report.preview1024 = await measure('1024px preview fast', () => renderPreview(previewParams));
 }
-if (SUITE === 'all' || SUITE === 'v16') {
-  report.v16ShippingDefault = await measure('24MP V1.6 shipping-default Quality Balanced', () => renderFilm24MP(shippingGraphDocument));
-  report.v16Full = await measure('24MP V1.6 full Quality Balanced', () => renderFilm24MP(fullGraphDocument));
+if (['all', 'v16', 'resident-shipping', 'resident-full'].includes(SUITE)) {
+  const memoryLabel = FILM_MEMORY_MODE[0].toUpperCase() + FILM_MEMORY_MODE.slice(1);
+  if (SUITE !== 'resident-full') report.v16ShippingDefault = await measure(`24MP V1.7 resident shipping-default Quality ${memoryLabel}`, () => renderFilm24MP(shippingGraphDocument));
+  if (SUITE !== 'resident-shipping') report.v16Full = await measure(`${WIDTH}x${HEIGHT} V1.7 resident ${ENABLED_NODE || 'full'} Quality ${memoryLabel}`, () => renderFilm24MP(fullGraphDocument));
+}
+if (SUITE === 'all' || SUITE === 'v16' || SUITE === 'preview') {
   report.v16Preview1024Cached = await measure('1024px V1.6 full cached preview', renderFilmPreview);
 }
 

@@ -1,13 +1,20 @@
 // @ts-nocheck
 /** Host row-band renderer: keeps 24MP 16-bit peak memory below a whole-float-image pipeline. */
-import { processTiledWithTrc, processTiledFilmWithTrc } from './tileRender.js';
+import { processTiledWithTrc, processFilmBandWithTrcAsync } from './tileRender.js';
 import { readDocumentPixels, encodeDisplayRgbaBuffer, writeDocumentRgbaBuffer } from './imageAccess.js';
 import { streamGeometry, streamFilmGeometry } from './streamGeometry.js';
 import { normalizeComponentSize } from './bitDepth.js';
 import { documentProfileName, resolvePixelTRC } from './colorPipeline.js';
-import { BufferArena } from '../core/index.js';
+import { BufferArena, FILM_GRAPH_VERSION, createFilmExecutor, createV17ResidentBackend } from '../core/index.js';
 export { streamGeometry, streamFilmGeometry } from './streamGeometry.js';
 const nowMs = () => globalThis.performance?.now?.() ?? Date.now();
+
+async function yieldRenderControl(signal) {
+  if (signal?.aborted) throw new Error('Film render cancelled');
+  if (typeof globalThis.setTimeout === 'function') await new Promise((resolve) => globalThis.setTimeout(resolve, 0));
+  else await Promise.resolve();
+  if (signal?.aborted) throw new Error('Film render cancelled');
+}
 
 function addTimings(target, source) {
   if (!source) return;
@@ -90,6 +97,7 @@ export async function renderDocumentToLayer(doc, sourceLayer, targetLayer, sourc
     output.set(encoded.subarray(sourceRow, sourceRow + values), targetRow);
     timings.quantizeMs += nowMs() - started;
     options.onProgress?.((bandIndex + 1) / geometry.bands.length);
+    await yieldRenderControl(options.signal);
   }
   const writeStarted = nowMs();
   await writeDocumentRgbaBuffer(doc, { width, height, buffer: output }, {
@@ -159,6 +167,16 @@ export async function renderFilmDocumentToLayer(doc, sourceLayer, targetLayer, s
   let outputTrc = null;
   const arena = options.arena ?? new BufferArena({ debug: options.debugArena === true });
   const ownsArena = !options.arena;
+  const residentBackend = options.residentBackend ?? createV17ResidentBackend(geometry.plan);
+  const executor = options.executor ?? createFilmExecutor(geometry.plan, {
+    arena,
+    backend: options.backend ?? 'auto',
+    residentBackend,
+    gpuBackend: options.gpuBackend,
+    allowExperimentalGpu: options.allowExperimentalGpu === true,
+    debug: options.debugArena === true,
+  });
+  const ownsExecutor = !options.executor;
   const seed = options.seed ?? document.graph.find((node) => node.type === 'grain')?.params.seed ?? 0;
   const halation = document.graph.find((node) => node.type === 'halation');
   try {
@@ -174,7 +192,7 @@ export async function renderFilmDocumentToLayer(doc, sourceLayer, targetLayer, s
     if (!outputTrc) { outputTrc = sourceTrc; pixelProfile = bandProfile; }
     else if (bandProfile && pixelProfile && bandProfile !== pixelProfile) throw new Error(`Imaging API changed color profile between bands: "${pixelProfile}" vs "${bandProfile}"`);
     started = nowMs();
-    const rendered = processTiledFilmWithTrc(source, document, sourceTrc, {
+    const rendered = await processFilmBandWithTrcAsync(source, document, sourceTrc, {
       tileThreshold: Number.MAX_SAFE_INTEGER,
       outputTrc: sourceTrc,
       fullWidth,
@@ -191,9 +209,17 @@ export async function renderFilmDocumentToLayer(doc, sourceLayer, targetLayer, s
       deviceMemoryGB: Number(options.deviceMemoryGB ?? globalThis.navigator?.deviceMemory ?? 0),
       componentSize,
       arena,
+      executor,
+      outputRows: {
+        start: band.y0 - band.start,
+        end: band.y1 - band.start,
+      },
+      intent: 'apply',
+      yieldIntervalMs: 50,
     });
     const stats = rendered.stats;
     if (stats) {
+      renderStats.engineVersion = stats.engineVersion ?? renderStats.engineVersion;
       renderStats.planHash = stats.planHash ?? renderStats.planHash;
       renderStats.graphHash = stats.graphHash ?? renderStats.graphHash;
       renderStats.backend = stats.backend ?? renderStats.backend;
@@ -214,14 +240,14 @@ export async function renderFilmDocumentToLayer(doc, sourceLayer, targetLayer, s
       rolloff: halation?.params?.rolloff ?? 0,
       dither: componentSize !== 32,
       seed: options.seed ?? 0x46534c4d,
-      pixelOffset: band.start * width,
+      pixelOffset: band.y0 * width,
     });
-    const sourceRow = (band.y0 - band.start) * width * 4;
     const targetRow = band.y0 * width * 4;
     const values = (band.y1 - band.y0) * width * 4;
-    output.set(encoded.subarray(sourceRow, sourceRow + values), targetRow);
+    output.set(encoded.subarray(0, values), targetRow);
     timings.quantizeMs += nowMs() - started;
     options.onProgress?.((bandIndex + 1) / geometry.bands.length);
+    await yieldRenderControl(options.signal);
     }
     const writeStarted = nowMs();
     await writeDocumentRgbaBuffer(doc, { width, height, buffer: output }, { componentSize, layerID: targetLayer.id, layerName: targetLayer.name, bounds: targetBounds, colorProfile: '' });
@@ -256,7 +282,7 @@ export async function renderFilmDocumentToLayer(doc, sourceLayer, targetLayer, s
     algorithmTimings,
     renderStats: { ...renderStats, memory: renderStats.memory ? { ...renderStats.memory, actualPeakBytes: arenaStats.peakBytes } : { actualPeakBytes: arenaStats.peakBytes } },
     graphStats: {
-      engineVersion: '1.6.0',
+      engineVersion: renderStats.engineVersion ?? FILM_GRAPH_VERSION,
       seed,
       planHash: geometry.planHash,
       graphHash: geometry.graphHash,
@@ -264,6 +290,7 @@ export async function renderFilmDocumentToLayer(doc, sourceLayer, targetLayer, s
     },
     };
   } finally {
+    if (ownsExecutor) executor.dispose();
     if (ownsArena) arena.dispose();
   }
 }

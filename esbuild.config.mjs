@@ -33,4 +33,6 @@ const options = {
 await esbuild.build(options);
 const wasm = join(ROOT, 'assets', 'film_core.wasm');
 if (existsSync(wasm)) copyFileSync(wasm, join(ROOT, 'dist', 'film_core.wasm'));
+const wasmSimd = join(ROOT, 'assets', 'film_core_simd.wasm');
+if (existsSync(wasmSimd)) copyFileSync(wasmSimd, join(ROOT, 'dist', 'film_core_simd.wasm'));
 console.log('build: dist/main.js written');

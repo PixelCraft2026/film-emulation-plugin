@@ -4,6 +4,7 @@
 export const BACKEND_IDS = Object.freeze({
   JS: 'js-reference',
   WASM: 'wasm-resident',
+  WASM_SIMD: 'wasm-resident-simd',
   GPU: 'gpu-native',
 });
 
@@ -62,6 +63,12 @@ export function normalizeBackendCapabilities(descriptor = {}) {
       supported: legacyWasm.supported === true,
       resident: legacyWasm.mode === 'v16-resident',
       abi: legacyWasm.mode ?? null,
+    }),
+    [BACKEND_IDS.WASM_SIMD]: frozenCapability(declared[BACKEND_IDS.WASM_SIMD] ?? {
+      supported: false,
+      resident: true,
+      abi: 'v17-command-v1',
+      reason: 'SIMD requires runtime capability and QA qualification',
     }),
     [BACKEND_IDS.GPU]: frozenCapability(declared[BACKEND_IDS.GPU] ?? {
       supported: false,

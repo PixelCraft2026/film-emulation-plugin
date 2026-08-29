@@ -1,7 +1,6 @@
 // @ts-nocheck
 /** Film Emulation schema v2: deterministic graph serialization and strict migration. */
 import { DEFAULT_PARAMS, createHalationParams, validateParams } from '../core/params.js';
-import { ENGINE_VERSION, FILM_GRAPH_VERSION } from '../core/film.js';
 import {
   createDefaultEffectGraph,
   graphMinimumEngineVersion,
@@ -9,6 +8,10 @@ import {
 } from '../core/effectRegistry.js';
 import { createFilmResolutionParams } from '../core/resolution.js';
 import { createGrainParams } from '../core/grain.js';
+import { createDefringeParams } from '../core/defringe.js';
+import { createBloomParams } from '../core/bloom.js';
+import { createHighlightProtectionParams } from '../core/highlightProtection.js';
+import { createLumaMask, LUMA_MASK_DEFAULTS } from '../core/mask.js';
 import { DEFAULT_FILM_FORMAT, GAUGES, normalizeFilmFormat } from '../core/format.js';
 
 export const PLUGIN_NAME = 'FilmHalation';
@@ -27,6 +30,10 @@ export const PARAM_KEY_ORDER = Object.freeze([
 ]);
 export const RESOLUTION_PARAM_KEY_ORDER = Object.freeze(['amount', 'response', 'toeLoss', 'shoulderLoss', 'profile']);
 export const GRAIN_PARAM_KEY_ORDER = Object.freeze(['amount', 'size', 'roughness', 'chroma', 'profile', 'mode', 'seedMode', 'seed']);
+export const DEFRINGE_PARAM_KEY_ORDER = Object.freeze(['amount', 'radiusPx', 'threshold', 'softness', 'edgeSensitivity']);
+export const BLOOM_PARAM_KEY_ORDER = Object.freeze(['thresholdEV', 'softnessEV', 'radius', 'amplify', 'saturation', 'saveLights']);
+export const HIGHLIGHT_PROTECTION_PARAM_KEY_ORDER = Object.freeze(['amount', 'thresholdEV', 'softnessEV']);
+export const MASK_KEY_ORDER = Object.freeze(['mode', 'lowEV', 'highEV', 'softnessEV', 'invert']);
 
 function orderedParams(params, keys, validate) {
   const validated = validate(params);
@@ -35,6 +42,13 @@ function orderedParams(params, keys, validate) {
     const value = validated[key];
     ordered[key] = Array.isArray(value) ? [...value] : value;
   }
+  return ordered;
+}
+
+function orderedMask(mask) {
+  const validated = createLumaMask(mask ?? LUMA_MASK_DEFAULTS);
+  const ordered = {};
+  for (const key of MASK_KEY_ORDER) ordered[key] = validated[key];
   return ordered;
 }
 
@@ -55,6 +69,34 @@ function orderedNode(node) {
       type: node.type,
       enabled: node.enabled,
       params: orderedParams(node.params, PARAM_KEY_ORDER, validateParams),
+      mask: orderedMask(node.mask),
+    };
+  }
+  if (node.type === 'defringe') {
+    return {
+      id: node.id,
+      type: node.type,
+      enabled: node.enabled,
+      params: orderedParams(node.params, DEFRINGE_PARAM_KEY_ORDER, createDefringeParams),
+      mask: orderedMask(node.mask),
+    };
+  }
+  if (node.type === 'bloom') {
+    return {
+      id: node.id,
+      type: node.type,
+      enabled: node.enabled,
+      params: orderedParams(node.params, BLOOM_PARAM_KEY_ORDER, createBloomParams),
+      mask: orderedMask(node.mask),
+    };
+  }
+  if (node.type === 'highlightProtection') {
+    return {
+      id: node.id,
+      type: node.type,
+      enabled: node.enabled,
+      params: orderedParams(node.params, HIGHLIGHT_PROTECTION_PARAM_KEY_ORDER, createHighlightProtectionParams),
+      mask: orderedMask(node.mask),
     };
   }
   if (node.type === 'filmResolution') {
@@ -63,6 +105,7 @@ function orderedNode(node) {
       type: node.type,
       enabled: node.enabled,
       params: orderedParams(node.params, RESOLUTION_PARAM_KEY_ORDER, createFilmResolutionParams),
+      mask: orderedMask(node.mask),
     };
   }
   if (node.type === 'grain') {
@@ -71,19 +114,43 @@ function orderedNode(node) {
       type: node.type,
       enabled: node.enabled,
       params: orderedParams(node.params, GRAIN_PARAM_KEY_ORDER, createGrainParams),
+      mask: orderedMask(node.mask),
     };
   }
-  return { id: node.id, type: node.type, enabled: node.enabled, params: { ...node.params } };
+  return { id: node.id, type: node.type, enabled: node.enabled, params: { ...node.params }, mask: orderedMask(node.mask) };
+}
+
+/**
+ * V1.6 sidecars did not persist the three V1.7 nodes.  Upgrade in memory by
+ * appending disabled nodes; they are only written back when the document is
+ * subsequently serialized.  Existing node ids and parameters are untouched.
+ */
+function upgradeEffectGraphToV17(graph) {
+  const result = graph.map((node) => ({ ...node, mask: node.mask ?? createLumaMask() }));
+  const ids = new Set(result.map((node) => node.id));
+  const add = (id, type, params) => {
+    if (!ids.has(id)) {
+      result.push({ id, type, enabled: false, params, mask: createLumaMask() });
+      ids.add(id);
+    }
+  };
+  add('defringe-main', 'defringe', createDefringeParams());
+  add('bloom-main', 'bloom', createBloomParams());
+  add('highlight-protection-main', 'highlightProtection', createHighlightProtectionParams());
+  return result;
 }
 
 function normalizeGraphForDocument(graph) {
-  return normalizeEffectGraph(graph).map(orderedNode);
+  const hasV16OrLaterNode = graph.some((node) => ['defringe', 'bloom', 'highlightProtection', 'filmResolution', 'grain'].includes(node.type));
+  const hasV17Mask = graph.some((node) => node.mask?.mode === 'luma');
+  const normalized = hasV16OrLaterNode || hasV17Mask
+    ? upgradeEffectGraphToV17(graph)
+    : graph;
+  return normalizeEffectGraph(normalized).map(orderedNode);
 }
 
 function documentEngineVersion(graph) {
-  return graph.some((node) => node.type === 'filmResolution' || node.type === 'grain')
-    ? FILM_GRAPH_VERSION
-    : ENGINE_VERSION;
+  return graphMinimumEngineVersion(graph);
 }
 
 /** Construct a schema-v2 document. options.graph enables the complete V1.6 graph. */
@@ -95,6 +162,7 @@ export function toDocument(params, options = {}) {
         type: 'halation',
         enabled: options.enabled !== false,
         params: orderedParams(params, PARAM_KEY_ORDER, validateParams),
+        mask: orderedMask(options.mask),
       }];
   return {
     plugin: PLUGIN_NAME,

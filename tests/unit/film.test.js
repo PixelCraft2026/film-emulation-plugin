@@ -26,7 +26,7 @@ test('processFilm executes schema-v2 halation graph and preserves alpha', () => 
 test('processFilm rejects unavailable future nodes and cancellation', () => {
   const input = { width: 1, height: 1, rgb: new Float32Array(3) };
   assert.throws(
-    () => processFilm(input, { graph: [{ id: 'g', type: 'bloom', enabled: true, params: {} }] }),
+    () => processFilm(input, { graph: [{ id: 'g', type: 'vignette', enabled: true, params: {} }] }),
     /not available/,
   );
   const controller = new AbortController();

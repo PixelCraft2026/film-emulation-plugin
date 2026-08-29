@@ -14,13 +14,34 @@ import {
   normalizePreviewPixelRatio,
 } from './previewMode.js';
 import { replaceGraphNodeParams } from './graphState.js';
-import { createHalationPreset, HALATION_PRESET_LABELS, createFilmResolutionParams, createGrainParams } from '../core/index.js';
+import {
+  createHalationPreset,
+  HALATION_PRESET_LABELS,
+  createFilmResolutionParams,
+  createGrainParams,
+  createDefringeParams,
+  createBloomParams,
+  createHighlightProtectionParams,
+  createLumaMask,
+} from '../core/index.js';
 
 function setDropdownValue(el, value) {
   if (!el) return;
   const items = Array.from((el.querySelector('sp-menu') || { children: [] }).children || []);
   const idx = items.findIndex((it) => it.value === value);
   el.selectedIndex = idx >= 0 ? idx : 0;
+}
+
+function setSliderRange(el, min, max, step, value) {
+  if (!el) return;
+  if (el.__filmSlider?.setRange) {
+    el.__filmSlider.setRange(min, max, step, value);
+    return;
+  }
+  el.min = min;
+  el.max = max;
+  el.step = step;
+  if (value !== undefined) el.value = value;
 }
 
 /**
@@ -36,6 +57,8 @@ function setDropdownValue(el, value) {
  *   onPreviewModeChange?: (mode:'fit'|'actual',domain:string)=>void,
  *   onPreviewPan?: (delta:{x:number,y:number})=>void,
  *   onPreviewViewportChange?: (viewport:{width:number,height:number})=>void,
+ *   applyMemoryMode?: 'auto'|'high'|'balanced',
+ *   onApplyMemoryModeChange?: (mode:'auto'|'high'|'balanced')=>void,
  *   onApply: ()=>void,                    // 触发 Apply
  *   onRebind: ()=>void,                   // 显式把当前像素层重新绑定为 source
  *   migrationRole?: 'export'|'import'|'none',
@@ -57,6 +80,8 @@ export function createPanel(handlers) {
     onPreviewModeChange = () => {},
     onPreviewPan = () => {},
     onPreviewViewportChange = () => {},
+    applyMemoryMode = 'auto',
+    onApplyMemoryModeChange = () => {},
     onApply,
     onRebind,
     migrationRole = 'none',
@@ -64,8 +89,25 @@ export function createPanel(handlers) {
     onImportMigration,
   } = handlers;
   let currentParams = { ...params, redshift: [...params.redshift], sigmaRatio: [...params.sigmaRatio] };
-  let currentGraph = graph.map((node) => ({ ...node, params: { ...node.params } }));
+  let currentGraph = graph.map((node) => ({ ...node, params: { ...node.params }, mask: node.mask ? { ...node.mask } : createLumaMask() }));
   let currentFormat = { ...format };
+  const maskRangeVisibility = {};
+  const maskNodeIds = Object.freeze({
+    halation: 'halation-main',
+    defringe: 'defringe-main',
+    bloom: 'bloom-main',
+    highlightProtection: 'highlight-protection-main',
+    filmResolution: 'film-resolution-main',
+    grain: 'grain-main',
+  });
+  const maskParamFactories = {
+    halation: () => ({ ...currentParams, redshift: [...currentParams.redshift], sigmaRatio: [...currentParams.sigmaRatio] }),
+    defringe: createDefringeParams,
+    bloom: createBloomParams,
+    highlightProtection: createHighlightProtectionParams,
+    filmResolution: createFilmResolutionParams,
+    grain: createGrainParams,
+  };
   const set = (partial) => {
     const explicitProfile = Object.prototype.hasOwnProperty.call(partial, 'profile');
     const effective = explicitProfile ? partial : { ...partial, profile: 'custom' };
@@ -73,6 +115,81 @@ export function createPanel(handlers) {
     currentGraph = replaceGraphNodeParams(currentGraph, 'halation', currentParams);
     if (!explicitProfile) setDropdownValue(document.getElementById('profile'), 'custom');
     onParamsChange(effective);
+  };
+  const updateMaskNode = (type, partial) => {
+    const existing = currentGraph.find((node) => node.type === type);
+    if (existing) {
+      currentGraph = currentGraph.map((node) => node.type === type
+        ? { ...node, mask: createLumaMask({ ...(node.mask ?? {}), ...partial }) }
+        : node);
+    } else {
+      const createParams = maskParamFactories[type];
+      if (!createParams) throw new Error(`No mask defaults for effect type: ${type}`);
+      currentGraph = [...currentGraph, {
+        id: maskNodeIds[type] ?? `${type}-main`,
+        type,
+        enabled: false,
+        params: createParams(),
+        mask: createLumaMask(partial),
+      }];
+    }
+    onGraphChange(currentGraph, `${type}:mask`);
+  };
+  const appendMaskControls = (type, targetPanel, options = {}) => {
+    const node = currentGraph.find((item) => item.type === type);
+    const mask = node?.mask ?? createLumaMask();
+    const group = document.createElement('div');
+    group.classList.add('fhal-mask-section');
+    const heading = document.createElement('sp-heading');
+    heading.textContent = options.title ?? 'Effect area';
+    heading.classList.add('fhal-section-heading');
+    const help = document.createElement('sp-body');
+    help.classList.add('fhal-mask-help');
+    help.textContent = options.description ?? 'Limits where this effect is mixed, using the node input exposure.';
+    const rangeRows = [
+      createSlider({ id: `${type}MaskLowEV`, label: 'Lower bound (EV)', value: mask.lowEV, min: -16, max: 16, step: 0.1, onInput: (value) => updateMaskNode(type, { lowEV: value }) }),
+      createSlider({ id: `${type}MaskHighEV`, label: 'Upper bound (EV)', value: mask.highEV, min: -16, max: 16, step: 0.1, onInput: (value) => updateMaskNode(type, { highEV: value }) }),
+      createSlider({ id: `${type}MaskSoftnessEV`, label: 'Edge softness (EV)', value: mask.softnessEV, min: 0.1, max: 4, step: 0.1, onInput: (value) => updateMaskNode(type, { softnessEV: value }) }),
+      createSelect({ id: `${type}MaskInvert`, label: 'Range', value: mask.invert ? 'true' : 'false', options: [{ value: 'false', label: 'Inside EV range' }, { value: 'true', label: 'Outside EV range' }], onChange: (value) => updateMaskNode(type, { invert: value === 'true' }) }),
+    ];
+    const syncRangeVisibility = (mode) => {
+      for (const row of rangeRows) row.style.display = mode === 'luma' ? 'flex' : 'none';
+    };
+    maskRangeVisibility[type] = syncRangeVisibility;
+    const modeRow = createSelect({
+      id: `${type}MaskMode`,
+      label: 'Apply to',
+      value: mask.mode,
+      options: [{ value: 'none', label: 'Entire image' }, { value: 'luma', label: 'Exposure range' }],
+      onChange: (value) => {
+        updateMaskNode(type, { mode: value });
+        syncRangeVisibility(value);
+      },
+    });
+    group.append(heading, help, modeRow, ...rangeRows);
+    targetPanel.append(group);
+    syncRangeVisibility(mask.mode);
+  };
+  const createAdvancedDisclosure = (id) => {
+    const disclosure = document.createElement('div');
+    disclosure.classList.add('fhal-advanced-disclosure');
+    const toggle = document.createElement('sp-button');
+    toggle.id = `${id}Toggle`;
+    toggle.variant = 'secondary';
+    toggle.textContent = STRINGS.advanced;
+    toggle.setAttribute('aria-expanded', 'false');
+    const body = document.createElement('div');
+    body.id = `${id}Body`;
+    body.classList.add('fhal-advanced-body');
+    body.style.display = 'none';
+    toggle.setAttribute('aria-controls', body.id);
+    toggle.addEventListener('click', () => {
+      const expanded = toggle.getAttribute('aria-expanded') !== 'true';
+      toggle.setAttribute('aria-expanded', String(expanded));
+      body.style.display = expanded ? 'flex' : 'none';
+    });
+    disclosure.append(toggle, body);
+    return { element: disclosure, body };
   };
 
   const panel = document.createElement('div');
@@ -98,18 +215,25 @@ export function createPanel(handlers) {
       letter-spacing: .14em; text-transform: uppercase;
     }
     .fhal-domain-button {
-      position: relative; width: 100%; min-height: 42px; padding: 7px 8px 7px 12px;
+      position: relative; display: flex; align-items: center; width: 100%; min-height: 40px; padding: 7px 8px 7px 12px;
       border: 0; border-left: 2px solid transparent; border-radius: 2px; box-sizing: border-box;
       color: rgba(255,255,255,.68); background: transparent; text-align: left;
-      font: 600 12px/1.2 "Adobe Clean", "Segoe UI", sans-serif; cursor: pointer;
+      font: 600 13px/1.2 "Adobe Clean", "Segoe UI", sans-serif; white-space: nowrap; overflow: hidden;
+      text-overflow: ellipsis; cursor: pointer;
     }
     .fhal-domain-button:hover { color: #fff; background: rgba(255,255,255,.055); }
     .fhal-domain-button:focus { outline: 1px solid #55a9d8; outline-offset: -1px; }
     .fhal-domain-button[aria-pressed="true"] { color: #fff; background: rgba(255,255,255,.085); }
-    .fhal-domain-button[data-domain="halation"][aria-pressed="true"] { border-left-color: #e77f42; }
+     .fhal-domain-button[data-domain="halation"][aria-pressed="true"] { border-left-color: #e77f42; }
+     .fhal-domain-button[data-domain="defringe"][aria-pressed="true"] { border-left-color: #d9b95d; }
+     .fhal-domain-button[data-domain="bloom"][aria-pressed="true"] { border-left-color: #e2a6ee; }
     .fhal-domain-button[data-domain="resolution"][aria-pressed="true"] { border-left-color: #55a9d8; }
     .fhal-domain-button[data-domain="grain"][aria-pressed="true"] { border-left-color: #b7b1a5; }
-    .fhal-domain-code { display: block; margin-top: 3px; color: rgba(255,255,255,.36); font: 9px/1 Consolas, monospace; letter-spacing: .08em; }
+    .fhal-advanced-disclosure { display: flex; flex-direction: column; gap: 7px; padding-top: 2px; }
+    .fhal-advanced-disclosure > sp-button { align-self: stretch; }
+    .fhal-advanced-body { flex-direction: column; gap: 8px; }
+    .fhal-mask-section { display: flex; flex-direction: column; gap: 6px; padding-top: 2px; }
+    .fhal-mask-help { color: rgba(255,255,255,.54); font-size: 11px; line-height: 1.35; }
     .fhal-controls {
       flex: 0 0 340px; min-width: 280px; max-width: 380px; overflow-y: auto;
       padding: 12px; box-sizing: border-box; background: #242528; border-right: 1px solid rgba(128,128,128,.28);
@@ -193,6 +317,7 @@ export function createPanel(handlers) {
       background-color: #000; background-image: none;
     }
     .fhal-compare-image { display: block; flex: 0 0 auto; user-select: none; pointer-events: none; transform: translate(0,0); }
+    .fhal-compare-preview[data-loading="true"] .fhal-compare-image { image-rendering: auto; }
     .fhal-preview-frame[data-mode="fit"] .fhal-compare-preview .fhal-compare-image { width: 100%; height: 100%; object-fit: contain; }
     .fhal-preview-frame[data-mode="actual"] .fhal-compare-image { width: auto; height: auto; max-width: none; max-height: none; object-fit: fill; }
     .fhal-compare-label {
@@ -201,6 +326,29 @@ export function createPanel(handlers) {
       font: 600 9px/1 Consolas, monospace; letter-spacing: .12em;
     }
     .fhal-preview-frame[data-mode="fit"] .fhal-compare-label { display: none; }
+    .fhal-preview-loading {
+      position: absolute; z-index: 4; inset: 0; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 9px; pointer-events: none;
+      color: rgba(255,255,255,.82); background: rgba(8,9,11,.16);
+    }
+    .fhal-preview-loading[hidden] { display: none; }
+    .fhal-render-ring {
+      width: 29px; height: 29px; box-sizing: border-box; border-radius: 50%;
+      border: 3px solid rgba(255,255,255,.16); border-top-color: #55a9d8; border-right-color: #e77f42;
+      box-shadow: 0 0 0 1px rgba(0,0,0,.28), inset 0 0 0 5px rgba(10,11,13,.34);
+      contain: layout paint; backface-visibility: hidden; will-change: transform;
+      transform: translateZ(0) rotate(0deg);
+      animation: fhal-render-spin .72s linear infinite !important;
+    }
+    .fhal-preview-loading-text {
+      padding: 3px 6px; border-radius: 2px; color: rgba(255,255,255,.82); background: rgba(12,13,15,.62);
+      font: 600 9px/1 Consolas, monospace; letter-spacing: .13em; text-transform: uppercase;
+    }
+    @keyframes fhal-render-spin {
+      from { transform: translateZ(0) rotate(0deg); }
+      to { transform: translateZ(0) rotate(360deg); }
+    }
+    @media (prefers-reduced-motion: reduce) { .fhal-render-ring { animation: none; } }
     .fhal-pan-hint {
       display: none; position: absolute; z-index: 3; top: 9px; left: 50%; transform: translateX(-50%);
       padding: 4px 7px; border-radius: 3px; color: rgba(255,255,255,.68); background: rgba(12,13,15,.72);
@@ -215,10 +363,11 @@ export function createPanel(handlers) {
       }
       .fhal-nav-kicker { display: none; }
       .fhal-domain-button { min-width: 94px; min-height: 36px; border-left: 0; border-bottom: 2px solid transparent; }
-      .fhal-domain-button[data-domain="halation"][aria-pressed="true"] { border-bottom-color: #e77f42; }
+       .fhal-domain-button[data-domain="halation"][aria-pressed="true"] { border-bottom-color: #e77f42; }
+       .fhal-domain-button[data-domain="defringe"][aria-pressed="true"] { border-bottom-color: #d9b95d; }
+       .fhal-domain-button[data-domain="bloom"][aria-pressed="true"] { border-bottom-color: #e2a6ee; }
       .fhal-domain-button[data-domain="resolution"][aria-pressed="true"] { border-bottom-color: #55a9d8; }
       .fhal-domain-button[data-domain="grain"][aria-pressed="true"] { border-bottom-color: #b7b1a5; }
-      .fhal-domain-code { display: none; }
       .fhal-controls {
         flex: 1 1 52%; width: 100%; min-width: 0; max-width: none;
         border-right: 0; border-bottom: 1px solid rgba(128,128,128,.28);
@@ -250,7 +399,7 @@ export function createPanel(handlers) {
   domainNav.setAttribute('role', 'tablist');
   const navKicker = document.createElement('div');
   navKicker.classList.add('fhal-nav-kicker');
-  navKicker.textContent = 'Emulsion stages';
+  navKicker.textContent = 'Effects';
   domainNav.append(navKicker);
   const scrollArea = document.createElement('div');
   scrollArea.style.display = 'flex';
@@ -263,6 +412,16 @@ export function createPanel(handlers) {
   halationPanel.setAttribute('data-domain', 'halation');
   halationPanel.id = 'film-domain-halation';
   halationPanel.setAttribute('role', 'tabpanel');
+  const defringePanel = document.createElement('div');
+  defringePanel.classList.add('fhal-domain-panel');
+  defringePanel.setAttribute('data-domain', 'defringe');
+  defringePanel.id = 'film-domain-defringe';
+  defringePanel.setAttribute('role', 'tabpanel');
+  const bloomPanel = document.createElement('div');
+  bloomPanel.classList.add('fhal-domain-panel');
+  bloomPanel.setAttribute('data-domain', 'bloom');
+  bloomPanel.id = 'film-domain-bloom';
+  bloomPanel.setAttribute('role', 'tabpanel');
   const resolutionPanel = document.createElement('div');
   resolutionPanel.classList.add('fhal-domain-panel');
   resolutionPanel.setAttribute('data-domain', 'resolution');
@@ -275,13 +434,13 @@ export function createPanel(handlers) {
   grainPanel.setAttribute('role', 'tabpanel');
   const physicalGroup = document.createElement('div');
   physicalGroup.classList.add('fhal-physical-group');
-  const domainPanels = { halation: halationPanel, resolution: resolutionPanel, grain: grainPanel };
+  const domainPanels = { halation: halationPanel, defringe: defringePanel, bloom: bloomPanel, resolution: resolutionPanel, grain: grainPanel };
   const domainButtons = {};
   const graphToggles = {};
-  const previewModesByDomain = { halation: 'fit', resolution: 'actual', grain: 'actual' };
+  const previewModesByDomain = { halation: 'fit', defringe: 'actual', bloom: 'fit', resolution: 'actual', grain: 'actual' };
   let activeDomain = 'halation';
   let previewDomainSync = () => {};
-  const addDomainButton = (domain, label, code) => {
+  const addDomainButton = (domain, label) => {
     const button = document.createElement('button');
     button.type = 'button';
     button.classList.add('fhal-domain-button');
@@ -289,11 +448,9 @@ export function createPanel(handlers) {
     button.setAttribute('aria-pressed', 'false');
     button.setAttribute('role', 'tab');
     button.setAttribute('aria-controls', `film-domain-${domain}`);
-    const codeLabel = document.createElement('span');
-    codeLabel.classList.add('fhal-domain-code');
-    codeLabel.textContent = code;
+    button.setAttribute('aria-label', label);
+    button.title = label;
     button.textContent = label;
-    button.append(codeLabel);
     button.addEventListener('click', () => showDomain(domain));
     domainButtons[domain] = button;
     domainNav.append(button);
@@ -311,11 +468,13 @@ export function createPanel(handlers) {
     physicalGroup.setAttribute('data-visible', String(domain === 'resolution' || domain === 'grain'));
     previewDomainSync(domain, previewModesByDomain[domain] ?? defaultPreviewModeForDomain(domain));
   };
-  addDomainButton('halation', 'Halation', 'HAL / 30');
+  addDomainButton('halation', 'Halation');
   const currentBuild = __FILM_FEATURE_LEVEL__ === 'current' && featureLevel === 'current';
   if (__FILM_FEATURE_LEVEL__ === 'current' && featureLevel === 'current') {
-    addDomainButton('resolution', 'Resolution', 'MTF / 60');
-    addDomainButton('grain', 'Grain', 'GRN / 70');
+    addDomainButton('defringe', 'Defringe');
+    addDomainButton('bloom', 'Bloom');
+    addDomainButton('resolution', 'Resolution');
+    addDomainButton('grain', 'Grain');
   }
   showDomain('halation');
 
@@ -359,30 +518,123 @@ export function createPanel(handlers) {
       step: 1,
       onInput: (v) => set({ strength: v }),
     }),
-    createSlider({ id: 'sigma', label: STRINGS.sigma, value: params.sigma, min: params.sigmaUnits === 'diagonal' ? 0.1 : 0.5, max: params.sigmaUnits === 'diagonal' ? 10 : 50, step: params.sigmaUnits === 'diagonal' ? 0.1 : 0.5, onInput: (v) => set({ sigma: v }) }),
-    createSlider({ id: 'threshold', label: STRINGS.threshold, value: params.threshold, min: params.thresholdUnits === 'stops' ? -4 : 0, max: params.thresholdUnits === 'stops' ? 4 : 1, step: params.thresholdUnits === 'stops' ? 0.1 : 0.01, onInput: (v) => set({ threshold: v }) }),
+    createSlider({ id: 'sigma', label: STRINGS.sigma, value: params.sigma, min: params.sigmaUnits === 'diagonal' ? 0.1 : 0.5, max: params.sigmaUnits === 'diagonal' ? 10 : 50, step: params.sigmaUnits === 'diagonal' ? 0.1 : 0.5, curve: 'fine-min', curveExponent: 2.2, fineStepScale: 0.1, onInput: (v) => set({ sigma: v }) }),
+    createSlider({ id: 'threshold', label: STRINGS.threshold, value: params.threshold, min: params.thresholdUnits === 'stops' ? -4 : 0, max: params.thresholdUnits === 'stops' ? 4 : 1, step: params.thresholdUnits === 'stops' ? 0.1 : 0.01, curve: 'fine-max', curveExponent: 2.2, fineStepScale: 0.1, onInput: (v) => set({ threshold: v }) }),
   );
 
   if (__FILM_FEATURE_LEVEL__ === 'current' && featureLevel === 'current') {
     const resolution = currentGraph.find((node) => node.type === 'filmResolution')?.params ?? createFilmResolutionParams();
     const grain = currentGraph.find((node) => node.type === 'grain')?.params ?? createGrainParams();
+    const defringe = currentGraph.find((node) => node.type === 'defringe')?.params ?? createDefringeParams();
+    const bloom = currentGraph.find((node) => node.type === 'bloom')?.params ?? createBloomParams();
+    const highlightProtection = currentGraph.find((node) => node.type === 'highlightProtection')?.params ?? createHighlightProtectionParams();
+    const validators = {
+      defringe: createDefringeParams,
+      bloom: createBloomParams,
+      highlightProtection: createHighlightProtectionParams,
+      filmResolution: createFilmResolutionParams,
+      grain: createGrainParams,
+    };
+    let bloomWarning = null;
+    const refreshBloomWarning = () => {
+      if (!bloomWarning) return;
+      const bloomEnabled = currentGraph.find((node) => node.type === 'bloom')?.enabled === true;
+      const hpEnabled = currentGraph.find((node) => node.type === 'highlightProtection')?.enabled === true;
+      bloomWarning.textContent = hpEnabled && !bloomEnabled
+        ? 'Highlight Protection has no Bloom contribution. Enable Bloom to activate it.'
+        : 'Highlight Protection uses the nearest Bloom contribution.';
+    };
     const updateNode = (type, partial = {}, enabled) => {
       const existing = currentGraph.find((node) => node.type === type);
       const nextEnabled = enabled === undefined ? (existing?.enabled ?? false) : enabled === true;
-      const params = type === 'filmResolution'
-        ? createFilmResolutionParams({ ...(existing?.params ?? {}), ...partial })
-        : createGrainParams({ ...(existing?.params ?? {}), ...partial });
+      const validate = validators[type] ?? (() => ({ ...(existing?.params ?? {}), ...partial }));
+      const params = validate({ ...(existing?.params ?? {}), ...partial });
       currentGraph = currentGraph.map((node) => node.type === type
         ? { ...node, enabled: nextEnabled, params }
         : node);
       if (!existing) currentGraph.push({
-        id: type === 'filmResolution' ? 'film-resolution-main' : 'grain-main',
+        id: ({
+          defringe: 'defringe-main',
+          bloom: 'bloom-main',
+          highlightProtection: 'highlight-protection-main',
+          filmResolution: 'film-resolution-main',
+          grain: 'grain-main',
+        })[type] ?? `${type}-main`,
         type,
         enabled: nextEnabled,
-        params,
-      });
+         params,
+         mask: createLumaMask(),
+       });
       onGraphChange(currentGraph, type);
+      refreshBloomWarning();
     };
+    const defringeNode = currentGraph.find((node) => node.type === 'defringe');
+    const defringeHeading = document.createElement('sp-heading');
+    defringeHeading.textContent = 'Defringe';
+    const defringeSwitch = createEffectSwitch({ id: 'defringeEnabled', label: 'Defringe', enabled: defringeNode?.enabled === true, onChange: (enabled) => updateNode('defringe', {}, enabled) });
+    graphToggles.defringe = defringeSwitch;
+    const defringeHeadingRow = document.createElement('div');
+    defringeHeadingRow.classList.add('fhal-effect-heading');
+    defringeHeadingRow.append(defringeHeading, defringeSwitch.element);
+    defringePanel.append(defringeHeadingRow,
+      createSlider({ id: 'defringeAmount', label: 'Amount', value: defringe.amount, min: 0, max: 1, step: 0.01, onInput: (value) => updateNode('defringe', { amount: value }) }),
+      createSlider({ id: 'defringeRadiusPx', label: 'Radius (px)', value: defringe.radiusPx, min: 0.5, max: 4, step: 0.1, onInput: (value) => updateNode('defringe', { radiusPx: value }) }),
+      createSlider({ id: 'defringeThreshold', label: 'Chroma threshold', value: defringe.threshold, min: 0, max: 1, step: 0.01, onInput: (value) => updateNode('defringe', { threshold: value }) }),
+      createSlider({ id: 'defringeSoftness', label: 'Chroma softness', value: defringe.softness, min: 0.01, max: 0.5, step: 0.01, onInput: (value) => updateNode('defringe', { softness: value }) }),
+      createSlider({ id: 'defringeEdgeSensitivity', label: 'Edge sensitivity', value: defringe.edgeSensitivity, min: 0, max: 2, step: 0.01, onInput: (value) => updateNode('defringe', { edgeSensitivity: value }) }),
+    );
+    const defringeAdvanced = createAdvancedDisclosure('defringeAdvanced');
+    appendMaskControls('defringe', defringeAdvanced.body, {
+      title: 'Effect area',
+      description: 'Limits where Defringe correction is mixed, using the input exposure.',
+    });
+    defringePanel.append(defringeAdvanced.element);
+
+    const bloomNode = currentGraph.find((node) => node.type === 'bloom');
+    const hpNode = currentGraph.find((node) => node.type === 'highlightProtection');
+    const bloomHeading = document.createElement('sp-heading');
+    bloomHeading.textContent = 'Bloom';
+    const bloomSwitch = createEffectSwitch({ id: 'bloomEnabled', label: 'Bloom', enabled: bloomNode?.enabled === true, onChange: (enabled) => updateNode('bloom', {}, enabled) });
+    graphToggles.bloom = bloomSwitch;
+    const bloomHeadingRow = document.createElement('div');
+    bloomHeadingRow.classList.add('fhal-effect-heading');
+    bloomHeadingRow.append(bloomHeading, bloomSwitch.element);
+    bloomWarning = document.createElement('sp-body');
+    bloomWarning.id = 'highlight-protection-warning';
+    bloomWarning.textContent = 'Highlight Protection uses the nearest Bloom contribution.';
+    bloomWarning.style.opacity = '0.62';
+    bloomPanel.append(bloomHeadingRow,
+      createSlider({ id: 'bloomThresholdEV', label: 'Threshold (EV)', value: bloom.thresholdEV, min: -2, max: 8, step: 0.1, onInput: (value) => updateNode('bloom', { thresholdEV: value }) }),
+      createSlider({ id: 'bloomSoftnessEV', label: 'Softness (EV)', value: bloom.softnessEV, min: 0.1, max: 4, step: 0.1, onInput: (value) => updateNode('bloom', { softnessEV: value }) }),
+      createSlider({ id: 'bloomRadius', label: 'Radius (% diagonal)', value: bloom.radius, min: 0.05, max: 5, step: 0.05, onInput: (value) => updateNode('bloom', { radius: value }) }),
+      createSlider({ id: 'bloomAmplify', label: 'Amplify', value: bloom.amplify, min: 0, max: 4, step: 0.01, onInput: (value) => updateNode('bloom', { amplify: value }) }),
+      createSlider({ id: 'bloomSaturation', label: 'Saturation', value: bloom.saturation, min: 0, max: 1.5, step: 0.01, onInput: (value) => updateNode('bloom', { saturation: value }) }),
+      createSlider({ id: 'bloomSaveLights', label: 'Save lights', value: bloom.saveLights, min: 0, max: 1, step: 0.01, onInput: (value) => updateNode('bloom', { saveLights: value }) }),
+    );
+    const hpHeading = document.createElement('sp-heading');
+    hpHeading.textContent = 'Highlight Protection';
+    const hpSwitch = createEffectSwitch({ id: 'highlightProtectionEnabled', label: 'Highlight Protection', enabled: hpNode?.enabled === true, onChange: (enabled) => updateNode('highlightProtection', {}, enabled) });
+    graphToggles.highlightProtection = hpSwitch;
+    const hpHeadingRow = document.createElement('div');
+    hpHeadingRow.classList.add('fhal-effect-heading');
+    hpHeadingRow.append(hpHeading, hpSwitch.element);
+    bloomPanel.append(hpHeadingRow,
+      createSlider({ id: 'highlightProtectionAmount', label: 'Amount', value: highlightProtection.amount, min: 0, max: 1, step: 0.01, onInput: (value) => updateNode('highlightProtection', { amount: value }) }),
+      createSlider({ id: 'highlightProtectionThresholdEV', label: 'Threshold (EV)', value: highlightProtection.thresholdEV, min: 0, max: 8, step: 0.1, onInput: (value) => updateNode('highlightProtection', { thresholdEV: value }) }),
+      createSlider({ id: 'highlightProtectionSoftnessEV', label: 'Softness (EV)', value: highlightProtection.softnessEV, min: 0.1, max: 4, step: 0.1, onInput: (value) => updateNode('highlightProtection', { softnessEV: value }) }),
+      bloomWarning,
+    );
+    refreshBloomWarning();
+    const bloomAdvanced = createAdvancedDisclosure('bloomAdvanced');
+    appendMaskControls('bloom', bloomAdvanced.body, {
+      title: 'Bloom output area',
+      description: 'Limits where diffused Bloom is added. Highlight source extraction is unchanged.',
+    });
+    appendMaskControls('highlightProtection', bloomAdvanced.body, {
+      title: 'Protection area',
+      description: 'Limits where Highlight Protection modifies the nearest Bloom contribution.',
+    });
+    bloomPanel.append(bloomAdvanced.element);
     const setNode = (type, partial) => updateNode(type, partial);
     const setNodeEnabled = (type, enabled) => updateNode(type, {}, enabled);
 
@@ -423,6 +675,12 @@ export function createPanel(handlers) {
       createSlider({ id: 'filmResolutionToeLoss', label: 'Shadow loss', value: resolution.toeLoss, min: 0, max: 1, step: 0.01, onInput: (value) => setNode('filmResolution', { toeLoss: value }) }),
       createSlider({ id: 'filmResolutionShoulderLoss', label: 'Highlight loss', value: resolution.shoulderLoss, min: 0, max: 1, step: 0.01, onInput: (value) => setNode('filmResolution', { shoulderLoss: value }) }),
     );
+    const resolutionAdvanced = createAdvancedDisclosure('resolutionAdvanced');
+    appendMaskControls('filmResolution', resolutionAdvanced.body, {
+      title: 'Effect area',
+      description: 'Limits where the Film Resolution result is mixed, using the input exposure.',
+    });
+    resolutionPanel.append(resolutionAdvanced.element);
 
     const grainNode = currentGraph.find((node) => node.type === 'grain');
     const grainHeading = document.createElement('sp-heading');
@@ -457,21 +715,17 @@ export function createPanel(handlers) {
     randomize.textContent = 'Randomize grain';
     randomize.addEventListener('click', onRandomizeGrain);
     grainPanel.append(randomize);
+    const grainAdvanced = createAdvancedDisclosure('grainAdvanced');
+    appendMaskControls('grain', grainAdvanced.body, {
+      title: 'Effect area',
+      description: 'Limits where the Film Grain result is mixed, using the input exposure.',
+    });
+    grainPanel.append(grainAdvanced.element);
   }
 
   // ---- Advanced（折叠）----
-  const details = document.createElement('div');
-  const advToggle = document.createElement('sp-button');
-  advToggle.variant = 'secondary';
-  advToggle.textContent = STRINGS.advanced;
-  const advBody = document.createElement('div');
-  advBody.style.display = 'none';
-  advBody.style.flexDirection = 'column';
-  advBody.style.gap = '6px';
-  advToggle.addEventListener('click', () => {
-    advBody.style.display = advBody.style.display === 'none' ? 'flex' : 'none';
-  });
-  details.append(advToggle, advBody);
+  const halationAdvanced = createAdvancedDisclosure('halationAdvanced');
+  const advBody = halationAdvanced.body;
   const advGroup = document.createElement('div');
   advGroup.style.display = 'flex';
   advGroup.style.flexDirection = 'column';
@@ -544,11 +798,7 @@ export function createPanel(handlers) {
       ],
       onChange: (v) => {
         const slider = document.getElementById('sigma');
-        if (slider) {
-          slider.min = v === 'diagonal' ? 0.1 : 0.5;
-          slider.max = v === 'diagonal' ? 10 : 50;
-          slider.step = v === 'diagonal' ? 0.1 : 0.5;
-        }
+        setSliderRange(slider, v === 'diagonal' ? 0.1 : 0.5, v === 'diagonal' ? 10 : 50, v === 'diagonal' ? 0.1 : 0.5, currentParams.sigma);
         set({ sigmaUnits: v });
       },
     }),
@@ -564,17 +814,17 @@ export function createPanel(handlers) {
       onChange: (v) => {
         for (const id of ['threshold', 'backgroundThreshold']) {
           const slider = document.getElementById(id);
-          if (slider) {
-            slider.min = v === 'stops' ? -4 : 0;
-            slider.max = v === 'stops' ? 4 : 1;
-            slider.step = v === 'stops' ? 0.1 : 0.01;
-          }
+          setSliderRange(slider, v === 'stops' ? -4 : 0, v === 'stops' ? 4 : 1, v === 'stops' ? 0.1 : 0.01, currentParams[id]);
         }
         set({ thresholdUnits: v });
       },
     }),
   );
   advBody.append(advGroup);
+  if (currentBuild) appendMaskControls('halation', advBody, {
+    title: 'Halation output area',
+    description: 'Limits where the rendered Halation is mixed. Source extraction settings are unchanged.',
+  });
 
   // ---- Preview 图 ----
   const img = document.createElement('img');
@@ -628,7 +878,20 @@ export function createPanel(handlers) {
   const renderedLabel = document.createElement('span');
   renderedLabel.classList.add('fhal-compare-label');
   renderedLabel.textContent = 'PREVIEW';
-  previewPane.append(img, renderedLabel);
+  const previewLoading = document.createElement('div');
+  previewLoading.classList.add('fhal-preview-loading');
+  previewLoading.hidden = true;
+  previewLoading.setAttribute('role', 'status');
+  previewLoading.setAttribute('aria-live', 'polite');
+  previewLoading.setAttribute('aria-label', 'Rendering film preview');
+  const renderRing = document.createElement('span');
+  renderRing.classList.add('fhal-render-ring');
+  renderRing.setAttribute('aria-hidden', 'true');
+  const previewLoadingText = document.createElement('span');
+  previewLoadingText.classList.add('fhal-preview-loading-text');
+  previewLoadingText.textContent = 'Rendering';
+  previewLoading.append(renderRing, previewLoadingText);
+  previewPane.append(img, renderedLabel, previewLoading);
   const panHint = document.createElement('span');
   panHint.classList.add('fhal-pan-hint');
   panHint.textContent = 'Drag to inspect · Arrow keys move 64 px';
@@ -670,6 +933,21 @@ export function createPanel(handlers) {
     sourceImg.style.transform = 'translate(0px, 0px)';
     img.style.transform = 'translate(0px, 0px)';
     previewFrame.setAttribute('data-dragging', 'false');
+  };
+  const setPreviewLoading = (loading, options = {}) => {
+    const active = loading === true;
+    if (active && options.useSource !== false) {
+      const source = sourceImg.getAttribute('src');
+      if (source) {
+        img.src = source;
+        const sourceSize = nativeImageSizes.get(sourceImg);
+        if (sourceSize) nativeImageSizes.set(img, { ...sourceSize });
+        applyActualImageSize(img);
+      }
+    }
+    previewPane.setAttribute('data-loading', String(active));
+    previewPane.setAttribute('aria-busy', String(active));
+    previewLoading.hidden = !active;
   };
   // Photoshop UXP releases differ in their support for compound selectors and
   // automatic flex sizing. Keep the mode-defining dimensions inline as a host
@@ -825,10 +1103,27 @@ export function createPanel(handlers) {
   hint.style.opacity = '0.6';
   hint.style.fontSize = '12px';
 
-  halationPanel.append(basicGroup, details);
+  halationPanel.append(basicGroup, halationAdvanced.element);
   scrollArea.append(physicalGroup, halationPanel);
-  if (currentBuild) scrollArea.append(resolutionPanel, grainPanel);
+  if (currentBuild) scrollArea.append(defringePanel, bloomPanel, resolutionPanel, grainPanel);
   workspace.append(domainNav, scrollArea, previewStage);
+  // Keep the compile-time feature gate in this branch so esbuild removes the
+  // control and its strings completely from the legacy migration bundle.
+  if (__FILM_FEATURE_LEVEL__ === 'current' && currentBuild) {
+    const applyMemory = createSelect({
+      id: 'applyMemoryMode',
+      label: 'Apply memory',
+      value: applyMemoryMode,
+      options: [
+        { value: 'auto', label: 'Auto (safe)' },
+        { value: 'high', label: 'High (16 GB+)' },
+        { value: 'balanced', label: 'Balanced' },
+      ],
+      onChange: (value) => onApplyMemoryModeChange(value),
+    });
+    applyMemory.title = 'High avoids repeated spatial halos when UXP cannot report memory. Use only on systems with at least 16 GB RAM.';
+    footer.append(applyMemory);
+  }
   footer.append(actions, status, hint);
   panel.append(workspace, footer);
 
@@ -906,9 +1201,11 @@ export function createPanel(handlers) {
   const setControl = (id, value) => {
     const el = document.getElementById(id);
     if (!el) return;
-    if (id === 'profile' || id === 'blendMode' || id === 'diffusionMode' || id === 'extraction' || id === 'sigmaUnits' || id === 'thresholdUnits' || id === 'filmGauge' || id === 'filmResolutionProfile' || id === 'grainProfile' || id === 'grainMode') {
+    if (id.endsWith('MaskMode') || id.endsWith('MaskInvert') || id === 'profile' || id === 'blendMode' || id === 'diffusionMode' || id === 'extraction' || id === 'sigmaUnits' || id === 'thresholdUnits' || id === 'filmGauge' || id === 'filmResolutionProfile' || id === 'grainProfile' || id === 'grainMode') {
       // sp-dropdown：value 只读，用 selectedIndex
       setDropdownValue(el, value);
+    } else if (el.__filmSlider?.setParameterValue) {
+      el.__filmSlider.setParameterValue(value);
     } else {
       el.value = value;
     }
@@ -940,6 +1237,7 @@ export function createPanel(handlers) {
       return changed;
     },
     resetPreviewPanVisual,
+    setPreviewLoading,
     setPreviewPixelDimensions(target, width, height) {
       const previewImage = target === 'source' ? sourceImg : img;
       nativeImageSizes.set(previewImage, { width: Number(width), height: Number(height) });
@@ -947,11 +1245,18 @@ export function createPanel(handlers) {
     },
     chooseMigrationConflicts,
     updateGraph(nextGraph) {
-      currentGraph = nextGraph.map((node) => ({ ...node, params: { ...node.params } }));
+      currentGraph = nextGraph.map((node) => ({ ...node, params: { ...node.params }, mask: node.mask ? { ...node.mask } : createLumaMask() }));
+      const halationNode = currentGraph.find((node) => node.type === 'halation');
+      const defringeNode = currentGraph.find((node) => node.type === 'defringe');
+      const bloomNode = currentGraph.find((node) => node.type === 'bloom');
+      const hpNode = currentGraph.find((node) => node.type === 'highlightProtection');
       const resolutionNode = currentGraph.find((node) => node.type === 'filmResolution');
       const grainNode = currentGraph.find((node) => node.type === 'grain');
       const resolution = resolutionNode?.params;
       const grain = grainNode?.params;
+      graphToggles.defringe?.setEnabled(defringeNode?.enabled === true);
+      graphToggles.bloom?.setEnabled(bloomNode?.enabled === true);
+      graphToggles.highlightProtection?.setEnabled(hpNode?.enabled === true);
       graphToggles.filmResolution?.setEnabled(resolutionNode?.enabled === true);
       graphToggles.grain?.setEnabled(grainNode?.enabled === true);
       if (resolution) {
@@ -969,6 +1274,45 @@ export function createPanel(handlers) {
         setControl('grainRoughness', grain.roughness);
         setControl('grainChroma', grain.chroma);
       }
+      const updateMaskControls = (type, node) => {
+        const mask = node?.mask;
+        if (!mask) return;
+        setControl(`${type}MaskMode`, mask.mode);
+        setControl(`${type}MaskLowEV`, mask.lowEV);
+        setControl(`${type}MaskHighEV`, mask.highEV);
+        setControl(`${type}MaskSoftnessEV`, mask.softnessEV);
+        setControl(`${type}MaskInvert`, mask.invert ? 'true' : 'false');
+        maskRangeVisibility[type]?.(mask.mode);
+      };
+      if (defringeNode) {
+        const value = defringeNode.params;
+        setControl('defringeAmount', value.amount);
+        setControl('defringeRadiusPx', value.radiusPx);
+        setControl('defringeThreshold', value.threshold);
+        setControl('defringeSoftness', value.softness);
+        setControl('defringeEdgeSensitivity', value.edgeSensitivity);
+      }
+      if (bloomNode) {
+        const value = bloomNode.params;
+        setControl('bloomThresholdEV', value.thresholdEV);
+        setControl('bloomSoftnessEV', value.softnessEV);
+        setControl('bloomRadius', value.radius);
+        setControl('bloomAmplify', value.amplify);
+        setControl('bloomSaturation', value.saturation);
+        setControl('bloomSaveLights', value.saveLights);
+      }
+      if (hpNode) {
+        const value = hpNode.params;
+        setControl('highlightProtectionAmount', value.amount);
+        setControl('highlightProtectionThresholdEV', value.thresholdEV);
+        setControl('highlightProtectionSoftnessEV', value.softnessEV);
+      }
+      updateMaskControls('halation', halationNode);
+      updateMaskControls('defringe', defringeNode);
+      updateMaskControls('bloom', bloomNode);
+      updateMaskControls('highlightProtection', hpNode);
+      updateMaskControls('filmResolution', resolutionNode);
+      updateMaskControls('grain', grainNode);
     },
     updateFormat(nextFormat) {
       currentFormat = { ...nextFormat };
@@ -980,18 +1324,10 @@ export function createPanel(handlers) {
       currentParams = { ...p, redshift: [...p.redshift], sigmaRatio: [...p.sigmaRatio] };
       currentGraph = replaceGraphNodeParams(currentGraph, 'halation', currentParams);
       const sigmaSlider = document.getElementById('sigma');
-      if (sigmaSlider) {
-        sigmaSlider.min = p.sigmaUnits === 'diagonal' ? 0.1 : 0.5;
-        sigmaSlider.max = p.sigmaUnits === 'diagonal' ? 10 : 50;
-        sigmaSlider.step = p.sigmaUnits === 'diagonal' ? 0.1 : 0.5;
-      }
+      setSliderRange(sigmaSlider, p.sigmaUnits === 'diagonal' ? 0.1 : 0.5, p.sigmaUnits === 'diagonal' ? 10 : 50, p.sigmaUnits === 'diagonal' ? 0.1 : 0.5, p.sigma);
       for (const id of ['threshold', 'backgroundThreshold']) {
         const slider = document.getElementById(id);
-        if (slider) {
-          slider.min = p.thresholdUnits === 'stops' ? -4 : 0;
-          slider.max = p.thresholdUnits === 'stops' ? 4 : 1;
-          slider.step = p.thresholdUnits === 'stops' ? 0.1 : 0.01;
-        }
+        setSliderRange(slider, p.thresholdUnits === 'stops' ? -4 : 0, p.thresholdUnits === 'stops' ? 4 : 1, p.thresholdUnits === 'stops' ? 0.1 : 0.01, p[id]);
       }
       setControl('profile', p.profile);
       setControl('strength', p.strength);

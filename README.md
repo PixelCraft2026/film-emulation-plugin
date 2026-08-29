@@ -1,29 +1,41 @@
-# Film Emulation 1.6.0（Halation Engine 1.5.1）
+# Film Emulation 1.6.0（Halation Engine 1.5.1）· V1.7 EA-2 Candidate-Frozen
 
-Photoshop UXP 胶片模拟插件。1.6.0 在保留 V1.5.1 Halation 引擎的同时，加入按胶片格式/ISO 换算的 Film Resolution/MTF 与曝光相关 Film Grain。两种新效果使用 schema v2 graph、固定坐标 hash seed，并在 Preview/Apply 的线性色彩路径中执行。V1.5.1 引擎在非破坏性 V1.5 基础上修正夜景弱光源连成红雾、强光源核芯过软的问题，并增加面向无 Remjet 胶片观感的强光邻域扩张、红层长尾和亮度安全色密度合成。
+Photoshop UXP 胶片模拟插件。当前仓库以 1.6.0 作为 npm/package 与 manifest 身份，包含 V1.6 的 Film Resolution/MTF、曝光相关 Film Grain，以及 V1.7 candidate 的 Defringe、Bloom、Highlight Protection 和通用亮度遮罩。V1.7 图算法使用 schema v2 graph、固定坐标和线性色彩路径；新节点默认关闭，因此不会改变旧画面。V1.5.1 Halation 引擎继续负责乳剂散射、红层回射、强光源保护和 HDR 安全合成。
+
+V1.7 当前达到 `EA-2 candidate-frozen`：JS 参考路径、graph/transient 语义、物理 RenderPlan layout、scalar resident WASM 的细粒度 pixel-visits 调度/取消和独立 SIMD artifact 已接入，并覆盖 `Defringe → Halation → Bloom → Highlight Protection → Resolution → Grain` 的完整连续段。候选冻结只冻结 ABI、command、buffer layout、错误码和回退语义，不等于 1.7.0 发布；完整 Apply P95 ≤6s、Photoshop 23.3、物理 16GB 主机及 Photoshop 2024/2026 UDT 仍是公开发布阻断项。
 
 当前正式产品名、manifest 名和 Photoshop 面板标签统一为 `Film Emulation`，主面板 entrypoint 为 `filmEmulationPanel`，正式插件 ID 为 `com.cheukwing.filmemulation`。为避免 UXP 按插件 ID 隔离的旧参数丢失，仓库同时生成仍使用旧 ID `com.cheukwing.filmhalation` 和旧 entrypoint `filmHalationPanel` 的 V1.5.2 迁移桥接包。
 
 从使用旧 entrypoint 的早期 V1.6 构建升级时，Photoshop 可能把主面板视为一个新的工作区面板；如面板未自动出现，请从插件菜单重新打开并停靠。主插件 ID 和 PluginStorage 未改变，因此这不会重置文档参数。
 
-## V1.6 功能概览
+## V1.6 基础与 V1.7 候选功能概览
 
-V1.6 的可执行物理图固定为：
+当前 graph 的物理顺序固定为：
 
 ```text
-Halation → Film Resolution / MTF → Film Grain
+Defringe → Vignette（未来） → Halation → Bloom → Highlight Protection → Film Resolution / MTF → Film Grain → Damage（未来） → Overscan（未来）
 ```
 
-- 宽面板使用“领域导航—参数—预览”三栏布局；左侧 `Halation`、`Resolution`、`Grain` 按钮只切换参数窗口，不改变物理处理顺序。窄面板自动切换为上下布局。
-- 预览提供 Fit 与 100% 两种模式。Halation 默认 Fit；Resolution/Grain 默认 100%。100% 使用左右同步的 Source/Preview 原生像素裁片，默认定位图层中央，可拖拽或用方向键检查其他区域；高 DPI 补偿读取 Photoshop `DisplayConfiguration.scaleFactor`（不依赖部分 UXP 版本中恒为 1 的 `window.devicePixelRatio`），使原图像素与物理屏幕像素点对点显示。
+- 宽面板使用“领域导航—参数—预览”三栏布局；左侧只显示 `Halation`、`Defringe`、`Bloom`、`Resolution`、`Grain` 五个简洁名称，`Highlight Protection` 位于 Bloom 域。按钮只切换参数窗口，不改变物理处理顺序；内部阶段码不再重复显示。窄面板自动切换为上下布局。
+- 预览提供 Fit 与 100% 两种模式。Halation/Bloom 默认 Fit，Defringe/Resolution/Grain 默认 100%/Actual。100% 使用左右同步的 Source/Preview 原生像素裁片，默认定位图层中央，可拖拽或用方向键检查其他区域；高 DPI 补偿读取 Photoshop `DisplayConfiguration.scaleFactor`（不依赖部分 UXP 版本中恒为 1 的 `window.devicePixelRatio`），使原图像素与物理屏幕像素点对点显示。
 - Halation 的常用 `Strength`、`Sigma`、`Threshold` 位于 Basic；其余低频控制保留在 Advanced。
 - Film Resolution 和 Grain 共享 Super 8、Super 16、Super 35 4-perf、65mm 5-perf 四种格式以及 ISO 25–3200 的物理尺度。默认是 Super 35 4-perf、ISO 250、Negative material。
 - Film Resolution 提供非负权重的曝光相关 MTF 损失。`amount=0`、禁用节点或极小 sigma 保持逐浮点样本恒等；RGB 共用同一 PSF，alpha 原样保留。
 - Film Grain 使用按完整图像绝对坐标寻址的确定性 hash 场，不依赖 `Math.random()`、时间或分带顺序。相同 seed 在 Preview、Apply、重开、分带以及 JS/WASM 回退时保持同一排列。
-- 新文档默认包含三个节点，但只启用 Halation；Resolution 和 Grain 标题旁的开关默认关闭。关闭时节点被跳过，输出逐样本保持不变，同时保留已调参数；旧 schema 和 V1.5 迁移状态保持 Halation-only，不会自动注入 V1.6 效果。
-- schema 仍为 v2，只序列化 `{gauge, iso}`；`engineVersion=1.6.0` 与 Halation 算法常量 `ENGINE_VERSION=1.5.1` 分开管理。
+- 新文档默认包含六个节点（Defringe、Halation、Bloom、Highlight Protection、Resolution、Grain），只启用 Halation；其余标题旁的开关默认关闭。关闭时节点被跳过，输出逐样本保持不变，同时保留已调参数。读取 V1.6 graph 时，V1.7 节点和 `mask` 只在内存中补齐，用户保存后才写回；V1.5 迁移仍只恢复 Halation。
+- 每个当前节点都有固定键序的 `mask`。`none` 覆盖整帧；`luma` 按 canonical linear sRGB Rec.709 的 EV 带通、softness 和 invert 生成遮罩。Defringe/Bloom/Highlight Protection 是 V1.7 的 opt-in 节点；非 `none` mask 同样使 graph minimum engine version 为 1.7.0。
+- schema 仍为 v2、`plugin="FilmHalation"`；graph 语义版本为 `1.7.0`，Halation 算法常量 `ENGINE_VERSION=1.5.1`，npm/package/manifest 版本仍为 `1.6.0`，三者分开管理。
 
-详细操作和参数说明见 [Film Emulation V1.6.0 用户手册](docs/FilmHalation_V1.5.1_User_Manual.md)。为保持现有公开文档路径兼容，手册文件名暂时沿用 V1.5.1，文档标题和内容已经更新为 V1.6.0。
+详细操作和参数说明见 [Film Emulation V1.7 candidate 用户手册](docs/FilmHalation_V1.5.1_User_Manual.md)。为保持现有公开文档路径兼容，手册文件名暂时沿用 V1.5.1；文档内容已按当前 1.6.0 package / V1.7 candidate 更新。
+
+## V1.7 候选效果
+
+- **Defringe**：在线性 YCoCg 中只修正 Cg，针对局部紫/绿边缘色差；Y、Co 和 alpha 保持不变。`Amount=0` 或 `Edge sensitivity=0` 是严格恒等。
+- **Bloom**：独立提取高光，以 `0.62 / 0.28 / 0.10` 的 core / mid / tail 三瓣 PSF 生成正向 HDR 光能。半径按完整图像对角线和 preview scale 换算；Fast 与 Quality 保持相同瓣、尺度和能量，只改变数值核。`Save lights` 保护源高光。
+- **Highlight Protection**：只修改 Bloom 的最终正贡献，不会重复提取或删除 Bloom 节点。它消费最近的前置 `bloomContribution`；没有 Bloom transient 时保持输入不变并给出 `missingBloomContribution` 提示。
+- **通用亮度遮罩**：所有当前节点共享 `mode / lowEV / highEV / softnessEV / invert`。加性节点缩放贡献，替换节点混合输入与效果；遮罩不改变 alpha，也不为方便而裁剪 HDR。
+
+V1.7 的 Preview 顺序是 Defringe（显示代理与效果代理同时处理）→ Halation → Bloom/Highlight Protection → Resolution → Grain。默认 Defringe 使用 100%/Actual 检查，Bloom 使用 Fit；其他领域沿用各自的 Fit/100% 习惯。
 
 ## 从旧插件迁移
 
@@ -34,6 +46,8 @@ Halation → Film Resolution / MTF → Film Grain
 5. 如新插件已有同一文档的参数，默认保留新状态；只有勾选的冲突项才会被旧状态覆盖。
 
 迁移包使用 schema v2 逐项校验、规范化 UTF-8 CRC32、10MB/10000 文档限制及导入回执。损坏文件会被拒绝；单个无效文档不会阻止其余有效文档；旧插件目录和导出文件不会被删除。导入的图层绑定仍须通过现有严格验证，存在歧义时应选择原始像素层并点击 **Rebind Source**。
+
+迁移桥身份保持 `com.cheukwing.filmhalation` / `filmHalationPanel` / 1.5.2 / `export`，主包身份保持 `com.cheukwing.filmemulation` / `filmEmulationPanel` / 1.6.0 / `import`。迁移桥不显示 V1.7 控件，也不会把 V1.7 参数写入旧状态；当前两个 CCX 构建都会带上 scalar `film_core.wasm` 与独立 `film_core_simd.wasm`。`Auto` 只有在 SIMD 固定向量对拍和 ≥10% 协议加速通过后才选择 SIMD，否则保持 scalar；`wasm-resident` 强制模式仍是 scalar 别名。
 
 ## Halation 1.5.1 核心行为
 
@@ -54,12 +68,12 @@ Halation → Film Resolution / MTF → Film Grain
 - Screen 使用 HDR 安全增益，输入大于 1 时不会被反向变暗。
 - 8/16 位写回支持确定性量化抖动和可调胶片肩部；32 位 HDR 保留浮点结果。
 - 默认启用多尺度 PSF；相同尺度的宽瓣共享一次降采样/上采样。Rust/WebAssembly 加速低层高斯和 Strong Source Expansion 最大滤波，失败自动回退纯 JavaScript。
-- Apply 在渲染前按位深、像素数和可见设备内存执行预检：安全时使用 High Memory 单带路径，超预算时使用 Balanced 重叠分带；控制台输出读取、算法、量化和写回计时。
+- Apply 在渲染前按位深、像素数和可见设备内存执行预检：安全时使用 High Memory 单带路径，超预算时使用 Balanced 重叠分带；控制台输出读取、算法、量化和写回计时。底栏的 `Apply memory` 默认为 `Auto (safe)`；若 UXP 无法报告内存而机器确有至少 16GB RAM，可显式选择 `High (16 GB+)`，避免大半径 Halation/Bloom 在多个重叠 band 中重复计算。低内存或不确定时保持 Auto/Balanced。
 
 ## 非破坏性工作流
 
 1. 选择原始像素图层。
-2. 用左侧领域按钮依次调整 Halation、Resolution 和 Grain。面板使用 1024px Photoshop ICC 底图和缓存的 2048px 原生工作空间效果代理。Threshold/Hue Response 先在高分辨率代理上提取，再把光源场降到 1024px 扩散，避免小灯在提取前被缩图抹除。
+2. 用左侧领域按钮依次调整 Defringe、Halation、Bloom、Resolution 和 Grain；Highlight Protection 位于 Bloom 域。面板使用 1024px Photoshop ICC 底图和缓存的 2048px 原生工作空间效果代理。Defringe 与高光提取先在对应代理上执行，避免小灯在缩图前后产生不一致。
 3. 点击 Apply。插件创建独立空白像素效果层，从绑定源层完成整图渲染后只向效果层写入。
 4. 后续调参始终重新读取绑定源层并更新同一副本，不会在已处理结果上叠加。
 
@@ -70,22 +84,26 @@ Halation → Film Resolution / MTF → Film Grain
 ## Preview、Rebind 与性能
 
 - 首次载入或绑定新源时，面板先显示色彩管理后的 1024px 源图，再异步替换为完整 Film graph 结果，避免效果计算期间出现黑色空窗。
-- Fit 模式继续使用 1024px 整图和 2048px Halation 效果代理，并采用速度优先的 Fast 预览；100% 模式只读取当前可见原生裁片及 graph 所需支持边界，不读取或渲染整张大图。发布前再裁回视窗尺寸，并按 Photoshop 显示器 `scaleFactor` 校正 CSS 尺寸，确保一个源图像素对应一个物理显示像素。
+- Fit 模式继续使用 1024px 整图和 graph 所需的 2048px 效果代理，并采用速度优先的 Fast 预览；100% 模式只读取当前可见原生裁片及 Defringe/Halation/Bloom 支持边界，不读取或渲染整张大图。发布前再裁回视窗尺寸，并按 Photoshop 显示器 `scaleFactor` 校正 CSS 尺寸，确保一个源图像素对应一个物理显示像素。
 - 100% 模式的 Source 与 Preview 使用完全相同的文档坐标。Grain 继续以完整图像绝对坐标寻址，拖动、重新打开和 Apply 不改变颗粒相位。
-- 100% 模式的 Source 与 Preview 共用 Photoshop ICC 转换后的 sRGB 显示底板，避免不同位深的原生 profile 标签造成明暗偏移；Halation 高光提取仍使用原生 profile 数据，Resolution/Grain 使用 Quality/Analogue 路径。三个模块只提交各自节点的参数，调整 Grain 或 Resolution 不会恢复或改写 Halation 设置。
+- 100% 模式的 Source 与 Preview 共用 Photoshop ICC 转换后的 sRGB 显示底板，避免不同位深的原生 profile 标签造成明暗偏移；Defringe/Halation/Bloom 高光处理仍使用原生 profile 数据，Resolution/Grain 使用 Quality/Analogue 路径。五个 UI 领域只提交各自节点的参数，调整 Grain 或 Resolution 不会恢复或改写其他效果。
 - 预览 PNG 优先使用 Blob URL，并在完全不透明时输出 RGB PNG，避免大型 Base64 字符串和不必要的 alpha 通道；宿主不支持时自动回退 Data URL。
 - 同一源图层且 Photoshop 历史状态未改变时，重复 Rebind 复用源像素和效果缓存，不重复读取或渲染。
-- Halation 的提取、扩散、合成，Resolution 的 Gaussian 结果，以及 Grain 的单位方差场分别缓存。快速拖动会取消或丢弃过期 generation，旧结果不能覆盖新参数。
+- Defringe、Halation 的提取/扩散/合成、Bloom 的高光与 transient、Resolution 的 Gaussian 结果，以及 Grain 的单位方差场分别缓存；缓存键还绑定 mask、profile、graph hash、坐标、generation 与 backend ABI。快速拖动会取消或丢弃过期 generation，旧结果不能覆盖新参数。
 - 状态栏显示 `Panel preview total (read ..., render ...)`：`read` 反映 Photoshop Imaging API/ICC 代理读取，`render` 反映算法和预览编码，便于定位真实瓶颈。
 - Apply 在创建效果层前完成内存预检；所有 band 成功后才执行一次最终 `putPixels`。任何失败路径都不会把源层作为写入目标。
 
-最新本机 Node/WASM 协议（6000×4000、16 位、16GB 档、2 次预热 + 10 次正式测量）记录在 [`tests/performance-data.json`](tests/performance-data.json)：V1.6 默认 graph P95 为 24.62s，1024px graph Preview P95 为 562.4ms。该结果已明显低于早期约 51.5s 的完整 graph 记录，但仍未达到路线目标，且不能替代 Photoshop 实机计时；性能优化继续保留为发布前工作项。
+当前 scalar resident 的同机 Node 协议使用 6000×4000、16 位、Quality、Balanced、2 次预热 + 10 次正式测量：shipping-default Halation graph P50/P95 为 9.958/10.201s（2 个 band）；完整 V1.7 graph P50/P95 为 165.475/179.487s、峰值 RSS 约 2.90GB（16 个 band），每个 band 一次 RGB/alpha 上传和一次 RGB 下载，完整 resident 段没有 JS fallback。缓存 1024px Preview P50/P95 为 162.1/179.4ms；未缓存的 1024px Preview 本轮为 343.9/388.7ms，P95 略高于 ≤350ms 目标。完整 Apply 仍未通过 P95 ≤6s 门禁。完整报告见 [`tests/performance-data.json`](tests/performance-data.json)。以上均不是 Photoshop 实机计时。
 
 ## 参数和状态
 
+- Defringe：标题旁的开关默认关闭；提供 `Amount`、`Radius`、色度阈值/柔化和 `Edge sensitivity`。只修正局部紫/绿边缘，不改 Y、Co 或 alpha。
+- Bloom：标题旁的开关默认关闭；提供高光 `Threshold/Softness`、按画面对角线的 `Radius`、`Amplify`、`Saturation` 和 `Save lights`。其正向贡献单独传给 Highlight Protection。
+- Highlight Protection：位于 Bloom 域，默认关闭；只衰减 Bloom contribution 的亮部，不改变源图或其他节点。没有前置 Bloom 时是安全 no-op，并显示缺失提示。
 - Film Resolution：标题旁的开关默认关闭；开启后提供 `Material`、`Resolution loss`、`MTF response`、`Shadow loss`、`Highlight loss`。Amount 0–1 从源图混合到目标 MTF，1–1.5 继续过渡到 2.2σ 的宽响应，不产生锐化负瓣。
 - Film Grain：标题旁的开关默认关闭；开启后提供 `Material`、`Correlation`、`Amount`、`Size`、`Roughness`、`Chroma` 与 `Randomize grain`。Analogue 使用 fine/medium/coarse 三尺度，Fast 合并 fine/medium 并保留 coarse。
 - Film format 与 ISO 是 Resolution/Grain 的共享参数；较小格式和较高 ISO 会得到更明显的颗粒尺度和分辨率损失。
+- 所有当前节点仍支持共享 Luma mask，但控件默认收进各模块的 `Advanced`。UI 使用面向结果的命名：普通节点为 `Effect area`，Halation/Bloom 为 `Halation output area` / `Bloom output area`，Highlight Protection 为 `Protection area`。`Entire image` 等于全覆盖；选择 `Exposure range` 后才显示上下 EV 边界、边缘柔化和范围内/外选项。遮罩只缩放该节点的贡献/替换混合，不改变 alpha；Bloom output area 不改变高光源提取。
 - Source Softness、Background Softness 与 PSF Smoothness 已分别建模。
 - Source Impact 控制曝光响应指数；Strong Source/Strong Core 控制重建高光坐标上的强光分类和核芯密度；Global Source 独立限制全局扩散源。
 - Halation Amplify 控制 PSF 前的返回能量；Strong Source Expansion 控制强光对邻近光学 glow 的招募范围；Red Tail 控制红层肩部/长尾分配。
@@ -98,7 +116,7 @@ Halation → Film Resolution / MTF → Film Grain
 - schema v2 使用有序 `graph`、格式档案和严格 source/target layer bindings。
 - v1 `FilmLab/effects.halation` 文档会迁移成单个 halation 节点；比当前更新的 schema 会被拒绝。
 - 参数保存在 UXP PluginStorage。已保存文档按规范化路径精确匹配；未保存文档额外使用 Photoshop document id，避免 Untitled 冲突。
-- 当前包由 `__FILM_FEATURE_LEVEL__` 门控：正式包可创建、保存并执行 V1.6 graph；V1.5.2 迁移桥只提供 Halation 与迁移导出，不暴露或写入 Resolution/Grain。
+- 当前包由 `__FILM_FEATURE_LEVEL__` 门控：主包可创建、保存并执行 V1.6 graph 与 V1.7 candidate；受支持的完整非零 graph 在 `Auto` 下选择 scalar resident，失败时丢弃整带结果、从保留的 canonical 输入完整 JS 重算，并在本请求中禁用后续 resident 尝试。V1.5.2 迁移桥只提供 Halation 与迁移导出，不暴露或写入 V1.6/V1.7 效果。
 
 ## 构建与验证
 
@@ -119,22 +137,25 @@ npm run package:migration
 
 `npm run package` 生成新 ID 的 `dist/FilmEmulation.ccx`。`npm run package:migration` 一次生成 `dist/FilmHalation-MigrationBridge.ccx` 和 `dist/FilmEmulation.ccx`，并保证工作区中的 `dist/main.js` 最终对应新插件导入版。
 
-`build:wasm` 需要开发机安装 Rust stable 和 `wasm32-unknown-unknown` target；生成的 `assets/film_core.wasm` 会自动复制到 UXP bundle 和 CCX。插件用户不需要 Rust。
+`build:wasm` 需要开发机安装 Rust stable 和 `wasm32-unknown-unknown` target；它会生成 scalar `assets/film_core.wasm` 和独立 `assets/film_core_simd.wasm`，并自动复制到 UXP bundle 和 CCX。插件用户不需要 Rust。SIMD 工件只在 capability、ABI/layout hash 和固定向量自检通过且 QA 测得 ≥10% 加速后由 `Auto` 选择。
+
+`npm run qa:matrix -- --out=tests/qa-matrix-report.json` 运行不含像素的 EA-2 Node 代理矩阵（36 个深度/profile/alpha 组合，逐行覆盖 JS/primitive/scalar，并附 16-bit sRGB forced-SIMD anchor、取消、故障回退和文档切换探针），输出明确列出 Photoshop 2024/2026 UDT、23.3 和物理 16GB 的待测缺口。该 JSON 是本地诊断产物，不属于发布包。
+
+最近一次候选验证中，`npm run build:wasm`、`npm run typecheck`、`npm test`、`npm run validate`、`npm run build`、`npm run bench`、`npm run package` 和 `npm run package:migration` 均通过执行；`git diff --check` 通过。Benchmark 的缓存 Preview 达标，完整 Apply 性能门禁失败；Node 协议不能替代下方的 Photoshop 实机门禁。
 
 ## Photoshop 支持
 
 - Photoshop 最低版本：23.3。
 - RGB 文档：8/16/32 位。
 - 已实现 sRGB、Display P3、Adobe RGB、ProPhoto RGB 和 Rec.2020 的 TRC/primaries 处理；未知或未标记工作空间回退 sRGB 并提示。
-- 运行时写入和性能仍必须按真实 Photoshop 矩阵验收；Node 测试不能替代 Imaging API、modal scope、色彩 profile、16/32 位写回、透明边缘、文档切换与 Apply 实机验证。在该矩阵完成前不标记 release-ready。
+- V1.7 的 8/16/32 位、四种 profile、透明边缘、文档切换、取消、失败回滚和 PF-6/EA-2 性能矩阵仍待真实 Photoshop/UDT 验收；Node 测试不能替代 Imaging API、modal scope、色彩 profile、16/32 位写回与 Apply 实机验证。在该矩阵和性能门禁完成前不标记 release-ready。
 
-## 后续路线
+## 路线状态
 
-- V1.6：曝光/密度相关 Film Grain 与 Film Resolution/MTF（已实现）。
-- V1.7：独立 Bloom、Defringe、亮部保护。
-- V1.8：Film Damage 与 Vignette。
-- V1.9：Overscan 与 Film Gate。
-- V2.0：统一 FilmLab 效果图、格式档案和物理效果预设。
+- V1.6：曝光/密度相关 Film Grain 与 Film Resolution/MTF（已实现，package/manifest 仍为 1.6.0）。
+- V1.7 EA-2 candidate-frozen：Defringe、Bloom、Highlight Protection、通用 luma mask、transient graph、RenderPlan 的真实 physical layout/liveness alias、≤262,144 pixel-visits 的 resident 协作调度、generation-safe 取消、scalar/SIMD capability 与 QA 回退已冻结。Photoshop 2024/2026 UDT、23.3、物理 16GB 和 ≤6s 绝对性能门禁未完成，不能标记 release-ready。
+- V1.8 以后：Vignette、Film Damage、Overscan 与 Film Gate 尚未实现；本轮不会静默接受这些未来节点。
+- V2.0：统一 FilmLab 效果图、格式档案和物理效果预设，尚未开始。
 
 颜色预设在插件外先应用。插件内固定物理顺序为：
 

@@ -10,7 +10,14 @@ export async function loadBundledWasm() {
     const dist = await pluginFolder.getEntry('dist');
     const wasm = await dist.getEntry('film_core.wasm');
     const bytes = await wasm.read({ format: formats.binary });
-    return installWasmModule(bytes);
+    let simdBytes = null;
+    try {
+      const simd = await dist.getEntry('film_core_simd.wasm');
+      simdBytes = await simd.read({ format: formats.binary });
+    } catch {
+      // SIMD is an optional artifact; scalar remains the compatibility path.
+    }
+    return installWasmModule(bytes, simdBytes);
   } catch (error) {
     console.warn('[film-emulation] WASM unavailable; using JS fallback: ' + (error && (error.message || error)));
     return { ...getWasmBackendStatus(), error: error && (error.message || String(error)) };

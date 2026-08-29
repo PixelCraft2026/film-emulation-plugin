@@ -4,8 +4,18 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { processHalation, createHalationParams, createHalationPreset, getTRC } from '../../src/core/index.js';
-import { processTiledWithTrc } from '../../src/io/tileRender.js';
+import {
+  processHalation,
+  createHalationParams,
+  createHalationPreset,
+  createBloomParams,
+  createDefringeParams,
+  createDefaultEffectGraph,
+  createFilmRenderPlan,
+  createHighlightProtectionParams,
+  getTRC,
+} from '../../src/core/index.js';
+import { processTiledWithTrc, processTiledFilmWithTrc } from '../../src/io/tileRender.js';
 import { estimateHighMemoryBytes, streamGeometry } from '../../src/io/streamGeometry.js';
 import { decodeToLinear, encodeFromLinear, resolveDocumentTRC } from '../../src/io/colorPipeline.js';
 
@@ -191,4 +201,43 @@ test('#2 bottom edge: non-multiple height (H mod scale ≠ 0) keeps banded/full 
   console.log(`INFO bottom-edge H=724 L2=${l2.toExponential(2)} max=${maxDiff.toExponential(2)}`);
   // vvGauss 带内瞬态 ~2e-6；若末格相位错误会出现 ~1e-3 的底部条带误差
   assert.ok(l2 < 1e-5, `non-multiple height L2=${l2.toExponential(2)}`);
+});
+
+test('V1.7 Defringe → Bloom → HP is seam-free across 1/8 phase and a narrow bottom band', () => {
+  const width = 73;
+  const height = 277;
+  const input = buildDisplayInput(width, height);
+  input.alpha = new Float32Array(width * height).fill(1);
+  for (let y = 0; y < height; y += 47) {
+    const p = (y * width + ((y * 13) % width)) * 3;
+    input.rgb[p] = input.rgb[p + 1] = input.rgb[p + 2] = 4;
+  }
+  const graph = createDefaultEffectGraph(createHalationParams({ strength: 0 }), 17).map((node) => {
+    if (node.type === 'defringe') return { ...node, enabled: true, params: createDefringeParams({ amount: 0.9, radiusPx: 2 }) };
+    if (node.type === 'bloom') return { ...node, enabled: true, params: createBloomParams({ thresholdEV: -1, radius: 1.2, amplify: 0.8, saveLights: 0.2 }) };
+    if (node.type === 'highlightProtection') return { ...node, enabled: true, params: createHighlightProtectionParams({ amount: 0.7, thresholdEV: 1 }) };
+    return node;
+  });
+  const document = { graph };
+  const plan = createFilmRenderPlan({ width, height, fullWidth: width, fullHeight: height, graph, quality: 'quality', memoryMode: 'balanced' });
+  assert.equal(plan.phasePeriod, 8);
+  assert.equal(plan.overlap % 8, 0);
+  const linear = getTRC('linear');
+  const full = processTiledFilmWithTrc(input, document, linear, {
+    tileThreshold: Number.MAX_SAFE_INTEGER,
+    quality: 'quality',
+    renderPlan: plan,
+  });
+  const banded = processTiledFilmWithTrc(input, document, linear, {
+    tileThreshold: 1,
+    bandHeight: 64,
+    overlapPx: plan.overlap,
+    quality: 'quality',
+    renderPlan: plan,
+  });
+  const { l2, maxDiff } = l2AndMax(full.rgb, banded.rgb);
+  console.log(`INFO V1.7 phase-8 banded L2=${l2.toExponential(2)} max=${maxDiff.toExponential(2)} overlap=${plan.overlap}`);
+  assert.ok(l2 <= 1e-4, `V1.7 banded RMS=${l2.toExponential(2)}`);
+  assert.ok(maxDiff <= 1e-3, `V1.7 banded max=${maxDiff.toExponential(2)}`);
+  assert.deepEqual(banded.alpha, input.alpha);
 });

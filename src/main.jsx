@@ -19,6 +19,7 @@ import { createHalationParams, createHalationPreset, createDefaultEffectGraph, c
 import { renderDocumentToLayer, renderFilmDocumentToLayer, streamGeometry, streamFilmGeometry } from './io/streamRender.js';
 import { resolveDocumentTRC, resolvePixelTRC, standardProfileName } from './io/colorPipeline.js';
 import { readDocumentPixels } from './io/imageAccess.js';
+import { createHeavyBlurPlaceholder } from './io/previewPlaceholder.js';
 import { documentComponentSize } from './io/bitDepth.js';
 import {
   isEffectLayerName,
@@ -71,6 +72,10 @@ let documentState = {
   format: { gauge: '35mm', iso: 250 },
   bindings: { sourceLayer: null, targetLayer: null },
 };
+// Session-scoped host policy, deliberately not serialized into document
+// state. Auto remains conservative; High is an explicit 16 GiB+ opt-in for
+// UXP builds that do not expose navigator.deviceMemory.
+let applyMemoryMode = 'auto';
 
 function randomSeed(fingerprint = '') {
   const values = new Uint32Array(1);
@@ -119,6 +124,8 @@ try {
     onPreviewModeChange,
     onPreviewPan,
     onPreviewViewportChange,
+    applyMemoryMode,
+    onApplyMemoryModeChange: (mode) => { applyMemoryMode = mode; },
     onApply: runApply,
     onRebind: runRebind,
     migrationRole: MIGRATION_ROLE,
@@ -187,6 +194,7 @@ function releasePreviewObjectUrl(target = 'preview') {
 }
 
 function clearPreviewImage() {
+  panel?.__handles?.setPreviewLoading?.(false);
   img.removeAttribute('src');
   sourceImg.removeAttribute('src');
   releasePreviewObjectUrl('preview');
@@ -227,27 +235,27 @@ function publishPreviewImage(result, requestId, target = 'preview') {
   return 'data';
 }
 
-function immediateSourcePreviewPng(source) {
+function immediateSourcePreviewPixels(source) {
   const scale = computePreviewScale(source.width, source.height, PREVIEW_MAX_EDGE);
-  if (scale >= 1) return floatRgbToPng(source.width, source.height, source.rgb, source.alpha);
+  if (scale >= 1) return { width: source.width, height: source.height, rgb: source.rgb, alpha: source.alpha };
   const width = Math.max(1, Math.round(source.width * scale));
   const height = Math.max(1, Math.round(source.height * scale));
-  return floatRgbToPng(
+  return {
     width,
     height,
-    downsampleBox(source.rgb, source.width, source.height, width, height),
-    source.alpha ? downsamplePlane(source.alpha, source.width, source.height, width, height) : undefined,
-  );
+    rgb: downsampleBox(source.rgb, source.width, source.height, width, height),
+    alpha: source.alpha ? downsamplePlane(source.alpha, source.width, source.height, width, height) : undefined,
+  };
 }
 
-function inspectionSourcePreviewPng(source) {
+function inspectionSourcePreviewPixels(source) {
   const crop = source.outputCrop ?? { x: 0, y: 0, width: source.display.width, height: source.display.height };
-  return floatRgbToPng(
-    crop.width,
-    crop.height,
-    cropInterleavedRgb(source.display.rgb, source.display.width, source.display.height, crop),
-    cropPreviewPlane(source.display.alpha, source.display.width, source.display.height, crop),
-  );
+  return {
+    width: crop.width,
+    height: crop.height,
+    rgb: cropInterleavedRgb(source.display.rgb, source.display.width, source.display.height, crop),
+    alpha: cropPreviewPlane(source.display.alpha, source.display.width, source.display.height, crop),
+  };
 }
 
 function createPreviewAbortController() {
@@ -296,9 +304,10 @@ function onParamsChange(partial) {
 
 function onGraphChange(nextGraph, changedType) {
   if (!IS_CURRENT_BUILD) return;
+  const graphDomain = String(changedType || '').split(':')[0];
   filmDocument = {
     ...filmDocument,
-    graph: mergeIndependentGraphChange(filmDocument.graph, nextGraph, changedType),
+    graph: mergeIndependentGraphChange(filmDocument.graph, nextGraph, graphDomain),
   };
   schedulePreview();
 }
@@ -355,12 +364,18 @@ function onPreviewViewportChange(viewport) {
 let panelTimer = null;
 let previewRequestId = 0;
 let previewAbortController = null;
+let previewLoadingPlaceholder = null;
 function schedulePreview() {
   clearTimeout(panelTimer);
   previewAbortController?.abort();
   const controller = createPreviewAbortController();
   previewAbortController = controller;
   const requestId = ++previewRequestId;
+  // UI feedback is intentionally outside the serialized Photoshop task lane:
+  // parameter changes, domain switches and pan gestures can immediately show
+  // the source placeholder even while an older physical render is unwinding.
+  panel?.__handles?.setPreviewLoading?.(true, { useSource: false });
+  if (previewLoadingPlaceholder) publishPreviewImage(previewLoadingPlaceholder, requestId, 'preview');
   panelTimer = setTimeout(
     () => enqueueTask(() => (requestId === previewRequestId && !controller.signal.aborted
       ? runPanelPreview(requestId, controller.signal)
@@ -376,6 +391,7 @@ const previewSourceCaches = new Map();
 function clearPreviewCaches() {
   previewCache = null;
   previewSourceCache = null;
+  previewLoadingPlaceholder = null;
   previewSourceCaches.clear();
 }
 
@@ -542,7 +558,10 @@ async function boundPreviewSources(doc, view) {
 
 async function runPanelPreview(requestId = null, signal = null) {
   const doc = currentDoc();
-  if (!doc) return;
+  if (!doc) {
+    if (requestId === null || requestId === previewRequestId) panel?.__handles?.setPreviewLoading?.(false);
+    return;
+  }
   if (signal?.aborted || (requestId !== null && requestId !== previewRequestId)) return;
   const view = panel?.__handles?.getPreviewView?.() ?? { mode: previewMode, width: 512, height: 512 };
   previewMode = view.mode === 'actual' ? 'actual' : 'fit';
@@ -559,27 +578,38 @@ async function runPanelPreview(requestId = null, signal = null) {
     const readMs = Date.now() - readStarted;
     if (signal?.aborted || (requestId !== null && requestId !== previewRequestId)) return;
     const sourceChanged = !previewCache || previewCache.sourceKey !== sources.cacheKey;
-    if (sourceChanged && (supportsPreviewObjectUrl() || sources.mode === 'actual')) {
+    if (sourceChanged) {
       panel?.__handles?.resetPreviewPanVisual?.();
-      const baseResult = sources.mode === 'actual'
-        ? {
-          png: inspectionSourcePreviewPng(sources),
-          dataUrl: null,
-          width: sources.outputCrop.width,
-          height: sources.outputCrop.height,
-        }
-        : {
-          png: immediateSourcePreviewPng(sources.display),
-          dataUrl: null,
-          width: sources.display.width,
-          height: sources.display.height,
-        };
-      if (sources.mode === 'actual') publishPreviewImage(baseResult, requestId ?? previewRequestId, 'source');
-      publishPreviewImage(baseResult, requestId ?? previewRequestId, 'preview');
+      const sourcePixels = sources.mode === 'actual'
+        ? inspectionSourcePreviewPixels(sources)
+        : immediateSourcePreviewPixels(sources.display);
+      const baseResult = {
+        png: floatRgbToPng(sourcePixels.width, sourcePixels.height, sourcePixels.rgb, sourcePixels.alpha),
+        dataUrl: null,
+        width: sourcePixels.width,
+        height: sourcePixels.height,
+      };
+      // Source is published and painted independently before placeholder or
+      // physical-effect work starts. It always remains the clear ICC-managed
+      // image, including after domain switches and 100% pan reads.
+      publishPreviewImage(baseResult, requestId ?? previewRequestId, 'source');
       status.textContent = STRINGS.statusPreviewRefining;
-      // Let UXP paint the color-managed source before the heavier physical
-      // effect proxy is processed on the main thread.
       await new Promise((resolve) => setTimeout(resolve, 0));
+      if (signal?.aborted || (requestId !== null && requestId !== previewRequestId)) return;
+      const blurred = createHeavyBlurPlaceholder(sourcePixels, { maxEdge: 40, sigma: 2.4 });
+      previewLoadingPlaceholder = {
+        png: floatRgbToPng(blurred.width, blurred.height, blurred.rgb, blurred.alpha),
+        dataUrl: null,
+        width: blurred.width,
+        height: blurred.height,
+        layoutWidth: blurred.layoutWidth,
+        layoutHeight: blurred.layoutHeight,
+      };
+      publishPreviewImage(previewLoadingPlaceholder, requestId ?? previewRequestId, 'preview');
+      panel?.__handles?.setPreviewLoading?.(true, { useSource: false });
+      // Give UXP a full paint opportunity before entering the first heavy
+      // synchronous algorithm stage.
+      await new Promise((resolve) => setTimeout(resolve, 16));
       if (signal?.aborted || (requestId !== null && requestId !== previewRequestId)) return;
     }
     const trc = {
@@ -594,6 +624,7 @@ async function runPanelPreview(requestId = null, signal = null) {
     if (signal?.aborted || (requestId !== null && requestId !== previewRequestId)) return;
     previewCache = result.cache;
     const transport = publishPreviewImage(result, requestId ?? previewRequestId);
+    panel?.__handles?.setPreviewLoading?.(false);
     const totalMs = Date.now() - totalStarted;
     status.textContent = STRINGS.statusPreviewedDetailed(totalMs, readMs, result.ms);
     console.log('[film-emulation] Panel preview timing', {
@@ -624,6 +655,7 @@ async function runPanelPreview(requestId = null, signal = null) {
     });
   } catch (error) {
     if (signal?.aborted || (requestId !== null && requestId !== previewRequestId)) return;
+    panel?.__handles?.setPreviewLoading?.(false);
     status.textContent = STRINGS.statusFailed(error.message || error);
   }
 }
@@ -638,6 +670,7 @@ async function runApply() {
   applyBtn.disabled = true;
   clearTimeout(panelTimer);
   previewAbortController?.abort();
+  panel?.__handles?.setPreviewLoading?.(false);
   try {
     const result = await enqueueTask(() => ps.core.executeAsModal(
       async () => renderToSafeCopy(doc, filmDocument, { allowCreate: true }),
@@ -688,6 +721,7 @@ async function runRebind() {
   };
   previewRequestId++;
   previewAbortController?.abort();
+  panel?.__handles?.setPreviewLoading?.(false);
   if (!cachedSourceIsSelected) {
     clearPreviewCaches();
     inspectionState = { ...inspectionState, centerX: null, centerY: null, pendingX: 0, pendingY: 0 };
@@ -772,19 +806,20 @@ async function renderToSafeCopy(doc, renderDocument, options) {
   }
   const sourceBinding = createLayerBinding(sourceLayer);
   const sourceBounds = layerPixelBounds(sourceLayer) ?? { left: 0, top: 0, right: doc.width, bottom: doc.height };
+  const deviceMemoryGB = Number(globalThis.navigator?.deviceMemory ?? 0);
   try {
     const preflight = IS_CURRENT_BUILD
       ? streamFilmGeometry(sourceBounds.right - sourceBounds.left, sourceBounds.bottom - sourceBounds.top, renderDocument, {
           componentSize,
           fullWidth: Number(doc.width),
           fullHeight: Number(doc.height),
-          deviceMemoryGB: Number(globalThis.navigator?.deviceMemory ?? 0),
-          memoryMode: 'auto',
+          deviceMemoryGB,
+          memoryMode: applyMemoryMode,
         })
       : streamGeometry(sourceBounds.right - sourceBounds.left, sourceBounds.bottom - sourceBounds.top, renderDocument.graph.find((node) => node.type === 'halation').params, {
           componentSize,
-          deviceMemoryGB: Number(globalThis.navigator?.deviceMemory ?? 0),
-          memoryMode: 'auto',
+          deviceMemoryGB,
+          memoryMode: applyMemoryMode,
         });
     if (preflight.hardBudgetExceeded) return { ok: false, error: `Film render preflight exceeds the ${Math.round(preflight.hardBudgetBytes / 1024 ** 3)} GiB hard memory budget; no effect layer was created.` };
   } catch (error) {
@@ -825,11 +860,15 @@ async function renderToSafeCopy(doc, renderDocument, options) {
           componentSize,
           seed: renderDocument.graph.find((node) => node.type === 'grain')?.params.seed ?? 0x46534c4d,
           signal: options.signal,
+          deviceMemoryGB,
+          memoryMode: applyMemoryMode,
         })
       : await renderDocumentToLayer(doc, sourceLayer, targetLayer, sourceBounds, targetBounds, renderDocument.graph.find((node) => node.type === 'halation').params, trc, {
           componentSize,
           seed: 0x46534c4d,
           signal: options.signal,
+          deviceMemoryGB,
+          memoryMode: applyMemoryMode,
         });
     if (legacyTarget && legacyTarget !== targetLayer) {
       try { legacyTarget.visible = false; } catch (error) { /* old failed target may be protected */ }

@@ -39,7 +39,7 @@ test('RenderPlan uses cumulative source dependencies and isolates generated Grai
   assert.ok(plan.overlap >= halation.requiredInputHalo);
   assert.equal(plan.bands[0].start, 0);
   assert.equal(plan.bands.at(-1).end, 200);
-  assert.equal(plan.phasePeriod, 2, 'Quality Halation phase is the graph LCM');
+  assert.equal(plan.phasePeriod, 8, 'Bloom phase is included in the graph LCM');
 });
 
 test('RenderPlan aligns non-divisible band tails and reports an explicit budget failure', () => {
@@ -55,11 +55,61 @@ test('RenderPlan aligns non-divisible band tails and reports an explicit budget 
     memoryMode: 'balanced',
     deviceMemoryGB: 0,
   });
-  assert.equal(plan.phasePeriod, 2);
+  assert.equal(plan.phasePeriod, 8);
   assert.equal(plan.bands[0].y0 % plan.phasePeriod, 0);
   assert.equal(plan.bands.at(-1).y1, 205);
   assert.equal(plan.bands.at(-1).y0 % plan.phasePeriod, 0);
   assert.equal(plan.hardBudgetExceeded, true);
+});
+
+test('Balanced planning never creates a sub-halo core for a 26MP H+B+G graph', () => {
+  const graph = fullGraph().map((node) => ({
+    ...node,
+    enabled: ['halation', 'bloom', 'grain'].includes(node.type),
+  }));
+  const plan = createFilmRenderPlan({
+    width: 6500,
+    height: 4000,
+    fullWidth: 6500,
+    fullHeight: 4000,
+    graph,
+    format: { gauge: '35mm', iso: 250 },
+    componentSize: 16,
+    quality: 'quality',
+    memoryMode: 'auto',
+    deviceMemoryGB: 0,
+  });
+  assert.equal(plan.memoryMode, 'balanced');
+  assert.ok(plan.bandHeight >= plan.overlap);
+  assert.ok(plan.bands.length <= Math.ceil(4000 / plan.overlap));
+  assert.ok(plan.bands.reduce((rows, band) => rows + band.end - band.start, 0) < 4000 * 3);
+  assert.equal(plan.hardBudgetExceeded, false);
+});
+
+test('explicit High can acknowledge 16 GiB when UXP device memory is unavailable', () => {
+  const graph = fullGraph().map((node) => ({
+    ...node,
+    enabled: ['halation', 'bloom', 'grain'].includes(node.type),
+  }));
+  const request = {
+    width: 6500,
+    height: 4000,
+    fullWidth: 6500,
+    fullHeight: 4000,
+    graph,
+    format: { gauge: '35mm', iso: 250 },
+    componentSize: 16,
+    quality: 'quality',
+    deviceMemoryGB: 0,
+  };
+  const automatic = createFilmRenderPlan({ ...request, memoryMode: 'auto' });
+  const explicit = createFilmRenderPlan({ ...request, memoryMode: 'high' });
+  assert.equal(automatic.memoryMode, 'balanced');
+  assert.equal(automatic.assumedDeviceMemoryGB, 0);
+  assert.equal(explicit.memoryMode, 'high');
+  assert.equal(explicit.reportedDeviceMemoryGB, 0);
+  assert.equal(explicit.assumedDeviceMemoryGB, 16);
+  assert.equal(explicit.bands.length, 1);
 });
 
 test('RenderPlan hash is stable for equivalent graph key order and memory modes are conservative', () => {
@@ -72,7 +122,7 @@ test('RenderPlan hash is stable for equivalent graph key order and memory modes 
   assert.equal(unknown.memoryMode, 'balanced');
 });
 
-test('RenderPlan reserves GPU candidates without making GPU executable in V1.6', () => {
+test('RenderPlan exposes one complete V1.7 resident segment while keeping GPU planned-only', () => {
   const plan = createFilmRenderPlan({
     width: 64,
     height: 48,
@@ -82,13 +132,21 @@ test('RenderPlan reserves GPU candidates without making GPU executable in V1.6',
   });
   assert.equal(plan.backendSegments[BACKEND_IDS.JS].length, 1);
   assert.equal(plan.backendSegments[BACKEND_IDS.WASM].length, 1);
+  assert.deepEqual(
+    plan.backendSegments[BACKEND_IDS.WASM][0].nodeTypes,
+    ['defringe', 'halation', 'bloom', 'highlightProtection', 'filmResolution', 'grain'],
+  );
+  assert.deepEqual(
+    plan.backendSegments[BACKEND_IDS.WASM_SIMD][0].nodeTypes,
+    ['defringe', 'halation', 'bloom', 'highlightProtection', 'filmResolution', 'grain'],
+  );
   assert.equal(plan.backendSegments[BACKEND_IDS.GPU].length, 0);
   assert.equal(plan.backendCandidates[BACKEND_IDS.GPU].length, 1);
   assert.deepEqual(
     plan.backendCandidates[BACKEND_IDS.GPU][0].nodeTypes,
-    ['halation', 'filmResolution', 'grain'],
+    ['defringe', 'halation', 'bloom', 'highlightProtection', 'filmResolution', 'grain'],
   );
-  assert.deepEqual(plan.backendOrder, [BACKEND_IDS.WASM, BACKEND_IDS.JS]);
+  assert.deepEqual(plan.backendOrder, [BACKEND_IDS.WASM_SIMD, BACKEND_IDS.WASM, BACKEND_IDS.JS]);
   assert.equal(plan.memory.gpuResidentBytes, 0);
   assert.equal(plan.memory.gpuScratchBytes, 0);
   for (const dependency of plan.dependencies) {
@@ -146,6 +204,18 @@ test('FilmExecutor publishes plan/copy/pass stats and reuses request scratch', (
   executor.dispose();
 });
 
+test('FilmExecutor does not dispose a request arena owned by the Apply host', () => {
+  const graph = createDefaultEffectGraph(createHalationParams({ strength: 0 }), 7);
+  const plan = createFilmRenderPlan({ width: 8, height: 6, graph, componentSize: 16, memoryMode: 'balanced' });
+  const arena = new BufferArena();
+  const executor = createFilmExecutor(plan, { backend: 'js', arena });
+  executor.dispose();
+  const allocation = arena.acquire(16, 'host-after-executor');
+  assert.equal(allocation.array.length, 16);
+  arena.release(allocation.handle);
+  arena.dispose();
+});
+
 test('FilmExecutor keeps auto on CPU and fully retries after an injected GPU failure', () => {
   const graph = createDefaultEffectGraph(createHalationParams({ strength: 0 }), 0x12345678)
     .map((node) => ({
@@ -155,7 +225,13 @@ test('FilmExecutor keeps auto on CPU and fully retries after an injected GPU fai
         ? createFilmResolutionParams({ amount: 0 })
         : node.type === 'grain'
           ? createGrainParams({ amount: 0, seed: 0x12345678 })
-          : node.params,
+          : node.type === 'defringe'
+            ? { ...node.params, amount: 0 }
+            : node.type === 'bloom'
+              ? { ...node.params, amplify: 0 }
+              : node.type === 'highlightProtection'
+                ? { ...node.params, amount: 0 }
+                : node.params,
     }));
   const plan = createFilmRenderPlan({ width: 8, height: 6, graph, componentSize: 16, memoryMode: 'balanced' });
   const rgb = Float32Array.from({ length: 8 * 6 * 3 }, (_, index) => (index % 17) / 19);
@@ -247,5 +323,98 @@ test('FilmExecutor accepts a contract-compatible experimental GPU adapter and pu
   assert.equal(result.stats.copies.boundaryCount, 2);
   assert.equal(result.stats.memory.breakdown.gpuResidentBytes, rgb.byteLength);
   assert.equal(result.alpha, alpha);
+  executor.dispose();
+});
+
+test('resident failure retries the complete JS graph once and disables resident for the request', () => {
+  const graph = createDefaultEffectGraph(createHalationParams({ strength: 0 }), 7);
+  const plan = createFilmRenderPlan({ width: 8, height: 6, graph, memoryMode: 'balanced' });
+  const rgb = Float32Array.from({ length: 8 * 6 * 3 }, (_, index) => (index % 19) / 23);
+  let calls = 0;
+  const resident = {
+    supportsPlan: () => true,
+    execute(input) {
+      calls += 1;
+      const output = new Float32Array(input.rgb);
+      output[17] = Number.NaN;
+      return { ...input, rgb: output, stats: { backend: 'wasm-resident' } };
+    },
+  };
+  const executor = createFilmExecutor(plan, { backend: 'wasm-resident', residentBackend: resident });
+  const first = executor.render({ width: 8, height: 6, rgb }, { graph });
+  assert.deepEqual(first.rgb, rgb);
+  assert.equal(first.stats.fallback.code, 'ERR_WASM_RESIDENT_NONFINITE');
+  assert.equal(executor.stats().residentDisabledForRequest, true);
+  executor.render({ width: 8, height: 6, rgb }, { graph });
+  assert.equal(calls, 1);
+  executor.dispose();
+});
+
+test('resident cancellation never starts the expensive JS fallback', () => {
+  const graph = createDefaultEffectGraph(createHalationParams({ strength: 0 }), 7);
+  const plan = createFilmRenderPlan({ width: 8, height: 6, graph, memoryMode: 'balanced' });
+  const rgb = new Float32Array(8 * 6 * 3).fill(0.18);
+  const controller = new AbortController();
+  controller.abort();
+  let calls = 0;
+  const resident = {
+    supportsPlan: () => true,
+    execute() {
+      calls += 1;
+      throw new Error('Film render cancelled');
+    },
+  };
+  const executor = createFilmExecutor(plan, { backend: 'wasm-resident', residentBackend: resident });
+  assert.throws(() => executor.render({ width: 8, height: 6, rgb }, { graph }, { signal: controller.signal }), /cancelled/);
+  assert.equal(calls, 1);
+  assert.equal(executor.stats().residentDisabledForRequest, false);
+  executor.dispose();
+});
+
+test('renderAsync propagates resident cancellation without disabling or falling back', async () => {
+  const graph = createDefaultEffectGraph(createHalationParams({ strength: 0 }), 7);
+  const plan = createFilmRenderPlan({ width: 8, height: 6, graph, memoryMode: 'balanced' });
+  const rgb = new Float32Array(8 * 6 * 3).fill(0.18);
+  const controller = new AbortController();
+  let asyncCalls = 0;
+  const resident = {
+    supportsPlan: () => true,
+    async executeAsync() {
+      asyncCalls += 1;
+      controller.abort();
+      const error = new Error('Film render cancelled');
+      error.code = 'ERR_CANCELLED';
+      throw error;
+    },
+  };
+  const executor = createFilmExecutor(plan, { backend: 'wasm-resident', residentBackend: resident });
+  await assert.rejects(
+    executor.renderAsync({ width: 8, height: 6, rgb }, { graph }, { signal: controller.signal }),
+    /cancelled/,
+  );
+  assert.equal(asyncCalls, 1);
+  assert.equal(executor.stats().residentDisabledForRequest, false);
+  assert.equal(executor.stats().fallback, null);
+  executor.dispose();
+});
+
+test('debug resident dual-run reports the first excessive coordinate and channel', () => {
+  const graph = createDefaultEffectGraph(createHalationParams({ strength: 0 }), 7);
+  const plan = createFilmRenderPlan({ width: 8, height: 6, graph, memoryMode: 'balanced' });
+  const rgb = new Float32Array(8 * 6 * 3).fill(0.18);
+  const resident = {
+    supportsPlan: () => true,
+    execute(input) {
+      const output = new Float32Array(input.rgb);
+      output[(2 * 8 + 3) * 3 + 1] += 0.01;
+      return { ...input, rgb: output, stats: { backend: 'wasm-resident' } };
+    },
+  };
+  const executor = createFilmExecutor(plan, { backend: 'wasm-resident', residentBackend: resident, debugDualRun: true });
+  const result = executor.render({ width: 8, height: 6, rgb }, { graph });
+  assert.equal(result.stats.dualRun.firstExcess.x, 3);
+  assert.equal(result.stats.dualRun.firstExcess.y, 2);
+  assert.equal(result.stats.dualRun.firstExcess.channel, 'G');
+  assert.ok(result.stats.dualRun.max >= 0.009);
   executor.dispose();
 });

@@ -109,5 +109,7 @@ export function streamFilmGeometry(width, height, document, options = {}) {
     phaseScale,
     phasePeriod: plan.phasePeriod,
     safetyMargin: plan.safetyMargin,
+    warnings: plan.warnings,
+    aliasPlan: plan.aliasPlan,
   };
 }

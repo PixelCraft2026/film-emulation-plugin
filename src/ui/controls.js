@@ -5,9 +5,50 @@
  * 解耦：控件不接触算法/宿主，只持有参数对象与回调。
  */
 
+const clamp01 = (value) => Math.max(0, Math.min(1, Number(value) || 0));
+
+/**
+ * Maps the physical slider position to a normalized parameter coordinate.
+ * `fine-min` spends more track near the minimum; `fine-max` spends more track
+ * near the maximum. The mapping only belongs to the UI and never changes the
+ * serialized parameter value.
+ * @param {number} position
+ * @param {'linear'|'fine-min'|'fine-max'} [curve]
+ * @param {number} [exponent]
+ */
+export function sliderPositionToUnit(position, curve = 'linear', exponent = 2.2) {
+  const t = clamp01(position);
+  const power = Number.isFinite(exponent) && exponent > 1 ? exponent : 2.2;
+  if (curve === 'fine-min') return t ** power;
+  if (curve === 'fine-max') return 1 - ((1 - t) ** power);
+  return t;
+}
+
+/** Inverse of sliderPositionToUnit(). */
+export function sliderUnitToPosition(unit, curve = 'linear', exponent = 2.2) {
+  const u = clamp01(unit);
+  const power = Number.isFinite(exponent) && exponent > 1 ? exponent : 2.2;
+  if (curve === 'fine-min') return u ** (1 / power);
+  if (curve === 'fine-max') return 1 - ((1 - u) ** (1 / power));
+  return u;
+}
+
+function decimalPlaces(step) {
+  const text = String(step);
+  if (text.includes('e-')) return Number(text.split('e-')[1]) || 0;
+  return text.includes('.') ? text.length - text.indexOf('.') - 1 : 0;
+}
+
+function quantizeParameter(value, min, max, step) {
+  const bounded = Math.max(min, Math.min(max, Number(value)));
+  if (!(step > 0)) return bounded;
+  const rounded = min + Math.round((bounded - min) / step) * step;
+  return Number(Math.max(min, Math.min(max, rounded)).toFixed(Math.min(10, decimalPlaces(step) + 2)));
+}
+
 /**
  * 滑块控件。
- * @param {{id:string,label:string,value:number,min:number,max:number,step:number,onInput:(v:number)=>void}} o
+ * @param {{id:string,label:string,value:number,min:number,max:number,step:number,curve?:'linear'|'fine-min'|'fine-max',curveExponent?:number,fineStepScale?:number,onInput:(v:number)=>void}} o
  * @returns {HTMLElement} 容器（field-label + sp-slider）
  */
 export function createSlider(o) {
@@ -27,13 +68,56 @@ export function createSlider(o) {
   label.style.textOverflow = 'ellipsis';
   const slider = document.createElement('sp-slider');
   slider.id = o.id;
-  slider.min = o.min;
-  slider.max = o.max;
-  slider.step = o.step;
-  slider.value = o.value;
   slider.style.flex = '1';
   slider.style.minWidth = '0';
-  slider.addEventListener('input', () => o.onInput(Number(slider.value)));
+  const curve = o.curve ?? 'linear';
+  if (curve === 'linear') {
+    slider.min = o.min;
+    slider.max = o.max;
+    slider.step = o.step;
+    slider.value = o.value;
+    slider.addEventListener('input', () => o.onInput(Number(slider.value)));
+  } else {
+    const mapping = {
+      min: Number(o.min),
+      max: Number(o.max),
+      stepScale: Number(o.fineStepScale ?? 1),
+      step: Number(o.step) * Number(o.fineStepScale ?? 1),
+      curve,
+      exponent: Number(o.curveExponent ?? 2.2),
+    };
+    const setAccessibilityValue = (value) => {
+      slider.setAttribute('aria-valuetext', String(value));
+      slider.title = `${o.label}: ${value}`;
+    };
+    const setParameterValue = (value) => {
+      const parameter = quantizeParameter(value, mapping.min, mapping.max, mapping.step);
+      const unit = mapping.max === mapping.min ? 0 : (parameter - mapping.min) / (mapping.max - mapping.min);
+      slider.value = sliderUnitToPosition(unit, mapping.curve, mapping.exponent);
+      setAccessibilityValue(parameter);
+      return parameter;
+    };
+    const setRange = (min, max, step, value) => {
+      mapping.min = Number(min);
+      mapping.max = Number(max);
+      mapping.step = Number(step) * mapping.stepScale;
+      const nextValue = value === undefined
+        ? mapping.min + sliderPositionToUnit(Number(slider.value), mapping.curve, mapping.exponent) * (mapping.max - mapping.min)
+        : Number(value);
+      return setParameterValue(nextValue);
+    };
+    slider.min = 0;
+    slider.max = 1;
+    slider.step = 0.001;
+    slider.__filmSlider = { setParameterValue, setRange, mapping };
+    setParameterValue(o.value);
+    slider.addEventListener('input', () => {
+      const raw = mapping.min + sliderPositionToUnit(Number(slider.value), mapping.curve, mapping.exponent) * (mapping.max - mapping.min);
+      const parameter = quantizeParameter(raw, mapping.min, mapping.max, mapping.step);
+      setAccessibilityValue(parameter);
+      o.onInput(parameter);
+    });
+  }
   row.append(label, slider);
   return row;
 }

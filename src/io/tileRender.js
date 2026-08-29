@@ -22,6 +22,7 @@ import {
   resolveSigmaParams,
   normalizeEffectGraph,
   getEffectDefinition,
+  FILM_GRAPH_VERSION,
 } from '../core/index.js';
 import { splitBands } from './tiles.js';
 import { decodeToLinear, encodeFromLinear, primariesMatrices } from './colorPipeline.js';
@@ -150,7 +151,7 @@ export function processTiledWithTrc(input, params, trc, opts = {}) {
  * @param {{width:number,height:number,rgb:Float32Array,alpha?:Float32Array}} input
  * @param {{format?:object,graph:Array<object>}} document
  * @param {{decode:(v:number)=>number,encode:(v:number)=>number}} trc
- * @param {{bandHeight?:number,overlapPx?:number,tileThreshold?:number,outputTrc?:object,quality?:'fast'|'quality',forceFast?:boolean,fullWidth?:number,fullHeight?:number,originX?:number,originY?:number,previewScale?:number,seed?:number,signal?:AbortSignal,profileTimings?:boolean}} [opts]
+ * @param {{bandHeight?:number,overlapPx?:number,tileThreshold?:number,outputTrc?:object,quality?:'fast'|'quality',forceFast?:boolean,fullWidth?:number,fullHeight?:number,originX?:number,originY?:number,previewScale?:number,seed?:number,signal?:AbortSignal,profileTimings?:boolean,outputRows?:{start:number,end:number},executor?:{render:(input:any,document:any,context:any)=>any}}} [opts]
  */
 export function processTiledFilmWithTrc(input, document, trc, opts = {}) {
   const { width, height, rgb, alpha } = input;
@@ -191,7 +192,8 @@ export function processTiledFilmWithTrc(input, document, trc, opts = {}) {
   const renderOne = (work, originY) => {
     const linear = decodeToLinear(work.rgb, trc);
     if (toSRGB) applyMatrix3(linear, toSRGB);
-    const result = processFilm(work && { width: work.width, height: work.height, rgb: linear, alpha: work.alpha }, { graph }, {
+    const canonical = work && { width: work.width, height: work.height, rgb: linear, alpha: work.alpha };
+    const renderContext = {
       ...baseContext,
       width: work.width,
       height: work.height,
@@ -203,9 +205,33 @@ export function processTiledFilmWithTrc(input, document, trc, opts = {}) {
       deviceMemoryGB: opts.deviceMemoryGB,
       componentSize: opts.componentSize,
       arena: opts.arena,
-    });
-    if (fromSRGB) applyMatrix3(result.rgb, fromSRGB);
-    return { result, encoded: encodeFromLinear(result.rgb, outputTrc) };
+    };
+    const result = opts.executor?.render
+      ? opts.executor.render(canonical, { ...document, graph }, renderContext)
+      : processFilm(canonical, { ...document, graph }, renderContext);
+    const requestedRows = opts.outputRows ?? null;
+    let outputRgb = result.rgb;
+    let outputAlpha = result.alpha;
+    let outputHeight = work.height;
+    if (requestedRows) {
+      const start = Math.trunc(Number(requestedRows.start));
+      const end = Math.trunc(Number(requestedRows.end));
+      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start || end > work.height) {
+        throw new RangeError('processTiledFilmWithTrc outputRows are outside the rendered band');
+      }
+      const rowStride = work.width * 3;
+      outputRgb = new Float32Array((end - start) * rowStride);
+      outputRgb.set(result.rgb.subarray(start * rowStride, end * rowStride));
+      if (result.alpha) {
+        outputAlpha = new Float32Array((end - start) * work.width);
+        outputAlpha.set(result.alpha.subarray(start * work.width, end * work.width));
+      }
+      outputHeight = end - start;
+    }
+    // Profile conversion and TRC encoding are output work, not convolution
+    // support work. Apply them only to rows that can reach the final target.
+    if (fromSRGB) applyMatrix3(outputRgb, fromSRGB);
+    return { result, encoded: encodeFromLinear(outputRgb, outputTrc), outputAlpha, outputHeight };
   };
 
   if (width * height <= tileThreshold) {
@@ -215,7 +241,7 @@ export function processTiledFilmWithTrc(input, document, trc, opts = {}) {
       timings.processMs = nowMs() - started;
       timings.nodeCount = rendered.result.stats?.nodes?.length ?? 0;
     }
-    return { width, height, rgb: rendered.encoded, alpha: rendered.result.alpha, timings, stats: rendered.result.stats };
+    return { width, height: rendered.outputHeight, rgb: rendered.encoded, alpha: rendered.outputAlpha, timings, stats: rendered.result.stats };
   }
 
   const out = new Float32Array(width * height * 3);
@@ -246,5 +272,78 @@ export function processTiledFilmWithTrc(input, document, trc, opts = {}) {
     }
     opts.onProgress?.((bandIndex + 1) / bands.length);
   }
-  return { width, height, rgb: out, alpha: outAlpha, timings, stats: lastStats ?? { engineVersion: '1.6.0', nodes: [] } };
+  return { width, height, rgb: out, alpha: outAlpha, timings, stats: lastStats ?? { engineVersion: FILM_GRAPH_VERSION, nodes: [] } };
+}
+
+/**
+ * Async whole-band variant used by Apply. The stream planner already supplies
+ * one halo-complete band, so this path avoids an additional inner tiler and
+ * lets the resident executor yield and observe cancellation between steps.
+ */
+export async function processFilmBandWithTrcAsync(input, document, trc, opts = {}) {
+  const { width, height, rgb, alpha } = input;
+  const graph = normalizeEffectGraph(document?.graph);
+  const fullWidth = opts.fullWidth ?? width;
+  const fullHeight = opts.fullHeight ?? height;
+  const previewScale = opts.previewScale ?? 1;
+  const quality = opts.forceFast ? 'fast' : (opts.quality ?? 'quality');
+  const outputTrc = opts.outputTrc ?? trc;
+  const { toSRGB } = primariesMatrices(trc && trc.baseKey);
+  const { fromSRGB } = primariesMatrices(outputTrc && outputTrc.baseKey);
+  const timings = opts.profileTimings ? {} : null;
+  const started = timings ? nowMs() : 0;
+  const linear = decodeToLinear(rgb, trc);
+  if (toSRGB) applyMatrix3(linear, toSRGB);
+  const canonical = { width, height, rgb: linear, alpha };
+  const renderContext = {
+    fullWidth,
+    fullHeight,
+    format: document.format,
+    previewScale,
+    quality,
+    forceFast: !!opts.forceFast,
+    seed: opts.seed ?? graph.find((node) => node.type === 'grain')?.params.seed ?? 0,
+    signal: opts.signal,
+    originX: opts.originX ?? 0,
+    originY: opts.originY ?? 0,
+    renderPlan: opts.renderPlan,
+    backend: opts.backend ?? 'auto',
+    memoryMode: opts.memoryMode,
+    deviceMemoryGB: opts.deviceMemoryGB,
+    componentSize: opts.componentSize,
+    arena: opts.arena,
+    intent: opts.intent ?? 'apply',
+    yieldIntervalMs: opts.yieldIntervalMs ?? 50,
+  };
+  const result = opts.executor?.renderAsync
+    ? await opts.executor.renderAsync(canonical, { ...document, graph }, renderContext)
+    : opts.executor?.render
+      ? opts.executor.render(canonical, { ...document, graph }, renderContext)
+      : processFilm(canonical, { ...document, graph }, renderContext);
+  const requestedRows = opts.outputRows ?? null;
+  let outputRgb = result.rgb;
+  let outputAlpha = result.alpha;
+  let outputHeight = height;
+  if (requestedRows) {
+    const start = Math.trunc(Number(requestedRows.start));
+    const end = Math.trunc(Number(requestedRows.end));
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start || end > height) {
+      throw new RangeError('processFilmBandWithTrcAsync outputRows are outside the rendered band');
+    }
+    const rowStride = width * 3;
+    outputRgb = new Float32Array((end - start) * rowStride);
+    outputRgb.set(result.rgb.subarray(start * rowStride, end * rowStride));
+    if (result.alpha) {
+      outputAlpha = new Float32Array((end - start) * width);
+      outputAlpha.set(result.alpha.subarray(start * width, end * width));
+    }
+    outputHeight = end - start;
+  }
+  if (fromSRGB) applyMatrix3(outputRgb, fromSRGB);
+  const encoded = encodeFromLinear(outputRgb, outputTrc);
+  if (timings) {
+    timings.processMs = nowMs() - started;
+    timings.nodeCount = result.stats?.nodes?.length ?? 0;
+  }
+  return { width, height: outputHeight, rgb: encoded, alpha: outputAlpha, timings, stats: result.stats };
 }

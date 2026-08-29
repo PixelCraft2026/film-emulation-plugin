@@ -4,7 +4,22 @@
  * 显示编码 → PNG data URL（面板内显示，不触碰文档，满足 A3 预览 <500ms）。
  * 注意：UXP 无 canvas/内置 PNG 编码，用 ui/pngEncoder 的最小编码器。
  */
-import { extractStep, diffuseStep, haloStep, blendStep, processFilmStages, applyMatrix3, resolveSigmaParams, stablePlanStringify, getWasmBackendStatus } from '../core/index.js';
+import {
+  extractStep,
+  diffuseStep,
+  haloStep,
+  blendStep,
+  processFilmStages,
+  applyMatrix3,
+  resolveSigmaParams,
+  stablePlanStringify,
+  getWasmBackendStatus,
+  createFilmRenderPlan,
+  createFilmExecutor,
+  createV17ResidentBackend,
+  createHalationParams,
+  createLumaMask,
+} from '../core/index.js';
 import { readDocumentPixels } from './imageAccess.js';
 import { decodeToLinear, encodePanelPreviewSRGB, primariesMatrices, standardProfileName } from './colorPipeline.js';
 import { documentComponentSize } from './bitDepth.js';
@@ -29,6 +44,77 @@ const PANEL_COLOR_PROFILE = standardProfileName('sRGB');
 
 function throwIfCancelled(signal) {
   if (signal?.aborted) throw new Error('Film render cancelled');
+}
+
+async function yieldPreviewControl(signal) {
+  throwIfCancelled(signal);
+  if (typeof globalThis.setTimeout === 'function') {
+    await new Promise((resolve) => globalThis.setTimeout(resolve, 0));
+  } else {
+    await Promise.resolve();
+  }
+  throwIfCancelled(signal);
+}
+
+async function processFilmStagesYielding(input, nodes, context) {
+  const enabled = nodes.filter((node) => node && node.enabled !== false);
+  if (!enabled.length) return input;
+  // Stage subsets used by the dual-proxy preview do not necessarily contain
+  // Halation. Add a disabled schema placeholder so the same validated graph
+  // can drive FilmExecutor and its resident command segment. The resident
+  // backend keeps each subset to one RGB/alpha upload and one RGB download.
+  const graph = enabled.some((node) => node.type === 'halation')
+    ? enabled
+    : [
+      ...enabled,
+      {
+        id: '__preview-halation-placeholder',
+        type: 'halation',
+        enabled: false,
+        params: createHalationParams({ strength: 0 }),
+        mask: createLumaMask(),
+      },
+    ];
+  const plan = createFilmRenderPlan({
+    width: input.width,
+    height: input.height,
+    fullWidth: context.fullWidth ?? input.width,
+    fullHeight: context.fullHeight ?? input.height,
+    previewScale: context.previewScale ?? 1,
+    componentSize: 32,
+    quality: context.quality ?? 'fast',
+    format: context.format,
+    memoryMode: 'high',
+    graph,
+  });
+  const resident = createV17ResidentBackend(plan);
+  if (resident) {
+    const executor = createFilmExecutor(plan, { backend: 'auto', residentBackend: resident });
+    try {
+      return await executor.renderAsync(input, { graph, format: context.format }, {
+        ...context,
+        renderPlan: plan,
+        intent: 'preview',
+        yieldIntervalMs: 12,
+      });
+    } finally {
+      executor.dispose();
+    }
+  }
+  let current = input;
+  const nodeStats = [];
+  for (const node of enabled) {
+    current = processFilmStages(current, [node], context);
+    nodeStats.push(...(current.stats?.nodes ?? []));
+    await yieldPreviewControl(context.signal);
+  }
+  return {
+    ...current,
+    stats: {
+      ...(current.stats ?? {}),
+      nodes: nodeStats,
+    },
+  };
 }
 
 function assertFinitePreview(rgb) {
@@ -66,6 +152,30 @@ function transferNativeGrainGain(displayBase, nativeBase, nativeGrained, display
       const fullStrength = displayBase[i] * (nativeGrained[i] / before);
       output[i] = displayBase[i] + displayAttenuation * (fullStrength - displayBase[i]);
     }
+  }
+  return output;
+}
+
+/**
+ * Bloom and Highlight Protection are additive as a pair: HP only scales the
+ * Bloom contribution. At native 100% inspection their canonical effect delta
+ * can therefore be evaluated once on the Apply-native pixels and added to the
+ * Photoshop ICC-managed display base. Replacement nodes such as Resolution
+ * deliberately do not use this shortcut.
+ *
+ * @param {Float32Array} displayBase
+ * @param {Float32Array} nativeBase
+ * @param {Float32Array} nativeEffected
+ * @param {AbortSignal|undefined} signal
+ */
+function transferNativeAdditiveDelta(displayBase, nativeBase, nativeEffected, signal) {
+  if (displayBase.length !== nativeBase.length || nativeBase.length !== nativeEffected.length) {
+    throw new RangeError('Native additive transfer buffers must have matching lengths');
+  }
+  const output = new Float32Array(displayBase.length);
+  for (let index = 0; index < output.length; index += 1) {
+    output[index] = displayBase[index] + (nativeEffected[index] - nativeBase[index]);
+    if ((index & 0x3ffff) === 0 && signal?.aborted) throw new Error('Film render cancelled');
   }
   return output;
 }
@@ -166,6 +276,8 @@ export async function renderPreviewIncremental(doc, paramsOrDocument, trc, cache
   const ew = effectWork.width;
   const eh = effectWork.height;
   const sourceKey = source?.cacheKey ?? displaySource?.cacheKey ?? null;
+  const inputRevision = source?.inputRevision ?? displaySource?.inputRevision ?? sourceKey ?? null;
+  const generation = source?.generation ?? displaySource?.generation ?? 0;
   const originX = source?.originX ?? displaySource?.originX ?? 0;
   const originY = source?.originY ?? displaySource?.originY ?? 0;
   timings.prepareMs = Date.now() - t0;
@@ -177,6 +289,8 @@ export async function renderPreviewIncremental(doc, paramsOrDocument, trc, cache
     && cache.eh === eh
     && sourceKey
     && cache.sourceKey === sourceKey
+    && cache.inputRevision === inputRevision
+    && cache.generation === generation
     && cache.displayProfileKey === (displayTrc.baseKey ?? '')
     && cache.effectProfileKey === (effectTrc.baseKey ?? '')
     ? cache
@@ -199,6 +313,7 @@ export async function renderPreviewIncremental(doc, paramsOrDocument, trc, cache
     if (effectToSRGB) applyMatrix3(effectLinear, effectToSRGB);
     c.effectLinear = effectLinear;
   }
+  await yieldPreviewControl(signal);
   // Keep the rendered base on the same Photoshop ICC-managed sRGB read used by
   // the Source pane. The native-profile read is intentionally reserved for
   // Halation extraction. Using it as the visible base can make the right pane
@@ -224,19 +339,49 @@ export async function renderPreviewIncremental(doc, paramsOrDocument, trc, cache
         effectWork.width / Math.max(1, doc.width || width),
         effectWork.height / Math.max(1, doc.height || height),
       );
+  // Defringe is a pointwise replacement with a small source halo.  Run it on
+  // both proxies before Halation extraction so display and native inspection
+  // share the same physical stage without cross-profile colour drift.
+  const renderQuality = nativeInspection ? 'quality' : 'fast';
+  const defringeNodes = filmDocument?.graph.filter((node) => node.type === 'defringe' && node.enabled !== false) ?? [];
+  const defringeDisplay = defringeNodes.length
+    ? await processFilmStagesYielding({ width: w, height: h, rgb: baseLinear, alpha: displayWork.alpha }, defringeNodes, {
+      width: w,
+      height: h,
+      fullWidth: doc.width || width,
+      fullHeight: doc.height || height,
+      previewScale,
+      quality: renderQuality,
+      signal,
+    })
+    : { width: w, height: h, rgb: baseLinear, alpha: displayWork.alpha };
+  const defringeEffect = defringeNodes.length
+    ? await processFilmStagesYielding({ width: ew, height: eh, rgb: effectLinear, alpha: effectWork.alpha }, defringeNodes, {
+      width: ew,
+      height: eh,
+      fullWidth: doc.width || width,
+      fullHeight: doc.height || height,
+      previewScale: effectProxyScale,
+      quality: renderQuality,
+      signal,
+    })
+    : { width: ew, height: eh, rgb: effectLinear, alpha: effectWork.alpha };
+  const displayGraphLinear = defringeDisplay.rgb;
+  const effectGraphLinear = defringeEffect.rgb;
   // Fit remains latency-oriented. Native 100% inspection uses the same
   // Halation numerical mode as Apply so fine structure can be judged exactly.
-  const renderQuality = nativeInspection ? 'quality' : 'fast';
   const p = {
     ...rp,
     sigma: Math.max(0.05, rp.sigma * previewScale),
     diffusionMode: nativeInspection ? rp.diffusionMode : 'fast',
   };
+  const defringeKey = JSON.stringify(defringeNodes);
   // Source Expansion 在 2048px 光源代理上执行，其邻域半径必须使用代理尺度；
   // 扩散本身仍在 1024px 显示尺寸执行。
   const extractParams = { ...p, sigma: Math.max(0.05, rp.sigma * effectProxyScale) };
   const key = (o) => JSON.stringify(o);
   const kExtract = key({
+    df: defringeKey,
     t: p.threshold,
     rb: p.redLayerThresholdBias,
     u: p.thresholdUnits,
@@ -268,7 +413,7 @@ export async function renderPreviewIncremental(doc, paramsOrDocument, trc, cache
   let { W, G, Y, U, K, sourceR, sourceG, sourceB, plane, temp, temp2, blurFn, halo, densityGate } = c;
   if (!W || c.kExtract !== kExtract) {
     const extracted = extractStep(
-      { width: ew, height: eh, rgb: effectLinear, alpha: effectWork.alpha },
+      { width: ew, height: eh, rgb: effectGraphLinear, alpha: defringeEffect.alpha },
       extractParams,
       { luma: [0.2126, 0.7152, 0.0722], compact: true, keepW: true },
     );
@@ -276,11 +421,13 @@ export async function renderPreviewIncremental(doc, paramsOrDocument, trc, cache
     // 强源分类 U 按 W 加权，避免孤立强灯被零背景平均成弱光。
     ({ G, W, Y, U, K, sourceR, sourceG, sourceB } = downsampleExtractedFields(extracted, ew, eh, w, h));
     c.kExtract = kExtract;
+    await yieldPreviewControl(signal);
   }
   throwIfCancelled(signal);
   if (!plane || c.kDiffuse !== kDiffuse || c.W !== W) {
     ({ plane, temp, temp2, blurFn } = diffuseStep({ sourceR, sourceG, sourceB, W, U, K }, w, h, p));
     c.kDiffuse = kDiffuse;
+    await yieldPreviewControl(signal);
   }
   throwIfCancelled(signal);
   if (!halo || c.kHalo !== kHalo || c.plane !== plane) {
@@ -289,11 +436,12 @@ export async function renderPreviewIncremental(doc, paramsOrDocument, trc, cache
       luminance: Y,
       // At 100%, use the same native-profile canonical input as Apply for
       // source-body protection. The visible blend below remains ICC-managed.
-      sourceRgb: nativeInspection ? effectLinear : baseLinear,
+      sourceRgb: nativeInspection ? effectGraphLinear : displayGraphLinear,
     };
     halo = haloStep({ sourceR, sourceG, sourceB, W, U, K }, plane, w, h, p, blurFn, temp, temp2, haloContext);
     densityGate = haloContext.densityGate ?? null;
     c.kHalo = kHalo;
+    await yieldPreviewControl(signal);
   }
   throwIfCancelled(signal);
   c.W = W;
@@ -315,11 +463,13 @@ export async function renderPreviewIncremental(doc, paramsOrDocument, trc, cache
   c.ew = ew;
   c.eh = eh;
   c.sourceKey = sourceKey;
+  c.inputRevision = inputRevision;
+  c.generation = generation;
   c.displayProfileKey = displayTrc.baseKey ?? '';
   c.effectProfileKey = effectTrc.baseKey ?? '';
 
   // 注意：halo 是缓存中间量，blend 必须分配新输出（不能就地写坏缓存）
-  const kBlend = key(p);
+  const kBlend = key({ ...p, defringeKey });
   const cachedHalationOut = c.halationOut
     && c.kBlend === kBlend
     && c.blendHalo === halo
@@ -329,17 +479,22 @@ export async function renderPreviewIncremental(doc, paramsOrDocument, trc, cache
   const halationOut = cachedHalationOut ?? {
     width: w,
     height: h,
-    rgb: blendStep({ rgb: baseLinear }, halo, null, w, h, p, densityGate),
+    rgb: blendStep({ rgb: displayGraphLinear }, halo, null, w, h, p, densityGate),
     alpha: displayWork.alpha,
   };
   c.kBlend = kBlend;
   c.blendHalo = halo;
   c.blendInput = baseLinear;
   c.halationOut = halationOut;
-  const laterNodes = filmDocument?.graph.filter((node) => node.type === 'filmResolution' || node.type === 'grain') ?? [];
+  await yieldPreviewControl(signal);
+  const laterNodes = filmDocument?.graph.filter((node) => ['bloom', 'highlightProtection', 'filmResolution', 'grain'].includes(node.type)) ?? [];
   const resolutionNodes = laterNodes.filter((node) => node.type === 'filmResolution');
-  const grainNodes = laterNodes.filter((node) => node.type === 'grain');
+  const preGrainNodes = laterNodes.filter((node) => node.type !== 'grain' && node.enabled !== false);
+  const grainNodes = laterNodes.filter((node) => node.type === 'grain' && node.enabled !== false);
   const transferNativeGrain = nativeInspection && grainNodes.some(
+    (node) => Number(node.params?.amount) !== 0,
+  );
+  const hasActiveResolution = resolutionNodes.some(
     (node) => node.enabled !== false && Number(node.params?.amount) !== 0,
   );
   // Photoshop's 100% canvas integrates stochastic detail over one logical
@@ -363,7 +518,11 @@ export async function renderPreviewIncremental(doc, paramsOrDocument, trc, cache
     grainInput: transferNativeGrain ? 'apply-native' : 'display',
     grainDisplayAttenuation,
     backendAbi: backendStatus.version ?? 'js-reference',
+    residentAbi: backendStatus.metrics?.resident?.abiVersion ?? null,
+    memoryGeneration: backendStatus.metrics?.resident?.memoryGeneration ?? null,
     backendMode: backendStatus.executionMode ?? 'auto',
+    inputRevision,
+    generation,
   });
   c.nodeCaches ??= Object.create(null);
   c.nativeNodeCaches ??= Object.create(null);
@@ -381,30 +540,101 @@ export async function renderPreviewIncremental(doc, paramsOrDocument, trc, cache
     signal,
     nodeCaches,
   });
-  const graphResult = c.graphResult
+  const preGrainKey = JSON.stringify({
+    nodes: preGrainNodes,
+    format: filmDocument?.format ?? null,
+    fullWidth: doc.width || width,
+    fullHeight: doc.height || height,
+    originX,
+    originY,
+    previewScale,
+    quality: renderQuality,
+    inputRevision,
+    generation,
+  });
+  const grainKey = JSON.stringify({
+    nodes: grainNodes,
+    format: filmDocument?.format ?? null,
+    fullWidth: doc.width || width,
+    fullHeight: doc.height || height,
+    originX,
+    originY,
+    previewScale,
+    quality: renderQuality,
+    inputRevision,
+    generation,
+  });
+  const graphResult = await (c.graphResult
     && c.graphKey === graphKey
     && c.graphInput === halationOut.rgb
     ? c.graphResult
     : laterNodes.length
       ? transferNativeGrain
-        ? (() => {
-          const visibleBeforeGrain = resolutionNodes.length
-            ? processFilmStages(halationOut, resolutionNodes, stageContext(c.nodeCaches))
-            : halationOut;
-          const nativeHalationOut = {
-            width: w,
-            height: h,
-            rgb: blendStep({ rgb: effectLinear }, halo, null, w, h, p, densityGate),
-            alpha: effectWork.alpha,
-          };
-          const nativeBeforeGrain = resolutionNodes.length
-            ? processFilmStages(nativeHalationOut, resolutionNodes, stageContext(c.nativeNodeCaches))
-            : nativeHalationOut;
-          const nativeGrained = processFilmStages(
-            nativeBeforeGrain,
-            grainNodes,
-            stageContext(c.nativeNodeCaches),
-          );
+        ? (async () => {
+          const nativeHalationOut = c.nativeHalationOut
+            && c.nativeHalationHalo === halo
+            && c.nativeHalationInput === effectGraphLinear
+            ? c.nativeHalationOut
+            : {
+              width: w,
+              height: h,
+              rgb: blendStep({ rgb: effectGraphLinear }, halo, null, w, h, p, densityGate),
+              alpha: effectWork.alpha,
+            };
+          c.nativeHalationOut = nativeHalationOut;
+          c.nativeHalationHalo = halo;
+          c.nativeHalationInput = effectGraphLinear;
+          const nativeBeforeGrain = c.nativeBeforeGrain
+            && c.nativePreGrainKey === preGrainKey
+            && c.nativePreGrainInput === nativeHalationOut.rgb
+            ? c.nativeBeforeGrain
+            : preGrainNodes.length
+              ? await processFilmStagesYielding(nativeHalationOut, preGrainNodes, stageContext(c.nativeNodeCaches))
+              : nativeHalationOut;
+          c.nativeBeforeGrain = nativeBeforeGrain;
+          c.nativePreGrainKey = preGrainKey;
+          c.nativePreGrainInput = nativeHalationOut.rgb;
+          const visibleBeforeGrain = hasActiveResolution
+            ? c.visibleBeforeGrain
+              && c.visiblePreGrainKey === preGrainKey
+              && c.visiblePreGrainInput === halationOut.rgb
+              ? c.visibleBeforeGrain
+              : preGrainNodes.length
+                ? await processFilmStagesYielding(halationOut, preGrainNodes, stageContext(c.nodeCaches))
+                : halationOut
+            : c.visibleBeforeGrain
+              && c.visiblePreGrainKey === preGrainKey
+              && c.visiblePreGrainInput === halationOut.rgb
+              ? c.visibleBeforeGrain
+              : preGrainNodes.length
+                ? {
+                  width: w,
+                  height: h,
+                  rgb: transferNativeAdditiveDelta(
+                    halationOut.rgb,
+                    nativeHalationOut.rgb,
+                    nativeBeforeGrain.rgb,
+                    signal,
+                  ),
+                  alpha: displayWork.alpha,
+                  stats: nativeBeforeGrain.stats,
+                }
+                : halationOut;
+          c.visibleBeforeGrain = visibleBeforeGrain;
+          c.visiblePreGrainKey = preGrainKey;
+          c.visiblePreGrainInput = halationOut.rgb;
+          const nativeGrained = c.nativeGrained
+            && c.nativeGrainKey === grainKey
+            && c.nativeGrainInput === nativeBeforeGrain.rgb
+            ? c.nativeGrained
+            : await processFilmStagesYielding(
+              nativeBeforeGrain,
+              grainNodes,
+              stageContext(c.nativeNodeCaches),
+            );
+          c.nativeGrained = nativeGrained;
+          c.nativeGrainKey = grainKey;
+          c.nativeGrainInput = nativeBeforeGrain.rgb;
           return {
             width: w,
             height: h,
@@ -418,20 +648,38 @@ export async function renderPreviewIncremental(doc, paramsOrDocument, trc, cache
             alpha: displayWork.alpha,
             stats: {
               nodes: [
-                ...(visibleBeforeGrain.stats?.nodes ?? []),
+                ...(nativeBeforeGrain.stats?.nodes ?? []),
                 ...(nativeGrained.stats?.nodes ?? []),
               ],
               grainInput: 'apply-native',
             },
           };
         })()
-        : processFilmStages(
-          { width: w, height: h, rgb: halationOut.rgb, alpha: displayWork.alpha },
-          laterNodes,
-          stageContext(c.nodeCaches),
-        )
-      : halationOut;
+        : (async () => {
+          const visibleBeforeGrain = c.visibleBeforeGrain
+            && c.visiblePreGrainKey === preGrainKey
+            && c.visiblePreGrainInput === halationOut.rgb
+            ? c.visibleBeforeGrain
+            : preGrainNodes.length
+              ? await processFilmStagesYielding(halationOut, preGrainNodes, stageContext(c.nodeCaches))
+              : halationOut;
+          c.visibleBeforeGrain = visibleBeforeGrain;
+          c.visiblePreGrainKey = preGrainKey;
+          c.visiblePreGrainInput = halationOut.rgb;
+          if (!grainNodes.length) return visibleBeforeGrain;
+          const visibleGrained = c.visibleGrained
+            && c.visibleGrainKey === grainKey
+            && c.visibleGrainInput === visibleBeforeGrain.rgb
+            ? c.visibleGrained
+            : await processFilmStagesYielding(visibleBeforeGrain, grainNodes, stageContext(c.nodeCaches));
+          c.visibleGrained = visibleGrained;
+          c.visibleGrainKey = grainKey;
+          c.visibleGrainInput = visibleBeforeGrain.rgb;
+          return visibleGrained;
+        })()
+      : halationOut);
   throwIfCancelled(signal);
+  await yieldPreviewControl(signal);
   c.graphKey = graphKey;
   c.graphInput = halationOut.rgb;
   c.graphResult = graphResult;
@@ -453,6 +701,7 @@ export async function renderPreviewIncremental(doc, paramsOrDocument, trc, cache
   // 2.3：面板预览与画布写回保持一致的 soft-knee（>1 值软滚降；0=硬裁剪）
   if (p.rolloff > 0) applyRolloff(display, p.rolloff);
   throwIfCancelled(signal);
+  await yieldPreviewControl(signal);
   const encodeStarted = Date.now();
   const png = floatRgbToPng(outputWidth, outputHeight, display, outputAlpha);
   timings.encodeMs = Date.now() - encodeStarted;

@@ -246,7 +246,11 @@ export function extractHighlights(input, params, options = {}) {
   // Expansion 需要暂存原始 W，并在最大值传播后复用该缓冲写回最终能量。
   const W = options.compact && !options.keepW && sourceExpansion <= 0 ? null : new Float32Array(n);
   const U = new Float32Array(n);
-  let K = null;
+  const sourceInteriorProtection = Math.min(1, Math.max(0, params.sourceInteriorProtection ?? 0));
+  // During the first pass K temporarily retains the emitter confidence needed
+  // by protected Source Expansion. The second pass overwrites it with the
+  // public authorization field, avoiding a second hue-table evaluation.
+  let K = sourceExpansion > 0 && sourceInteriorProtection > 0 ? new Float32Array(n) : null;
   const sourceR = new Float32Array(n);
   const sourceG = new Float32Array(n);
   const sourceB = new Float32Array(n);
@@ -267,6 +271,7 @@ export function extractHighlights(input, params, options = {}) {
   const spectralSensitivity = Math.min(1, Math.max(0, params.spectralSensitivity ?? 0));
   const blueCompensation = Math.min(1, Math.max(0, params.blueCompensation ?? 0));
   const redLayerThresholdBias = Math.min(1, Math.max(0, params.redLayerThresholdBias ?? 0));
+  const useRedLayerThreshold = redLayerThresholdBias > 0;
 
   for (let i = 0, p = 0; i < n; i++, p += 3) {
     const r = rgb[p];
@@ -281,10 +286,10 @@ export function extractHighlights(input, params, options = {}) {
     const sSpill = smoothstep(t0, t1, m);
     const legacyMask = spillMix === 0 ? sThreshold : sThreshold * (1 - spillMix) + sSpill * spillMix;
     const legacyRadiance = Math.max(0, y * (1 - spillMix) + m * spillMix);
-    const redLayerExposure = Math.max(
+    const redLayerExposure = useRedLayerThreshold ? Math.max(
       0,
       RED_LAYER_EXPOSURE_R * r + RED_LAYER_EXPOSURE_G * g + RED_LAYER_EXPOSURE_B * b,
-    );
+    ) : 0;
 
     // 色相置信度只参与深红层阈值分支。低饱和冷白光保持 1；高饱和蓝/青
     // 发光体趋近 0；红/黄发光体保持 1。这样滑块右端代表完整的
@@ -307,20 +312,24 @@ export function extractHighlights(input, params, options = {}) {
       redEmitterConfidence += hueMix * (longWaveEligibility - 1);
     }
 
-    const redLayerMask = smoothstep(t0, t1, redLayerExposure);
+    const redLayerMask = useRedLayerThreshold ? smoothstep(t0, t1, redLayerExposure) : 0;
     // 先分别完成两条源场的阈值、曝光响应和色谱资格判断，再线性混合。
     // bias=0 必须严格等同 V1.5.1 的 BrightnessGate(E) 路径；bias=1 则完全
     // 使用 RedLayerGate(ER) × RedEmitterConfidence，中间值不会跳变。
     const legacyMaskedSource = legacyMask * a;
-    const redLayerMaskedSource = redLayerMask * redEmitterConfidence * a;
+    const redLayerMaskedSource = useRedLayerThreshold ? redLayerMask * redEmitterConfidence * a : 0;
     const legacyResponse = compressedHighlightResponseFor(legacyRadiance, T, sourceImpact);
-    const redLayerResponse = compressedHighlightResponseFor(redLayerExposure, T, sourceImpact);
+    const redLayerResponse = useRedLayerThreshold
+      ? compressedHighlightResponseFor(redLayerExposure, T, sourceImpact)
+      : 0;
     const legacyAmplitude = legacyMaskedSource * legacyResponse;
     const redLayerAmplitude = redLayerMaskedSource * redLayerResponse;
-    const sourceAmplitude = legacyAmplitude
-      + (redLayerAmplitude - legacyAmplitude) * redLayerThresholdBias;
-    const sourceMask = legacyMaskedSource
-      + (redLayerMaskedSource - legacyMaskedSource) * redLayerThresholdBias;
+    const sourceAmplitude = useRedLayerThreshold
+      ? legacyAmplitude + (redLayerAmplitude - legacyAmplitude) * redLayerThresholdBias
+      : legacyAmplitude;
+    const sourceMask = useRedLayerThreshold
+      ? legacyMaskedSource + (redLayerMaskedSource - legacyMaskedSource) * redLayerThresholdBias
+      : legacyMaskedSource;
     if (S) S[i] = sourceMask;
     // Halation 主要叠加到红层。用长波通道占用而不是总亮度作为背景门控：
     // 蓝天即使 Y 较高，R 通道仍有充足余量，不应阻断白灯产生的红晕；
@@ -336,27 +345,32 @@ export function extractHighlights(input, params, options = {}) {
     // sourceExposure 同步混合两条完整曝光坐标；红层一端继续乘发光体置信度，
     // 避免被阈值拒绝的纯蓝 LED 仍进入 Strong Source 分类。
     const legacySourceExposure = reconstructedSourceExposureFor(legacyRadiance, T);
-    const redLayerSourceExposure = reconstructedSourceExposureFor(redLayerExposure, T)
-      * redEmitterConfidence;
-    const sourceExposure = legacySourceExposure
-      + (redLayerSourceExposure - legacySourceExposure) * redLayerThresholdBias;
+    const redLayerSourceExposure = useRedLayerThreshold
+      ? reconstructedSourceExposureFor(redLayerExposure, T) * redEmitterConfidence
+      : 0;
+    const sourceExposure = useRedLayerThreshold
+      ? legacySourceExposure + (redLayerSourceExposure - legacySourceExposure) * redLayerThresholdBias
+      : legacySourceExposure;
     U[i] = sourceExposure;
     if (W) W[i] = sourceAmplitude;
+    if (K) K[i] = redEmitterConfidence;
 
     // 分层感光源：红层接受红/绿为主的反射光，蓝色贡献被严格限制；
     // 绿层随曝光非线性增强，形成靠近光源的橙色核芯和更远的红色尾部。
     const legacySpectralNorm = legacyRadiance > 1e-8 ? legacyAmplitude / legacyRadiance : 0;
-    const redLayerSpectralNorm = redLayerExposure > 1e-8 ? redLayerAmplitude / redLayerExposure : 0;
+    const redLayerSpectralNorm = useRedLayerThreshold && redLayerExposure > 1e-8
+      ? redLayerAmplitude / redLayerExposure
+      : 0;
     const legacyHotMix = smoothstep(
       hotThreshold - SOURCE_CLASS_SOFTNESS,
       hotThreshold + SOURCE_CLASS_SOFTNESS,
       legacySourceExposure,
     );
-    const redLayerHotMix = smoothstep(
+    const redLayerHotMix = useRedLayerThreshold ? smoothstep(
       hotThreshold - SOURCE_CLASS_SOFTNESS,
       hotThreshold + SOURCE_CLASS_SOFTNESS,
       redLayerSourceExposure,
-    );
+    ) : 0;
     // 绿层只在强曝光附近显著增强：近源偏橙，远端/弱源保持红色。
     const legacyGreenShoulder = 0.12 + 0.88 * legacyHotMix;
     const redLayerGreenShoulder = 0.12 + 0.88 * redLayerHotMix;
@@ -367,17 +381,29 @@ export function extractHighlights(input, params, options = {}) {
     const greenExposure = Math.max(0, 0.08 * pr + 0.74 * pg + 0.03 * pb);
     const blueExposure = Math.max(0, 0.01 * pr + 0.03 * pg + 0.06 * pb);
     const legacySourceR = redExposure * legacySpectralNorm * redHueGain;
-    const redLayerSourceR = redExposure * redLayerSpectralNorm * redHueGain;
+    const redLayerSourceR = useRedLayerThreshold ? redExposure * redLayerSpectralNorm * redHueGain : 0;
     const legacySourceG = greenExposure * legacySpectralNorm * legacyGreenShoulder * greenHueGain;
-    const redLayerSourceG = greenExposure * redLayerSpectralNorm * redLayerGreenShoulder * greenHueGain;
+    const redLayerSourceG = useRedLayerThreshold
+      ? greenExposure * redLayerSpectralNorm * redLayerGreenShoulder * greenHueGain
+      : 0;
     const legacySourceB = blueExposure * legacySpectralNorm * blueHueGain;
-    const redLayerSourceB = blueExposure * redLayerSpectralNorm * blueHueGain;
-    sourceR[i] = legacySourceR + (redLayerSourceR - legacySourceR) * redLayerThresholdBias;
-    sourceG[i] = legacySourceG + (redLayerSourceG - legacySourceG) * redLayerThresholdBias;
-    sourceB[i] = legacySourceB + (redLayerSourceB - legacySourceB) * redLayerThresholdBias;
+    const redLayerSourceB = useRedLayerThreshold ? blueExposure * redLayerSpectralNorm * blueHueGain : 0;
+    sourceR[i] = useRedLayerThreshold
+      ? legacySourceR + (redLayerSourceR - legacySourceR) * redLayerThresholdBias
+      : legacySourceR;
+    sourceG[i] = useRedLayerThreshold
+      ? legacySourceG + (redLayerSourceG - legacySourceG) * redLayerThresholdBias
+      : legacySourceG;
+    sourceB[i] = useRedLayerThreshold
+      ? legacySourceB + (redLayerSourceB - legacySourceB) * redLayerThresholdBias
+      : legacySourceB;
   }
 
   if (sourceExpansion > 0 && W) {
+    // Keep the first-pass base amplitude in W. Source Expansion only needs a
+    // separate one-plane support seed, which is much cheaper than recomputing
+    // threshold response, log2/pow and hue confidence for every pixel.
+    const expansionSupport = new Float32Array(n);
     // 1) 仅把已经通过深红层色谱响应、且属于 Strong Source 的像素作为种子。
     for (let i = 0; i < n; i++) {
       const hotMix = smoothstep(
@@ -385,19 +411,18 @@ export function extractHighlights(input, params, options = {}) {
         hotThreshold + SOURCE_CLASS_SOFTNESS,
         U[i],
       );
-      W[i] = Math.min(1, Math.max(0, sourceR[i] * hotMix));
+      expansionSupport[i] = Math.min(1, Math.max(0, sourceR[i] * hotMix));
     }
     // 2) 在与局部 PSF 同量级的范围传播种子许可。候选像素仍必须自身足够亮，
     // 因而不会把蓝天或普通暗背景填成实体红块。
     const growRadius = Math.max(1, Math.ceil(Math.max(0.5, params.sigma ?? 1) * (0.45 + 0.85 * sourceExpansion)));
-    if (n > WASM_MAX_FILTER_PIXEL_LIMIT || !tryWasmMaxFilter(W, W, w, h, growRadius)) {
-      maxFilterSeparable(W, w, h, growRadius, W);
+    if (n > WASM_MAX_FILTER_PIXEL_LIMIT || !tryWasmMaxFilter(expansionSupport, expansionSupport, w, h, growRadius)) {
+      maxFilterSeparable(expansionSupport, w, h, growRadius, expansionSupport);
     }
     // 内部保护需要知道哪些低阈值 optical glow 是由附近强光种子授权的。
     // K 在候选像素完成自身亮度和色相复核后写入，不能直接复制方形最大值场；
     // 否则白色窗灯附近的高饱和蓝/青灯带也会错误获得红层扩散许可。
     // 仅保护路径分配；No-Remjet(p=0) 不增加内存或改变旧分支性能。
-    if ((params.sourceInteriorProtection ?? 0) > 0) K = new Float32Array(n);
     const lowerThreshold = Math.max(0, T * (1 - 0.68 * sourceExpansion));
     const candidateSoftness = Math.max(0.02, sourceSoftness * 2);
     const candidateEnd = Math.max(lowerThreshold + candidateSoftness, T);
@@ -412,45 +437,37 @@ export function extractHighlights(input, params, options = {}) {
       const a = input.alpha ? Math.min(1, Math.max(0, input.alpha[i])) : 1;
       const y = luma[0] * r + luma[1] * g + luma[2] * b;
       const m = Math.max(r, g, b);
-      const sThreshold = smoothstep(t0, t1, y);
-      const sSpill = smoothstep(t0, t1, m);
-      const legacyMask = spillMix === 0 ? sThreshold : sThreshold * (1 - spillMix) + sSpill * spillMix;
       const legacyRadiance = Math.max(0, y * (1 - spillMix) + m * spillMix);
-      const redLayerExposure = Math.max(
+      const redLayerExposure = useRedLayerThreshold ? Math.max(
         0,
         RED_LAYER_EXPOSURE_R * r + RED_LAYER_EXPOSURE_G * g + RED_LAYER_EXPOSURE_B * b,
-      );
-      let redEmitterConfidence = 1;
-      if (spectralSensitivity > 0) {
+      ) : 0;
+      let redEmitterConfidence = K ? K[i] : 1;
+      if (!K && useRedLayerThreshold && spectralSensitivity > 0) {
         const hueResponse = spectralHueResponse(Math.max(0, r), Math.max(0, g), Math.max(0, b));
         const purityGate = smoothstep(HUE_PURITY_START, HUE_PURITY_FULL, hueResponse.saturation);
         const hueMix = smoothstep(0, 1, spectralSensitivity) * purityGate;
         const longWaveEligibility = Math.min(1, Math.max(0, hueResponse.red));
         redEmitterConfidence += hueMix * (longWaveEligibility - 1);
       }
-      const redLayerMask = smoothstep(t0, t1, redLayerExposure);
-      const legacyAmplitude = legacyMask * a
-        * compressedHighlightResponseFor(legacyRadiance, T, sourceImpact);
-      const redLayerAmplitude = redLayerMask * redEmitterConfidence * a
-        * compressedHighlightResponseFor(redLayerExposure, T, sourceImpact);
-      const baseAmplitude = legacyAmplitude
-        + (redLayerAmplitude - legacyAmplitude) * redLayerThresholdBias;
       const legacyCandidate = smoothstep(lowerThreshold, candidateEnd, legacyRadiance) * a;
-      const redLayerCandidate = smoothstep(lowerThreshold, candidateEnd, redLayerExposure)
-        * redEmitterConfidence * a;
-      const candidate = legacyCandidate
-        + (redLayerCandidate - legacyCandidate) * redLayerThresholdBias;
-      const support = W[i];
+      const redLayerCandidate = useRedLayerThreshold
+        ? smoothstep(lowerThreshold, candidateEnd, redLayerExposure) * redEmitterConfidence * a
+        : 0;
+      const candidate = useRedLayerThreshold
+        ? legacyCandidate + (redLayerCandidate - legacyCandidate) * redLayerThresholdBias
+        : legacyCandidate;
+      const support = expansionSupport[i];
       // 内部保护的候选复核沿用同一个置信度。Brightness 一端仍保留旧路径，
       // Red Layer 一端则不会让高饱和蓝/青邻域继承白光种子的许可。
-      const candidateEligibility = (params.sourceInteriorProtection ?? 0) > 0
+      const candidateEligibility = sourceInteriorProtection > 0
         ? redEmitterConfidence
         : 1;
       // 邻域只重建被数字高光压缩丢失的一部分源体能量，不能把整片 optical glow
       // 当作与 clipped core 等强的发光面，否则归一化 PSF 会产生硬红色块。
       const authorizedCandidate = candidate * support * candidateEligibility;
       const grownAmplitude = authorizedCandidate * sourceExpansion * 0.42;
-      const finalAmplitude = Math.max(baseAmplitude, grownAmplitude);
+      const finalAmplitude = Math.max(W[i], grownAmplitude);
       W[i] = finalAmplitude;
       if (K) K[i] = authorizedCandidate;
       if (S) S[i] = Math.max(S[i], authorizedCandidate);

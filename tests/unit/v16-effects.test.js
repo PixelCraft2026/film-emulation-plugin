@@ -5,6 +5,9 @@ import {
   createHalationParams,
   createFilmResolutionParams,
   createGrainParams,
+  createBloomParams,
+  createDefringeParams,
+  createHighlightProtectionParams,
   createDefaultEffectGraph,
   processFilm,
   processFilmStages,
@@ -218,6 +221,7 @@ test('V1.6 24MP uses safe High memory on 16GB and aligned bands on unknown hosts
   });
   assert.equal(balanced.memoryMode, 'balanced');
   assert.ok(balanced.bands.length > 1);
+  assert.ok(balanced.bandHeight >= balanced.overlap, 'each Balanced band advances by at least one halo width');
   assert.equal(balanced.bandHeight % balanced.phaseScale, 0);
   assert.equal(balanced.overlap % balanced.phaseScale, 0);
   assert.ok(balanced.estimatedBandBytes * balanced.safetyMargin <= balanced.hardBudgetBytes);
@@ -525,4 +529,150 @@ test('100% Grain tile matches the same region of a full-frame Apply render', asy
   }
   rms = Math.sqrt(rms / (crop.width * crop.height * 3));
   assert.ok(rms <= 1e-5, `100% preview/full Apply Grain RMS=${rms}`);
+});
+
+test('Apply output-row cropping encodes only the band core without changing samples', () => {
+  const width = 29;
+  const height = 23;
+  const rgb = new Float32Array(width * height * 3);
+  const alpha = new Float32Array(width * height);
+  for (let i = 0; i < width * height; i++) {
+    rgb[i * 3] = 0.02 + (i % 17) / 31;
+    rgb[i * 3 + 1] = 0.04 + (i % 13) / 29;
+    rgb[i * 3 + 2] = 0.01 + (i % 19) / 37;
+    alpha[i] = (i % 11) / 10;
+  }
+  const graph = createDefaultEffectGraph(createHalationParams({ strength: 0 }), 7);
+  const document = { format: { gauge: '35mm', iso: 250 }, graph };
+  const linearTrc = { decode: (value) => value, encode: (value) => value, baseKey: 'sRGB' };
+  const full = processTiledFilmWithTrc(
+    { width, height, rgb, alpha },
+    document,
+    linearTrc,
+    { tileThreshold: Number.MAX_SAFE_INTEGER, fullWidth: width, fullHeight: height },
+  );
+  const start = 6;
+  const end = 18;
+  const core = processTiledFilmWithTrc(
+    { width, height, rgb, alpha },
+    document,
+    linearTrc,
+    { tileThreshold: Number.MAX_SAFE_INTEGER, fullWidth: width, fullHeight: height, outputRows: { start, end } },
+  );
+  assert.equal(core.width, width);
+  assert.equal(core.height, end - start);
+  assert.deepEqual(core.rgb, full.rgb.slice(start * width * 3, end * width * 3));
+  assert.deepEqual(core.alpha, full.alpha.slice(start * width, end * width));
+});
+
+test('100% Bloom is evaluated once and reused when only Grain parameters change', async () => {
+  const width = 36;
+  const height = 28;
+  const displayRgb = new Float32Array(width * height * 3);
+  const nativeRgb = new Float32Array(width * height * 3);
+  const alpha = new Float32Array(width * height).fill(1);
+  for (let i = 0; i < width * height; i++) {
+    const base = 0.05 + (i % 23) / 37;
+    displayRgb[i * 3] = base;
+    displayRgb[i * 3 + 1] = base * 0.9;
+    displayRgb[i * 3 + 2] = base * 0.75;
+    nativeRgb[i * 3] = base * 1.08;
+    nativeRgb[i * 3 + 1] = base * 0.94;
+    nativeRgb[i * 3 + 2] = base * 0.8;
+  }
+  const makeDocument = (amount) => ({
+    format: { gauge: '35mm', iso: 500 },
+    graph: createDefaultEffectGraph(createHalationParams({ strength: 0 }), 0x12345678).map((node) => {
+      if (node.type === 'bloom') return { ...node, enabled: true, params: createBloomParams({ radius: 0.5, amplify: 0.7 }) };
+      if (node.type === 'grain') return { ...node, enabled: true, params: createGrainParams({ amount, seed: 0x12345678 }) };
+      return node;
+    }),
+  });
+  const linearTrc = { decode: (value) => value, encode: (value) => value, baseKey: 'sRGB' };
+  const source = {
+    display: { width, height, rgb: displayRgb, alpha },
+    effect: { width, height, rgb: nativeRgb, alpha },
+    cacheKey: 'native-bloom-grain-cache',
+    previewScale: 1,
+    effectPreviewScale: 1,
+    originX: 0,
+    originY: 0,
+  };
+  const first = await renderPreviewIncremental(
+    { width, height },
+    makeDocument(0.45),
+    { display: linearTrc, effect: linearTrc },
+    null,
+    source,
+    { returnDataUrl: false },
+  );
+  const cachedPreGrain = first.cache.nativeBeforeGrain;
+  const firstOutput = new Float32Array(first.cache.graphResult.rgb);
+  assert.ok(cachedPreGrain);
+  assert.equal(first.cache.graphResult.stats.nodes.filter((node) => node.type === 'bloom').length, 1);
+  const second = await renderPreviewIncremental(
+    { width, height },
+    makeDocument(1.15),
+    { display: linearTrc, effect: linearTrc },
+    first.cache,
+    source,
+    { returnDataUrl: false },
+  );
+  assert.equal(second.cache.nativeBeforeGrain, cachedPreGrain, 'unchanged Bloom/HP prefix is reused');
+  assert.equal(second.cache.graphResult.stats.nodes.filter((node) => node.type === 'bloom').length, 1);
+  assert.notDeepEqual(second.cache.graphResult.rgb, firstOutput);
+});
+
+test('100% V1.7 Defringe → Bloom → HP preview matches Apply canonical output', async () => {
+  const width = 47;
+  const height = 35;
+  const rgb = new Float32Array(width * height * 3);
+  const alpha = new Float32Array(width * height).fill(1);
+  for (let i = 0; i < width * height; i += 1) {
+    const value = 0.03 + ((i * 43) % 113) / 90;
+    rgb[i * 3] = value * (i % 17 === 0 ? 1.7 : 1);
+    rgb[i * 3 + 1] = value * 0.82;
+    rgb[i * 3 + 2] = value * 0.68;
+  }
+  const graph = createDefaultEffectGraph(createHalationParams({ strength: 0 }), 0x12345678).map((node) => {
+    if (node.type === 'defringe') return { ...node, enabled: true, params: createDefringeParams({ amount: 0.8, radiusPx: 1.5 }) };
+    if (node.type === 'bloom') return { ...node, enabled: true, params: createBloomParams({ thresholdEV: -1, radius: 0.8, amplify: 0.75, saveLights: 0.25 }) };
+    if (node.type === 'highlightProtection') return { ...node, enabled: true, params: createHighlightProtectionParams({ amount: 0.65, thresholdEV: 1 }) };
+    return node;
+  });
+  const document = { format: { gauge: '35mm', iso: 250 }, graph };
+  const linearTrc = { decode: (value) => value, encode: (value) => value, baseKey: 'sRGB' };
+  const applied = processTiledFilmWithTrc(
+    { width, height, rgb, alpha },
+    document,
+    linearTrc,
+    { tileThreshold: Number.MAX_SAFE_INTEGER, quality: 'quality', fullWidth: width, fullHeight: height },
+  );
+  const preview = await renderPreviewIncremental(
+    { width, height },
+    document,
+    { display: linearTrc, effect: linearTrc },
+    null,
+    {
+      display: { width, height, rgb, alpha },
+      effect: { width, height, rgb, alpha },
+      cacheKey: 'v17-preview-apply',
+      originX: 0,
+      originY: 0,
+      previewScale: 1,
+      effectPreviewScale: 1,
+    },
+    { returnDataUrl: false },
+  );
+  let squaredError = 0;
+  let maxDiff = 0;
+  for (let i = 0; i < applied.rgb.length; i += 1) {
+    const delta = preview.cache.graphResult.rgb[i] - applied.rgb[i];
+    squaredError += delta * delta;
+    maxDiff = Math.max(maxDiff, Math.abs(delta));
+  }
+  const rms = Math.sqrt(squaredError / applied.rgb.length);
+  assert.ok(rms <= 1e-4, `V1.7 Preview/Apply RMS=${rms}`);
+  assert.ok(maxDiff <= 1e-3, `V1.7 Preview/Apply max=${maxDiff}`);
+  assert.equal(preview.cache.graphResult.alpha, alpha);
 });
