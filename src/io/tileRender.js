@@ -187,6 +187,12 @@ export function processTiledFilmWithTrc(input, document, trc, opts = {}) {
     nodeCaches: opts.nodeCaches,
     nativeNodeCaches: opts.nativeNodeCaches,
     profileTimings: !!timings,
+    profileResident: opts.profileResident,
+    collectStepSamples: opts.collectStepSamples,
+    onResidentStep: opts.onResidentStep,
+    targetStepMs: opts.targetStepMs,
+    stepBudget: opts.stepBudget,
+    workBudget: opts.workBudget,
   };
 
   const renderOne = (work, originY) => {
@@ -314,6 +320,12 @@ export async function processFilmBandWithTrcAsync(input, document, trc, opts = {
     arena: opts.arena,
     intent: opts.intent ?? 'apply',
     yieldIntervalMs: opts.yieldIntervalMs ?? 50,
+    targetStepMs: opts.targetStepMs,
+    stepBudget: opts.stepBudget,
+    workBudget: opts.workBudget,
+    profileResident: opts.profileResident,
+    collectStepSamples: opts.collectStepSamples,
+    onResidentStep: opts.onResidentStep,
   };
   const result = opts.executor?.renderAsync
     ? await opts.executor.renderAsync(canonical, { ...document, graph }, renderContext)

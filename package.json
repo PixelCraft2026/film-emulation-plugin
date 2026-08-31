@@ -13,6 +13,7 @@
     "test:verbose": "node --test",
     "bench": "node --expose-gc tests/bench/perf.js",
     "qa:matrix": "node scripts/qa-matrix.mjs",
+    "qa:simd": "node scripts/qualify-simd.mjs",
     "package": "node scripts/package.mjs current",
     "package:migration-bridge": "node scripts/package.mjs bridge",
     "package:migration": "node scripts/package-migration.mjs",

@@ -138,6 +138,11 @@ function v17Workset({ sourceRadius = 0, generatedFieldRadius = 0, phasePeriod = 
     sourceRadius,
     generatedFieldRadius,
     phasePeriod,
+    spatialDependency: Object.freeze({
+      inputHalo: sourceRadius,
+      generatedFieldHalo: generatedFieldRadius,
+      phasePeriod,
+    }),
     buffers,
     transientsRead,
     transientsWrite,
@@ -210,6 +215,11 @@ export const FILM_EFFECT_REGISTRY = Object.freeze({
         sourceRadius,
         generatedFieldRadius: 0,
         phasePeriod: Math.max(1, Math.trunc(context.quality === 'fast' ? 1 : 2)),
+        spatialDependency: Object.freeze({
+          inputHalo: sourceRadius,
+          generatedFieldHalo: 0,
+          phasePeriod: Math.max(1, Math.trunc(context.quality === 'fast' ? 1 : 2)),
+        }),
         buffers: [
           { name: 'extract-y', channels: 1, factor: 1 },
           { name: 'extract-source', channels: 3, factor: 1 },
@@ -329,6 +339,11 @@ export const FILM_EFFECT_REGISTRY = Object.freeze({
         sourceRadius: this.supportRadius(validated, context),
         generatedFieldRadius: 0,
         phasePeriod: 1,
+        spatialDependency: Object.freeze({
+          inputHalo: this.supportRadius(validated, context),
+          generatedFieldHalo: 0,
+          phasePeriod: 1,
+        }),
         buffers: [
           { name: 'resolution-source', channels: 3, factor: 1 },
           { name: 'resolution-blur', channels: 3, factor: 1 },
@@ -382,6 +397,11 @@ export const FILM_EFFECT_REGISTRY = Object.freeze({
         sourceRadius: 0,
         generatedFieldRadius: grainSupport(validated, context),
         phasePeriod: 1,
+        spatialDependency: Object.freeze({
+          inputHalo: 0,
+          generatedFieldHalo: grainSupport(validated, context),
+          phasePeriod: 1,
+        }),
         buffers: [
           { name: 'grain-accum', channels: 3, factor: 1 },
           { name: 'grain-field', channels: 1, factor: 1 },

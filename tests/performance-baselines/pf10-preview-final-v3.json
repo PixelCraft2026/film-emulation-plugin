@@ -1,0 +1,239 @@
+{
+  "generatedAt": "2026-08-30T22:50:37.096Z",
+  "node": "v24.19.0",
+  "platform": "win32-x64",
+  "cpu": "Intel64 Family 6 Model 151 Stepping 2, GenuineIntel",
+  "gitRevision": "0121b6443291af716d3e9ce8cb0d57c84178304d",
+  "workingTreeDirty": true,
+  "sourceFingerprint": "ebc5d100e6231e2fcc829c750a150b2c451f59a4f5d662e3e22c96f06a4bced7",
+  "wasmSha256": "2ccbf99de1ee24e2e942098017c356f7ce6a17547f13d78dff0aa202972e402a",
+  "wasmSimdSha256": "6032a555de98fae51d520f58281b02853510d777ae4282a7af69efbb84b80aaa",
+  "backend": {
+    "available": true,
+    "backend": "wasm",
+    "executionMode": "auto",
+    "version": 67072,
+    "error": null,
+    "metrics": {
+      "copyInBytes": 0,
+      "copyOutBytes": 0,
+      "copyCount": 0,
+      "workspaceBytes": 0,
+      "capacityFloats": 0,
+      "grainCapacityFloats": 0,
+      "resident": {
+        "uploadBytes": 0,
+        "downloadBytes": 0,
+        "commandBytes": 0,
+        "steps": 0,
+        "stepCalls": 0,
+        "maxStepWork": 0,
+        "memoryGeneration": 0,
+        "abiVersion": 1,
+        "capabilities": 61,
+        "backendVariant": "wasm-resident-scalar",
+        "nativeStepCalls": 0,
+        "nativeMaxStepWork": 0,
+        "plannedArenaFloats": 0,
+        "actualArenaFloats": 0,
+        "plannedTransientFloats": 0,
+        "actualTransientFloats": 0,
+        "allocationCount": 0
+      },
+      "simdResident": null,
+      "simdQualified": false
+    }
+  },
+  "protocol": {
+    "warmups": 2,
+    "runs": 10,
+    "size": "6000x4000",
+    "width": 6000,
+    "height": 4000,
+    "componentSize": 16,
+    "profile": "sRGB",
+    "quality": "quality",
+    "memoryMode": "balanced",
+    "deviceMemoryGB": 16,
+    "profileResident": true,
+    "collectStepSamples": true,
+    "graphFixtures": [
+      "v16-shipping-default",
+      "v16-full"
+    ]
+  },
+  "v16Preview1024Uncached": {
+    "label": "1024px V1.7 full uncached preview",
+    "warmups": 2,
+    "runs": 10,
+    "samplesMs": [
+      847.4,
+      835.5,
+      795.7,
+      828.6,
+      785.2,
+      796.3,
+      830.3,
+      789,
+      796.5,
+      826.8
+    ],
+    "p50Ms": 796.5,
+    "p95Ms": 847.4,
+    "peakRssMB": 0,
+    "peakArrayBuffersMB": 0,
+    "checksum": 4.454530715942383,
+    "bands": 1,
+    "memoryMode": "n/a",
+    "graphHash": "bfba75d0",
+    "planHash": "e213790f",
+    "backend": null,
+    "executionMode": null,
+    "execution": null,
+    "segments": null,
+    "nodeTimingsMs": {},
+    "copies": {
+      "inputBytes": 0,
+      "outputBytes": 0,
+      "count": 0
+    },
+    "passes": {
+      "fullPixelPasses": 0,
+      "perNode": {}
+    },
+    "timings": {
+      "total": 824,
+      "read": 0,
+      "process": 824,
+      "quantize": 0,
+      "write": 0,
+      "perNode": {},
+      "perStage": {}
+    },
+    "scheduler": {
+      "stepLatencyMs": {
+        "count": 212,
+        "total": 255.9652000000042,
+        "max": 26.723799999999756,
+        "p50": 0.7319999999999709,
+        "p95": 3.056300000000192
+      },
+      "work": {
+        "pixelVisits": 0,
+        "pixelsRead": 0,
+        "pixelsWritten": 0,
+        "convolutionTaps": 0,
+        "downsamplePixels": 0,
+        "upsamplePixels": 0
+      }
+    },
+    "bandInputAmplification": null,
+    "pixelVisitFactor": 0,
+    "fallback": null
+  },
+  "v16Preview1024Cached": {
+    "label": "1024px V1.7 full cached preview",
+    "warmups": 2,
+    "runs": 10,
+    "samplesMs": [
+      178.5,
+      179.7,
+      169.8,
+      195.2,
+      203.4,
+      191.5,
+      226.7,
+      352.8,
+      266.1,
+      176.7
+    ],
+    "p50Ms": 191.5,
+    "p95Ms": 352.8,
+    "peakRssMB": 0,
+    "peakArrayBuffersMB": 0,
+    "checksum": 4.454530715942383,
+    "bands": 1,
+    "memoryMode": "n/a",
+    "graphHash": "bfba75d0",
+    "planHash": "e213790f",
+    "backend": null,
+    "executionMode": null,
+    "execution": null,
+    "segments": null,
+    "nodeTimingsMs": {},
+    "copies": {
+      "inputBytes": 0,
+      "outputBytes": 0,
+      "count": 0
+    },
+    "passes": {
+      "fullPixelPasses": 0,
+      "perNode": {}
+    },
+    "timings": {
+      "total": 174,
+      "read": 0,
+      "process": 174,
+      "quantize": 0,
+      "write": 0,
+      "perNode": {},
+      "perStage": {}
+    },
+    "scheduler": {
+      "stepLatencyMs": {
+        "count": 46,
+        "total": 20.65179999999782,
+        "max": 3.549199999999473,
+        "p50": 0.14690000000155123,
+        "p95": 2.315099999999802
+      },
+      "work": {
+        "pixelVisits": 0,
+        "pixelsRead": 0,
+        "pixelsWritten": 0,
+        "convolutionTaps": 0,
+        "downsamplePixels": 0,
+        "upsamplePixels": 0
+      }
+    },
+    "bandInputAmplification": null,
+    "pixelVisitFactor": 0,
+    "fallback": null
+  },
+  "backendFinal": {
+    "available": true,
+    "backend": "wasm",
+    "executionMode": "auto",
+    "version": 67072,
+    "error": null,
+    "metrics": {
+      "copyInBytes": 304766976,
+      "copyOutBytes": 304766976,
+      "copyCount": 264,
+      "workspaceBytes": 11190272,
+      "capacityFloats": 2797568,
+      "grainCapacityFloats": 0,
+      "resident": {
+        "uploadBytes": 805699584,
+        "downloadBytes": 604274688,
+        "commandBytes": 53460,
+        "steps": 120,
+        "stepCalls": 3098,
+        "maxStepWork": 262144,
+        "memoryGeneration": 28,
+        "plannedArenaFloats": 4895744,
+        "plannedTransientFloats": 4895744,
+        "abiVersion": 1,
+        "capabilities": 61,
+        "backendVariant": "wasm-resident-scalar",
+        "nativeStepCalls": 23,
+        "nativeMaxStepWork": 262144,
+        "actualArenaFloats": 6993920,
+        "actualTransientFloats": 4895744,
+        "allocationCount": 27
+      },
+      "simdResident": null,
+      "simdQualified": false
+    }
+  }
+}

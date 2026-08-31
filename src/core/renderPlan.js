@@ -12,6 +12,8 @@ const SAFETY_MARGIN = 1.15;
 const RESIDENT_LAYOUT_SAFETY_MARGIN = 1.70;
 const MINIMUM_BAND_HEIGHT = 64;
 const RESIDENT_MINIMUM_CORE = 256;
+const PERSISTENT_FRAME_PLANES = 7; // Frame A + Frame B RGB and immutable alpha.
+const WASM32_MAX_BYTES = 0xffffffff;
 
 /** Stable V1.7 transient slots shared by JS, primitive WASM and resident WASM. */
 export const TRANSIENT_SLOTS = Object.freeze({
@@ -42,7 +44,7 @@ export const RESIDENT_MIGRATION_ORDER = Object.freeze([
 /** Physical resident layout is intentionally versioned separately from the
  * command-buffer and executor ABI.  A layout change can therefore be tested
  * and rejected without silently changing command decoding. */
-export const RESIDENT_LAYOUT_VERSION = 1;
+export const RESIDENT_LAYOUT_VERSION = 2;
 export const RESIDENT_LAYOUT_ALIGNMENT_FLOATS = 16;
 
 /** @param {number} value @param {number} alignment */
@@ -55,6 +57,36 @@ function alignUp(value, alignment) {
 function finitePositive(value, fallback) {
   const number = Number(value);
   return Number.isFinite(number) && number > 0 ? number : fallback;
+}
+
+/**
+ * Descriptor values are part of the plan contract, not user-facing hints.
+ * Reject malformed/non-finite workset metadata instead of silently turning it
+ * into a zero-sized allocation or a different geometry.
+ * @param {any} value
+ * @param {number} fallback
+ * @param {string} label
+ * @param {{integer?:boolean,min?:number}} [options]
+ */
+function descriptorNumber(value, fallback, label, options = {}) {
+  if (value === undefined || value === null) return fallback;
+  const number = Number(value);
+  if (!Number.isFinite(number)) throw new RangeError(`Invalid effect workset ${label}: expected a finite number`);
+  if (options.integer === true && !Number.isInteger(number)) throw new RangeError(`Invalid effect workset ${label}: expected an integer`);
+  if (number < (options.min ?? 0)) throw new RangeError(`Invalid effect workset ${label}: expected >= ${options.min ?? 0}`);
+  return number;
+}
+
+/** @param {any} value @param {string} label @returns {string[]} */
+function descriptorTransientList(value, label) {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) throw new TypeError(`Invalid effect workset ${label}: expected an array`);
+  return value.map((name) => {
+    if (typeof name !== 'string' || !Object.prototype.hasOwnProperty.call(TRANSIENT_SLOTS, name)) {
+      throw new RangeError(`Invalid effect workset ${label}: unknown transient ${String(name)}`);
+    }
+    return name;
+  });
 }
 
 /** @param {number} a @param {number} b */
@@ -114,36 +146,115 @@ function componentBytes(componentSize) {
   return componentSize === 8 ? 1 : componentSize === 32 ? 4 : 2;
 }
 
+/** Keep planner cost units aligned with the existing per-node pass counters. */
+/** @param {string} type */
+function estimatedPassesFor(type) {
+  return ({
+    defringe: 6,
+    halation: 8,
+    bloom: 20,
+    highlightProtection: 1,
+    filmResolution: 8,
+    grain: 8,
+  })[type] ?? 1;
+}
+
 /** @param {any} node @param {any} context */
 function descriptorFor(node, context) {
   const definition = getEffectDefinition(node.type);
   if (!definition) throw new Error(`Unknown effect node type: ${String(node.type)}`);
-  const descriptor = definition.describeWorkset
+  const rawDescriptor = definition.describeWorkset
     ? definition.describeWorkset(node.params, context)
     : {};
+  if (!rawDescriptor || typeof rawDescriptor !== 'object' || Array.isArray(rawDescriptor)) {
+    throw new TypeError(`Invalid effect workset descriptor for ${node.id}`);
+  }
+  const descriptor = rawDescriptor;
+  if (descriptor.identity !== undefined && typeof descriptor.identity !== 'boolean') {
+    throw new TypeError(`Invalid effect workset identity for ${node.id}`);
+  }
+  const identity = descriptor.identity === true;
+  const sourceRadius = descriptorNumber(
+    descriptor.sourceRadius ?? definition.supportRadius?.(node.params, context) ?? 0,
+    0,
+    `${node.id}.sourceRadius`,
+  );
+  const generatedFieldRadius = descriptorNumber(descriptor.generatedFieldRadius, 0, `${node.id}.generatedFieldRadius`);
+  const phasePeriod = descriptorNumber(descriptor.phasePeriod, 1, `${node.id}.phasePeriod`, { integer: true, min: 1 });
+  const spatial = descriptor.spatialDependency;
+  if (spatial !== undefined && spatial !== null && (typeof spatial !== 'object' || Array.isArray(spatial))) {
+    throw new TypeError(`Invalid effect workset spatialDependency for ${node.id}`);
+  }
+  const spatialInputHalo = descriptorNumber(
+    spatial?.inputHalo ?? sourceRadius,
+    0,
+    `${node.id}.spatialDependency.inputHalo`,
+  );
+  const spatialGeneratedFieldHalo = descriptorNumber(
+    spatial?.generatedFieldHalo ?? generatedFieldRadius,
+    0,
+    `${node.id}.spatialDependency.generatedFieldHalo`,
+  );
+  const spatialPhasePeriod = descriptorNumber(
+    spatial?.phasePeriod ?? phasePeriod,
+    1,
+    `${node.id}.spatialDependency.phasePeriod`,
+    { integer: true, min: 1 },
+  );
+  const transientsRead = descriptorTransientList(descriptor.transientsRead, `${node.id}.transientsRead`);
+  const transientsWrite = descriptorTransientList(descriptor.transientsWrite, `${node.id}.transientsWrite`);
+  if (descriptor.buffers !== undefined && descriptor.buffers !== null && !Array.isArray(descriptor.buffers)) {
+    throw new TypeError(`Invalid effect workset ${node.id}.buffers: expected an array`);
+  }
   const backends = normalizeBackendCapabilities(descriptor);
   return {
-    sourceRadius: Math.max(0, Number(descriptor.sourceRadius ?? definition.supportRadius?.(node.params, context) ?? 0)),
-    generatedFieldRadius: Math.max(0, Number(descriptor.generatedFieldRadius ?? 0)),
-    phasePeriod: Math.max(1, Math.trunc(descriptor.phasePeriod ?? 1)),
-    buffers: Object.freeze((Array.isArray(descriptor.buffers) ? descriptor.buffers : []).map((/** @type {any} */ buffer) => Object.freeze({
-      ...buffer,
-      name: String(buffer.name ?? `${node.id}:buffer`),
-      kind: buffer.kind ?? 'scratch',
-      scale: finitePositive(buffer.scale, 1),
-      lifetime: buffer.lifetime ?? 'node',
-      alias: buffer.alias ?? String(buffer.name ?? `${node.id}:buffer`),
-      alignment: Math.max(1, Math.trunc(buffer.alignment ?? RESIDENT_LAYOUT_ALIGNMENT_FLOATS)),
-      inPlaceSafe: buffer.inPlaceSafe === true || node.type === 'highlightProtection',
-    }))),
+    // Identity effects are logical aliases. They intentionally do not carry
+    // their nominal support radius or declared workset into the physical plan.
+    sourceRadius: identity ? 0 : sourceRadius,
+    generatedFieldRadius: identity ? 0 : generatedFieldRadius,
+    phasePeriod: identity ? 1 : phasePeriod,
+    // Identity effects remain in the logical segment for cursor/stat
+    // accounting, but contribute no physical work or halo.
+    estimatedPasses: identity
+      ? 0
+      : descriptorNumber(descriptor.estimatedPasses, estimatedPassesFor(node.type), `${node.id}.estimatedPasses`, { min: 0 }),
+    spatialDependency: Object.freeze({
+      inputHalo: identity ? 0 : spatialInputHalo,
+      generatedFieldHalo: identity ? 0 : spatialGeneratedFieldHalo,
+      phasePeriod: identity ? 1 : spatialPhasePeriod,
+    }),
+    buffers: Object.freeze(identity ? [] : (Array.isArray(descriptor.buffers) ? descriptor.buffers : []).map((/** @type {any} */ buffer) => {
+      if (!buffer || typeof buffer !== 'object' || Array.isArray(buffer)) {
+        throw new TypeError(`Invalid effect workset buffer for ${node.id}`);
+      }
+      const name = String(buffer.name ?? `${node.id}:buffer`);
+      const kind = String(buffer.kind ?? 'scratch');
+      if (!['plane', 'scratch', 'transient'].includes(kind)) {
+        throw new RangeError(`Invalid effect workset ${node.id}.buffer.kind: ${kind}`);
+      }
+      const alias = String(buffer.alias ?? name);
+      if (!alias) throw new RangeError(`Invalid effect workset ${node.id}.buffer.alias`);
+      return Object.freeze({
+        ...buffer,
+        name,
+        kind,
+        scale: descriptorNumber(buffer.scale, 1, `${node.id}.buffer.${name}.scale`, { min: Number.MIN_VALUE }),
+        lifetime: buffer.lifetime ?? 'node',
+        alias,
+        alignment: descriptorNumber(buffer.alignment, RESIDENT_LAYOUT_ALIGNMENT_FLOATS, `${node.id}.buffer.${name}.alignment`, { integer: true, min: 1 }),
+        channels: descriptorNumber(buffer.channels, 1, `${node.id}.buffer.${name}.channels`, { integer: true, min: 1 }),
+        factor: descriptorNumber(buffer.factor, 1, `${node.id}.buffer.${name}.factor`, { min: Number.MIN_VALUE }),
+        inPlaceSafe: buffer.inPlaceSafe === true || node.type === 'highlightProtection',
+      });
+    })),
     compositeMode: descriptor.compositeMode ?? definition.compositeMode ?? 'replacement',
-    transientsRead: Array.isArray(descriptor.transientsRead) ? descriptor.transientsRead : [],
-    transientsWrite: Array.isArray(descriptor.transientsWrite) ? descriptor.transientsWrite : [],
-    residentArenaPlanes: Math.max(0, Number(descriptor.residentArenaPlanes ?? 0)),
-    residentTransientPlanes: Math.max(0, Number(descriptor.residentTransientPlanes ?? 0)),
+    transientsRead: Object.freeze(identity ? [] : transientsRead),
+    transientsWrite: Object.freeze(identity ? [] : transientsWrite),
+    residentArenaPlanes: identity ? 0 : descriptorNumber(descriptor.residentArenaPlanes, 0, `${node.id}.residentArenaPlanes`, { integer: true, min: 0 }),
+    residentTransientPlanes: identity ? 0 : descriptorNumber(descriptor.residentTransientPlanes, 0, `${node.id}.residentTransientPlanes`, { integer: true, min: 0 }),
     wasm: descriptor.wasm ?? { supported: false },
     backends,
-    identity: descriptor.identity === true,
+    identity,
   };
 }
 
@@ -331,6 +442,8 @@ export function createPhysicalLayout(aliasPlan, descriptors, width, height) {
       nodeId: node.id,
       inputFrame,
       outputFrame,
+      residentArenaPlanes: descriptor.residentArenaPlanes,
+      residentScratchFloats: alignUp(pixelCount * descriptor.residentArenaPlanes, RESIDENT_LAYOUT_ALIGNMENT_FLOATS),
       buffers: Object.freeze(buffers),
       transientReads: Object.freeze(descriptor.transientsRead.map((/** @type {string} */ name) => transient.find((/** @type {any} */ item) => item.name === name)?.slot ?? -1)),
       transientWrites: Object.freeze(descriptor.transientsWrite.map((/** @type {string} */ name) => transient.find((/** @type {any} */ item) => item.name === name)?.slot ?? -1)),
@@ -448,6 +561,150 @@ function buildBackendSegments(items, backendId, flag) {
   return Object.freeze(segments);
 }
 
+/**
+ * Compile graph-global worksets into deterministic spatial segments.  A
+ * segment boundary is removed whenever a transient written by an earlier
+ * node is consumed by a later node; this keeps producer/consumer lifetimes
+ * intact without allowing generated-field padding to propagate upstream.
+ * @param {Array<{node:any,descriptor:any}>} items
+ * @param {number} width
+ * @param {number} height
+ * @param {number|number[]} bandHeight
+ * @param {number} fullWidth
+ * @param {number} fullHeight
+ * @param {number} previewScale
+ * @param {'fast'|'quality'} quality
+ * @param {any} format
+ * @returns {any[]}
+ */
+function compileSpatialSegments(items, width, height, bandHeight, fullWidth, fullHeight, previewScale, quality, format) {
+  const active = items
+    .map(({ descriptor }, index) => ({ descriptor, index }))
+    .filter(({ descriptor }) => descriptor.identity !== true);
+  if (!active.length) return [];
+
+  // Every non-identity node is initially isolated.  Transient edges then
+  // remove cuts between their producer and nearest consumer.
+  const cuts = new Set(active.slice(0, -1).map(({ index }) => index));
+  const activeIndexes = active.map(({ index }) => index);
+  const activeOrdinal = new Map(activeIndexes.map((index, ordinal) => [index, ordinal]));
+  for (const { index: producerIndex, descriptor: producer } of active) {
+    for (const alias of producer.transientsWrite ?? []) {
+      const consumer = active.find(({ index, descriptor }) => index > producerIndex && descriptor.transientsRead?.includes(alias));
+      if (!consumer) continue;
+      const producerOrdinal = activeOrdinal.get(producerIndex) ?? 0;
+      const consumerOrdinal = activeOrdinal.get(consumer.index) ?? producerOrdinal;
+      for (let ordinal = producerOrdinal; ordinal < consumerOrdinal; ordinal += 1) cuts.delete(activeIndexes[ordinal]);
+    }
+  }
+
+  const ranges = [];
+  let start = activeIndexes[0];
+  for (let ordinal = 0; ordinal < activeIndexes.length - 1; ordinal += 1) {
+    const boundary = activeIndexes[ordinal];
+    if (cuts.has(boundary)) {
+      ranges.push([start, boundary]);
+      // Ranges are graph-contiguous, not merely active-node contiguous: an
+      // identity node between two physical effects remains attached to the
+      // following segment for alias/stat accounting without adding cost.
+      start = boundary + 1;
+    }
+  }
+  ranges.push([start, activeIndexes[activeIndexes.length - 1]]);
+  // Keep leading/trailing identity commands attached to the nearest physical
+  // segment so cursor/step telemetry still accounts for the complete enabled
+  // graph without assigning them any halo or cost.
+  ranges[0][0] = 0;
+  ranges[ranges.length - 1][1] = items.length - 1;
+
+  return ranges.map(([nodeStart, nodeEnd], index) => {
+    const segmentItems = items.slice(nodeStart, nodeEnd + 1);
+    let downstreamInputHalo = 0;
+    let inputHalo = 0;
+    let generatedFieldHalo = 0;
+    let phasePeriod = 1;
+    for (let itemIndex = segmentItems.length - 1; itemIndex >= 0; itemIndex -= 1) {
+      const dependency = segmentItems[itemIndex].descriptor.spatialDependency ?? segmentItems[itemIndex].descriptor;
+      if (segmentItems[itemIndex].descriptor.identity === true) continue;
+      const localInputHalo = Math.max(0, Number(dependency.inputHalo ?? segmentItems[itemIndex].descriptor.sourceRadius ?? 0));
+      inputHalo = Math.max(inputHalo, Math.ceil(localInputHalo + downstreamInputHalo));
+      downstreamInputHalo += localInputHalo;
+      generatedFieldHalo = Math.max(generatedFieldHalo, Math.ceil(Number(dependency.generatedFieldHalo ?? segmentItems[itemIndex].descriptor.generatedFieldRadius ?? 0)));
+      phasePeriod = lcm(phasePeriod, Math.max(1, Math.trunc(dependency.phasePeriod ?? segmentItems[itemIndex].descriptor.phasePeriod ?? 1)));
+    }
+    const alignedInputHalo = Math.ceil(inputHalo / phasePeriod) * phasePeriod;
+    const requestedBandHeight = Array.isArray(bandHeight) ? bandHeight[index] : bandHeight;
+    const numericBandHeight = Math.max(1, Math.min(height, Math.trunc(Number(requestedBandHeight) || 1)));
+    const localBandHeight = numericBandHeight >= height
+      ? height
+      : Math.max(1, Math.floor(numericBandHeight / phasePeriod) * phasePeriod);
+    const segmentBands = splitBands(width, height, localBandHeight, alignedInputHalo);
+    const aliasPlan = planArenaAliases(segmentItems);
+    // Generated fields (notably Grain) may need coordinate-addressed padding
+    // inside the scratch arena, but that padding must never become upstream
+    // input halo.  Reserve it in the local physical geometry only.
+    const scratchHeight = Math.max(
+      1,
+      localBandHeight + alignedInputHalo * 2 + generatedFieldHalo * 2,
+    );
+    const physicalLayout = createPhysicalLayout(aliasPlan, segmentItems, width, scratchHeight);
+    const nodeIds = segmentItems.map(({ node }) => node.id);
+    const transients = Object.freeze({
+      reads: Object.freeze([...new Set(segmentItems.flatMap(({ descriptor }) => descriptor.transientsRead ?? []))]),
+      writes: Object.freeze([...new Set(segmentItems.flatMap(({ descriptor }) => descriptor.transientsWrite ?? []))]),
+    });
+    const estimatedPasses = segmentItems.reduce((sum, { descriptor }) => sum + Math.max(0, Number(descriptor.estimatedPasses ?? 1)), 0);
+    const inputPixels = segmentBands.reduce((sum, band) => sum + width * Math.max(0, band.end - band.start), 0);
+    const corePixels = segmentBands.reduce((sum, band) => sum + width * Math.max(0, band.y1 - band.y0), 0);
+    // Materialization consists of copying the halo-complete RGB/alpha input
+    // window into the local frame and committing the valid RGB core back into
+    // the pending full-frame slot.  Keep both directions in the plan traffic
+    // estimate so segment telemetry can be reconciled with the native copy
+    // counters instead of reporting only the final core write.
+    const materializationBytes = (
+      inputPixels * 4 + corePixels * 3
+    ) * Float32Array.BYTES_PER_ELEMENT;
+    const segmentHash = hashObject({
+      index, nodeStart, nodeEnd, nodeIds, inputHalo: alignedInputHalo,
+      generatedFieldHalo, phasePeriod, bands: segmentBands,
+      layoutHash: physicalLayout.layoutHash, transients,
+    });
+    return Object.freeze({
+      index,
+      segmentHash,
+      nodeStart,
+      nodeEnd,
+      nodeIds: Object.freeze(nodeIds),
+      nodeTypes: Object.freeze(segmentItems.map(({ node }) => node.type)),
+      inputHalo: alignedInputHalo,
+      generatedFieldHalo,
+      phasePeriod,
+      bandHeight: localBandHeight,
+      bands: Object.freeze(segmentBands),
+      physicalLayout,
+      transients,
+      estimatedCost: Object.freeze({
+        estimatedKernelPixelVisits: inputPixels * Math.max(1, estimatedPasses),
+        estimatedPasses,
+        inputPixels,
+        corePixels,
+        materializationBytes,
+        trafficBytes: materializationBytes,
+        bandCount: segmentBands.length,
+      }),
+      memory: Object.freeze({
+        scratchFloats: physicalLayout.residentScratchFloats,
+        transientFloats: physicalLayout.transientFloats,
+      }),
+      fullWidth,
+      fullHeight,
+      previewScale,
+      quality,
+      format,
+    });
+  });
+}
+
 /** @param {number} width @param {number} height @param {number} componentSize @param {any[]} enabledDescriptors */
 function slotEstimate(width, height, componentSize, enabledDescriptors) {
   const pixels = width * height;
@@ -483,6 +740,231 @@ function slotEstimate(width, height, componentSize, enabledDescriptors) {
 }
 
 /**
+ * Select the PF-10 execution mode from a checked, deterministic cost model.
+ * Host canonical input is included because an Apply request must be restartable
+ * from the source if a resident segment fails after an earlier commit.
+ * @param {any[]} segments
+ * @param {any} physicalLayout
+ * @param {number} width
+ * @param {number} height
+ * @param {number} componentSize
+ * @param {number} budgetBytes
+ * @param {boolean} residentContiguous
+ * @returns {any}
+ */
+function chooseExecutionPlan(segments, physicalLayout, width, height, componentSize, budgetBytes, residentContiguous) {
+  const pixels = width * height;
+  const persistentFrameBytes = pixels * PERSISTENT_FRAME_PLANES * BYTES_PER_F32;
+  const hostCanonicalBytes = pixels * 4 * BYTES_PER_F32;
+  const hostOutputBytes = pixels * 4 * componentBytes(componentSize);
+  const commandBytes = segments.reduce((sum, segment) => sum + 64 + Math.max(1, segment.nodeIds?.length ?? 1) * 512, 0);
+  const maxSegmentRows = Math.max(1, ...segments.flatMap((segment) => (segment.bands ?? []).map((/** @type {any} */ band) => Math.max(0, band.end - band.start))));
+  const maxUploadRows = Math.max(1, ...segments.flatMap((segment) => (segment.bands ?? []).map((/** @type {any} */ band) => Math.max(0, band.y1 - band.y0))));
+  const hostReadBytes = width * maxUploadRows * 4 * componentBytes(componentSize);
+  // A segment keeps two local RGB frames plus one local alpha plane while a
+  // band is executing.  The first RGB/alpha pair doubles as the upload
+  // staging view, so this single 7-plane term accounts for both staging and
+  // local materialization without double-counting another host buffer.
+  const stagingBytes = width * maxSegmentRows * PERSISTENT_FRAME_PLANES * BYTES_PER_F32;
+  const commonFixedBytes = persistentFrameBytes + hostCanonicalBytes + hostOutputBytes + hostReadBytes + commandBytes;
+  const fixedBytes = commonFixedBytes + stagingBytes;
+  const wasmLimit = WASM32_MAX_BYTES;
+  /** @param {string} mode @param {number} peakBytes @param {number} kernelPixelVisits @param {number} trafficBytes @param {number} bandCount @param {boolean} valid @param {string} reason */
+  const candidate = (mode, peakBytes, kernelPixelVisits, trafficBytes, bandCount, valid, reason) => ({
+    mode,
+    valid,
+    reason,
+    estimatedPeakBytes: Math.ceil(peakBytes),
+    estimatedKernelPixelVisits: Math.ceil(kernelPixelVisits),
+    trafficBytes: Math.ceil(trafficBytes),
+    bandCount,
+  });
+
+  const wholeKernelVisits = pixels * Math.max(1, segments.reduce((sum, segment) => sum + Number(segment.estimatedCost?.estimatedPasses ?? 1), 0));
+  const wholeResidentBytes = persistentFrameBytes + Math.max(0, Number(physicalLayout?.scratchFloats ?? 0) * BYTES_PER_F32)
+    + Math.max(0, Number(physicalLayout?.transientFloats ?? 0) * BYTES_PER_F32);
+  // Whole-frame reuses its full resident input frames for upload and needs no
+  // segment-local seven-plane staging frame.  Scratch capacity belongs in the
+  // peak model, not the traffic tie-breaker: treating reserved bytes as copy
+  // traffic incorrectly made a safe Preview choose five segment commits.
+  const wholePeak = commonFixedBytes + wholeResidentBytes - persistentFrameBytes;
+  const wholeWasmPeak = wholeResidentBytes;
+  const wholeTraffic = persistentFrameBytes;
+  const whole = candidate(
+    'whole-frame',
+    wholePeak,
+    wholeKernelVisits,
+    wholeTraffic,
+    1,
+    residentContiguous && wholePeak * SAFETY_MARGIN <= budgetBytes && wholeWasmPeak * RESIDENT_LAYOUT_SAFETY_MARGIN <= wasmLimit,
+    residentContiguous ? 'whole-frame resident layout' : 'resident capability unavailable',
+  );
+
+  const segmentKernelVisits = segments.reduce((sum, segment) => sum + Number(segment.estimatedCost?.estimatedKernelPixelVisits ?? 0), 0);
+  const segmentMaterialization = segments.reduce((sum, segment) => sum + Number(segment.estimatedCost?.materializationBytes ?? 0), 0);
+  // reserveSegmented takes independent maxima for arena and transient
+  // capacity.  Those maxima may belong to different segments, so taking the
+  // maximum of each segment's sum would under-report the actual reservation.
+  const segmentArenaBytes = segments.reduce((max, segment) => Math.max(max,
+    Number(segment.memory?.scratchFloats ?? 0) * BYTES_PER_F32), 0);
+  const segmentTransientBytes = segments.reduce((max, segment) => Math.max(max,
+    Number(segment.memory?.transientFloats ?? 0) * BYTES_PER_F32), 0);
+  const segmentScratch = segmentArenaBytes + segmentTransientBytes;
+  const segmentPeak = fixedBytes + segmentScratch;
+  // The segmented native session owns both full persistent frames and the
+  // largest local band frame/staging envelope at the same time.  Keep the
+  // Wasm32 safety check honest; omitting the local seven-plane frame lets a
+  // seemingly legal large-core plan approach the 4 GiB ceiling without the
+  // required 1.70 reserve margin.
+  const segmentWasmPeak = persistentFrameBytes + stagingBytes + segmentScratch + commandBytes;
+  const segmentTraffic = persistentFrameBytes + segmentMaterialization;
+  const segmented = candidate(
+    'resident-segmented',
+    segmentPeak,
+    segmentKernelVisits,
+    segmentTraffic,
+    segments.reduce((sum, segment) => sum + Number(segment.bands?.length ?? 0), 0),
+    residentContiguous && segments.length > 0 && segmentPeak * SAFETY_MARGIN <= budgetBytes && segmentWasmPeak * RESIDENT_LAYOUT_SAFETY_MARGIN <= wasmLimit,
+    residentContiguous ? 'segment-local frame materialization' : 'resident capability unavailable',
+  );
+
+  const legacy = candidate(
+    'legacy-banded',
+    Math.max(hostOutputBytes, Number(physicalLayout?.residentScratchFloats ?? 0) * BYTES_PER_F32),
+    wholeKernelVisits,
+    Math.max(0, Number(physicalLayout?.transientFloats ?? 0) * BYTES_PER_F32),
+    Math.max(1, segments.reduce((sum, segment) => sum + Number(segment.bands?.length ?? 0), 0)),
+    true,
+    'compatibility fallback',
+  );
+  const valid = [whole, segmented].filter((entry) => entry.valid);
+  valid.sort((a, b) => a.estimatedKernelPixelVisits - b.estimatedKernelPixelVisits
+    || a.trafficBytes - b.trafficBytes
+    || a.bandCount - b.bandCount
+    || ['whole-frame', 'resident-segmented', 'legacy-banded'].indexOf(a.mode) - ['whole-frame', 'resident-segmented', 'legacy-banded'].indexOf(b.mode));
+  const selected = valid[0] ?? legacy;
+  return Object.freeze({
+    mode: selected.mode,
+    selected,
+    candidates: Object.freeze({ wholeFrame: Object.freeze(whole), residentSegmented: Object.freeze(segmented), legacyBanded: Object.freeze(legacy) }),
+    persistentFrameBytes,
+    fixedBytes,
+    hostReadBytes,
+    commandBytes,
+    stagingBytes,
+    wasmLimit,
+  });
+}
+
+/** Grow segment cores independently while the single PF-10 reserve remains
+ * legal.  Growth is deliberately incremental so high-benefit wide-halo
+ * segments compete for the shared staging/scratch envelope before zero-halo
+ * segments consume it merely to reduce scheduler calls.
+ * @param {any[]} items
+ * @param {any[]} initialSegments
+ * @param {any} initialExecution
+ * @param {number} width
+ * @param {number} height
+ * @param {number} fullWidth
+ * @param {number} fullHeight
+ * @param {number} previewScale
+ * @param {'fast'|'quality'} quality
+ * @param {any} format
+ * @param {any} physicalLayout
+ * @param {number} componentSize
+ * @param {number} budgetBytes
+ * @param {boolean} residentContiguous
+ * @returns {{segments:any[],execution:any}}
+ */
+function optimizeSpatialSegmentBands(
+  items,
+  initialSegments,
+  initialExecution,
+  width,
+  height,
+  fullWidth,
+  fullHeight,
+  previewScale,
+  quality,
+  format,
+  physicalLayout,
+  componentSize,
+  budgetBytes,
+  residentContiguous,
+) {
+  let segments = initialSegments;
+  let execution = initialExecution;
+  if (!residentContiguous || !execution.candidates.residentSegmented.valid || !segments.length) {
+    return { segments, execution };
+  }
+  let bandHeights = segments.map((segment) => segment.bandHeight);
+  const maxIterations = Math.max(1, segments.length * 8);
+  for (let iteration = 0; iteration < maxIterations; iteration += 1) {
+    const currentCandidate = execution.candidates.residentSegmented;
+    const candidates = [];
+    for (let index = 0; index < segments.length; index += 1) {
+      const segment = segments[index];
+      if (segment.bandHeight >= height) continue;
+      const phase = Math.max(1, Math.trunc(Number(segment.phasePeriod) || 1));
+      const doubled = Math.min(height, segment.bandHeight * 2);
+      const nextBandHeight = doubled >= height
+        ? height
+        : Math.max(segment.bandHeight + phase, Math.floor(doubled / phase) * phase);
+      if (nextBandHeight <= segment.bandHeight) continue;
+      const candidateBandHeights = bandHeights.slice();
+      candidateBandHeights[index] = nextBandHeight;
+      const candidateSegments = compileSpatialSegments(
+        items,
+        width,
+        height,
+        candidateBandHeights,
+        fullWidth,
+        fullHeight,
+        previewScale,
+        quality,
+        format,
+      );
+      const candidateExecution = chooseExecutionPlan(
+        candidateSegments,
+        physicalLayout,
+        width,
+        height,
+        componentSize,
+        budgetBytes,
+        residentContiguous,
+      );
+      const residentCandidate = candidateExecution.candidates.residentSegmented;
+      if (!residentCandidate.valid) continue;
+      const visitReduction = currentCandidate.estimatedKernelPixelVisits - residentCandidate.estimatedKernelPixelVisits;
+      const trafficReduction = currentCandidate.trafficBytes - residentCandidate.trafficBytes;
+      const bandReduction = currentCandidate.bandCount - residentCandidate.bandCount;
+      if (visitReduction <= 0 && trafficReduction <= 0 && bandReduction <= 0) continue;
+      candidates.push({
+        index,
+        nextBandHeight,
+        segments: candidateSegments,
+        execution: candidateExecution,
+        visitReduction,
+        trafficReduction,
+        bandReduction,
+        peakIncrease: residentCandidate.estimatedPeakBytes - currentCandidate.estimatedPeakBytes,
+      });
+    }
+    if (!candidates.length) break;
+    candidates.sort((a, b) => b.visitReduction - a.visitReduction
+      || b.trafficReduction - a.trafficReduction
+      || b.bandReduction - a.bandReduction
+      || a.peakIncrease - b.peakIncrease
+      || a.index - b.index);
+    const selected = candidates[0];
+    bandHeights = selected.segments.map((segment) => segment.bandHeight);
+    segments = selected.segments;
+    execution = selected.execution;
+  }
+  return { segments, execution };
+}
+
+/**
  * Compile a graph into immutable spatial, memory and band geometry metadata.
  * The planner is host-independent and can be used by Node benchmarks.
  */
@@ -500,6 +982,12 @@ export function createFilmRenderPlan(request = {}) {
   const fullWidth = Math.trunc(Number(request.fullWidth ?? width));
   const fullHeight = Math.trunc(Number(request.fullHeight ?? height));
   const previewScale = Number(request.previewScale ?? 1);
+  if (!Number.isSafeInteger(fullWidth) || fullWidth <= 0 || !Number.isSafeInteger(fullHeight) || fullHeight <= 0) {
+    throw new RangeError('createFilmRenderPlan requires positive integer fullWidth and fullHeight');
+  }
+  if (!Number.isFinite(previewScale) || previewScale <= 0) {
+    throw new RangeError('createFilmRenderPlan requires a finite positive previewScale');
+  }
   const format = request.format ?? request.document?.format;
   const context = { fullWidth, fullHeight, previewScale, quality, format };
   const enabled = graph.filter((node) => node.enabled !== false);
@@ -516,6 +1004,9 @@ export function createFilmRenderPlan(request = {}) {
       sourceRadius: descriptor.sourceRadius,
       requiredInputHalo,
       generatedFieldRadius: descriptor.generatedFieldRadius,
+      spatialDependency: descriptor.spatialDependency,
+      estimatedPasses: descriptor.estimatedPasses,
+      identity: descriptor.identity,
       phasePeriod: descriptor.phasePeriod,
       buffers: descriptor.buffers,
       compositeMode: descriptor.compositeMode,
@@ -622,8 +1113,35 @@ export function createFilmRenderPlan(request = {}) {
     if (bandHeight > height) bandHeight = height;
   }
   const bands = splitBands(width, height, bandHeight, high ? 0 : alignedOverlap);
+  const uploadBands = splitBands(width, height, Math.max(1, bandHeight), 0);
   const bandPixels = width * Math.min(height, bandHeight + (high ? 0 : alignedOverlap * 2));
   const estimatedBandBytes = Math.ceil(bandPixels * bandBytesPerPixel);
+  // PF-9 segments have their own scratch envelope.  When a known host has
+  // room beyond the legacy balanced band, use a larger local core to avoid
+  // paying the same halo materialization once per graph-wide band.  The
+  // legacy `bands` view remains unchanged for compatibility; only the PF-10
+  // resident geometry uses this bounded multiplier.
+  const spatialBandMultiplier = !high && residentContiguous && hasKnownMemory
+    ? (assumedDeviceMemoryGB >= 24 ? 4 : 2)
+    : 1;
+  const spatialBandHeight = Math.min(
+    height,
+    Math.max(1, Math.floor((Math.max(1, high ? Math.min(height, Math.max(MINIMUM_BAND_HEIGHT, 256)) : bandHeight) * spatialBandMultiplier) / phasePeriod) * phasePeriod),
+  );
+  let spatialSegments = compileSpatialSegments(
+    descriptors,
+    width,
+    height,
+    // An explicit High request keeps the legacy whole-image compatibility
+    // view, while PF-10 may still choose local segment bands if the new
+    // persistent-frame working set is too large for one resident call.
+    spatialBandHeight,
+    fullWidth,
+    fullHeight,
+    previewScale,
+    quality,
+    format,
+  );
   const hardBudgetExceeded = high
     ? memory.plannedPeakBytes * SAFETY_MARGIN > budgetBytes
     : estimatedBandBytes * SAFETY_MARGIN > hardBudgetBytes;
@@ -638,6 +1156,66 @@ export function createFilmRenderPlan(request = {}) {
   const backendCandidates = Object.freeze({
     [BACKEND_IDS.GPU]: buildBackendSegments(descriptors, BACKEND_IDS.GPU, 'planned'),
   });
+  let execution = chooseExecutionPlan(
+    spatialSegments,
+    physicalLayout,
+    width,
+    height,
+    componentSize,
+    budgetBytes,
+    residentContiguous,
+  );
+  // A single enabled wide-halo node can make the legacy balanced planner
+  // choose a whole-height band even though PF-10 needs a smaller local
+  // envelope.  Shrink only the PF-10 segment geometry until its checked peak
+  // fits the host/Wasm margins; the compatibility `bands` view is untouched.
+  let retryBandHeight = spatialBandHeight;
+  while (!execution.candidates.residentSegmented.valid
+    && retryBandHeight > Math.max(phasePeriod, MINIMUM_BAND_HEIGHT)
+    && residentContiguous) {
+    retryBandHeight = Math.max(
+      phasePeriod,
+      Math.floor((retryBandHeight / 2) / phasePeriod) * phasePeriod,
+    );
+    spatialSegments = compileSpatialSegments(
+      descriptors,
+      width,
+      height,
+      retryBandHeight,
+      fullWidth,
+      fullHeight,
+      previewScale,
+      quality,
+      format,
+    );
+    execution = chooseExecutionPlan(
+      spatialSegments,
+      physicalLayout,
+      width,
+      height,
+      componentSize,
+      budgetBytes,
+      residentContiguous,
+    );
+  }
+  const optimizedSpatialPlan = optimizeSpatialSegmentBands(
+    descriptors,
+    spatialSegments,
+    execution,
+    width,
+    height,
+    fullWidth,
+    fullHeight,
+    previewScale,
+    quality,
+    format,
+    physicalLayout,
+    componentSize,
+    budgetBytes,
+    residentContiguous,
+  );
+  spatialSegments = optimizedSpatialPlan.segments;
+  execution = optimizedSpatialPlan.execution;
   const commands = Object.freeze(descriptors.map(({ node, descriptor }, index) => Object.freeze({
     opcode: /** @type {any} */ (STAGE_OPCODES)[node.type] ?? 0,
     index,
@@ -657,7 +1235,7 @@ export function createFilmRenderPlan(request = {}) {
   const planData = {
     width, height, fullWidth, fullHeight, previewScale, componentSize, quality,
     memoryMode: high ? 'high' : 'balanced', overlap: high ? 0 : alignedOverlap,
-    bandHeight, phasePeriod, graphHash, dependencies, backendSegments, backendCandidates, backendOrder, commands, warnings,
+    bandHeight, phasePeriod, graphHash, dependencies, bands, uploadBands, spatialSegments, execution, backendSegments, backendCandidates, backendOrder, commands, warnings,
     residentMigrationOrder: RESIDENT_MIGRATION_ORDER,
     residentMemory,
     physicalLayout,
@@ -669,6 +1247,10 @@ export function createFilmRenderPlan(request = {}) {
     width, height, fullWidth, fullHeight, previewScale, componentSize, quality, format,
     graph: Object.freeze(graph), enabled: Object.freeze(enabled),
     graphHash, planHash, dependencies: Object.freeze(dependencies), phasePeriod,
+    spatialSegments: Object.freeze(spatialSegments),
+    execution: Object.freeze(execution),
+    executionMode: execution.mode,
+    uploadBands: Object.freeze(uploadBands),
     backendSegments, backendCandidates, backendOrder,
     commands,
     residentMigrationOrder: RESIDENT_MIGRATION_ORDER,

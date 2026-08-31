@@ -137,6 +137,8 @@ export function createFilmExecutor(plan, options = {}) {
   const gpuBackend = options.gpuBackend ?? createUnavailableGpuBackend();
   const allowExperimentalGpu = options.allowExperimentalGpu === true;
   const residentBackend = options.residentBackend ?? null;
+  const ownsResidentBackend = options.ownsResidentBackend === true
+    || (options.ownsResidentBackend !== false && residentBackend?.requestScoped === true);
   let residentDisabledForRequest = false;
   let disposed = false;
   let preparedGpu = false;
@@ -373,6 +375,7 @@ export function createFilmExecutor(plan, options = {}) {
       if (disposed) return;
       disposed = true;
       gpuBackend.dispose?.();
+      if (ownsResidentBackend) residentBackend?.dispose?.();
       if (ownsArena) arena.dispose();
     },
   };

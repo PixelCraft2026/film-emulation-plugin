@@ -37,11 +37,14 @@ import {
   createHalationPreset,
   processFilm,
   createGraphCommandBuffer,
+  setWasmExecutionMode,
+  setWasmSimdQualification,
 } from '../../src/core/index.js';
 import { boxBlur3 } from '../../src/core/diffuse/box.js';
 import { gaussianBlurSep } from '../../src/core/diffuse/conv.js';
 
 const wasmPath = fileURLToPath(new URL('../../assets/film_core.wasm', import.meta.url));
+const wasmSimdPath = fileURLToPath(new URL('../../assets/film_core_simd.wasm', import.meta.url));
 
 test('V1.6 resident workspace reserves one reusable band capacity and reports copies', async (t) => {
   if (!existsSync(wasmPath)) {
@@ -208,6 +211,7 @@ test('WASM coordinate hash field matches the JS reference, including negative or
   }
   const status = await installWasmModule(readFileSync(wasmPath));
   assert.equal(status.available, true, status.error || 'WASM available');
+  assert.equal(status.metrics.resident.capabilities & ((1 << 2) | (1 << 3)), (1 << 2) | (1 << 3));
   const width = 17;
   const height = 9;
   const nodeHash = fnv1aUtf8('grain-main');
@@ -405,7 +409,7 @@ test('resident scalar executes the complete V1.7 graph including masks and Bloom
     t.skip('assets/film_core.wasm not built; run npm run build:wasm');
     return;
   }
-  const width = 61;
+  const width = 97;
   const height = 43;
   const pixels = width * height;
   const rgb = new Float32Array(pixels * 3);
@@ -441,11 +445,19 @@ test('resident scalar executes the complete V1.7 graph including masks and Bloom
   const expected = processFilm(input, document, { ...context, backend: 'js' });
   const status = await installWasmModule(readFileSync(wasmPath));
   assert.equal(status.available, true, status.error || 'WASM available');
-  const plan = createFilmRenderPlan({ width, height, graph, format: document.format, fullWidth: context.fullWidth, fullHeight: context.fullHeight, quality: context.quality, memoryMode: 'high' });
+  const compiledPlan = createFilmRenderPlan({ width, height, graph, format: document.format, fullWidth: context.fullWidth, fullHeight: context.fullHeight, quality: context.quality, memoryMode: 'balanced', deviceMemoryGB: 16 });
+  // Small canonical inputs now correctly prefer whole-frame.  This case
+  // explicitly exercises the compatibility-selectable segmented driver.
+  const plan = {
+    ...compiledPlan,
+    executionMode: 'resident-segmented',
+    execution: { ...compiledPlan.execution, mode: 'resident-segmented', selected: compiledPlan.execution.candidates.residentSegmented },
+  };
   const resident = createV17ResidentBackend(plan);
   assert.ok(resident?.supportsPlan(plan));
   const executor = createFilmExecutor(plan, { backend: 'wasm-resident', residentBackend: resident });
-  const actual = executor.render(input, document, context);
+  const snapshots = [];
+  const actual = executor.render(input, document, { ...context, collectStepSamples: true, onResidentStep: (snapshot) => snapshots.push(snapshot) });
   let squared = 0;
   let max = 0;
   for (let i = 0; i < actual.rgb.length; i += 1) {
@@ -455,13 +467,187 @@ test('resident scalar executes the complete V1.7 graph including masks and Bloom
   }
   const rms = Math.sqrt(squared / actual.rgb.length);
   assert.equal(actual.stats.backend, 'wasm-resident');
+  assert.equal(actual.stats.executionMode, 'resident-segmented');
+  assert.deepEqual(Object.keys(actual.stats.segments), [
+    'defringe-main',
+    'halation-main',
+    'bloom-main+highlight-protection-main',
+    'film-resolution-main',
+    'grain-main',
+  ]);
+  assert.ok(Object.values(actual.stats.segments).every((segment) => segment.inputPixels >= segment.corePixels));
   assert.equal(actual.alpha, alpha);
   assert.ok(rms <= 1e-4, `complete resident RMS=${rms}, max=${max}`);
   assert.ok(max <= 1e-3, `complete resident max=${max}, RMS=${rms}`);
+  const enabledIds = plan.enabled.map((node) => node.id).sort();
+  assert.deepEqual(Object.keys(actual.stats.timings.perNode).sort(), enabledIds);
+  assert.ok(actual.stats.nodes.every((node) => node.elapsedMs > 0));
+  const residentBindings = plan.physicalLayoutFor(width, height).residentBindings;
+  assert.ok(actual.stats.nodes.every((node, index) => node.scratchBytes === residentBindings[index].residentScratchFloats * Float32Array.BYTES_PER_ELEMENT));
+  assert.ok(Object.keys(actual.stats.timings.perStage).some((stage) => stage.endsWith('.extract')));
+  assert.ok(Object.keys(actual.stats.timings.perStage).some((stage) => stage.includes('.diffuse[')));
+  assert.ok(actual.stats.scheduler.fusionCount > 0, 'segmented Bloom + Highlight Protection uses the physical fusion');
+  assert.ok(Object.keys(actual.stats.timings.perStage).includes('highlight-protection-main.protect[fusedBloomComposite]'));
+  const attributed = Object.values(actual.stats.timings.perStage).reduce((sum, value) => sum + value, 0);
+  assert.ok(Math.abs(attributed - actual.stats.timings.process) / actual.stats.timings.process <= 0.03);
+  assert.ok(snapshots.length > plan.enabled.length);
+  assert.ok(snapshots.every((snapshot) => snapshot.work <= 262144 && snapshot.work >= 0));
+  assert.ok(snapshots.every((snapshot) => [snapshot.work, snapshot.reads, snapshot.writes, snapshot.taps, snapshot.downsamplePixels, snapshot.upsamplePixels].every(Number.isFinite)));
+  assert.ok(actual.stats.scheduler.stepLatencyMs.p50 >= 0);
+  assert.ok(actual.stats.scheduler.stepLatencyMs.p95 >= actual.stats.scheduler.stepLatencyMs.p50);
+  assert.ok(actual.stats.scheduler.work.pixelVisits > 0);
+  const unprofiled = executor.render(input, document, { ...context, profileResident: false });
+  assert.deepEqual(unprofiled.stats.timings.perNode, {});
+  assert.deepEqual(unprofiled.stats.timings.perStage, {});
+  assert.equal(unprofiled.stats.scheduler.work.pixelVisits, 0);
+  assert.ok(unprofiled.stats.scheduler.stepLatencyMs.count > 0);
   const metrics = resident.stats();
-  assert.equal(metrics.uploadBytes, rgb.byteLength + alpha.byteLength);
-  assert.equal(metrics.downloadBytes, rgb.byteLength);
+  assert.equal(metrics.uploadBytes, 2 * (rgb.byteLength + alpha.byteLength));
+  assert.equal(metrics.downloadBytes, 2 * rgb.byteLength);
   executor.dispose();
+
+  const debugResident = createV17ResidentBackend(plan);
+  assert.ok(debugResident?.supportsPlan(plan));
+  const debugExecutor = createFilmExecutor(plan, {
+    backend: 'wasm-resident',
+    residentBackend: debugResident,
+    debugDualRun: true,
+  });
+  const debug = debugExecutor.render(input, document, context);
+  assert.equal(debug.stats.scheduler.fusionCount, 0, 'debug dual-run preserves logical node checkpoints');
+  assert.ok(debug.stats.dualRun.rms <= 1e-4, `debug dual-run RMS=${debug.stats.dualRun.rms}`);
+  assert.ok(debug.stats.dualRun.max <= 1e-3, `debug dual-run max=${debug.stats.dualRun.max}`);
+  debugExecutor.dispose();
+  resetWasmBackend();
+});
+
+test('PF-12 SIMD resident matches the frozen scalar graph on HDR, alpha, masks, and Quality recurrences', async (t) => {
+  if (!existsSync(wasmPath) || !existsSync(wasmSimdPath)) {
+    t.skip('scalar/SIMD WASM artifacts not built; run npm run build:wasm');
+    return;
+  }
+  const width = 53;
+  const height = 37;
+  const pixels = width * height;
+  const rgb = new Float32Array(pixels * 3);
+  const alpha = new Float32Array(pixels);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const index = y * width + x;
+      const p = index * 3;
+      const hidden = index % 19 === 0;
+      const highlight = Math.hypot(x - 19, y - 17) < 4 ? 3.5 : 0;
+      rgb[p] = hidden ? 12 : 0.02 + x / width * 0.8 + highlight;
+      rgb[p + 1] = hidden ? 4 : 0.03 + y / height * 0.65 + highlight * 0.85;
+      rgb[p + 2] = hidden ? 9 : 0.01 + ((x * 11 + y * 7) % 31) / 50 + highlight * 0.62;
+      alpha[index] = hidden ? 0 : (index % 13) / 12;
+    }
+  }
+  const mask = createLumaMask({ mode: 'luma', lowEV: -4, highEV: 4, softnessEV: 0.75 });
+  const graph = createDefaultEffectGraph(createHalationParams({
+    strength: 42,
+    sigma: 2.8,
+    sigmaUnits: 'pixels',
+    diffusionMode: 'quality',
+    sourceExpansion: 0.22,
+    globalDiffusion: 0.015,
+  }), 0x2468ace0).map((node) => {
+    if (node.type === 'defringe') return { ...node, enabled: true, params: createDefringeParams({ amount: 0.6, radiusPx: 1.4 }), mask };
+    if (node.type === 'bloom') return { ...node, enabled: true, params: createBloomParams({ radius: 0.2, amplify: 0.35 }), mask };
+    if (node.type === 'highlightProtection') return { ...node, enabled: true, params: createHighlightProtectionParams({ amount: 0.5 }), mask };
+    if (node.type === 'filmResolution') return { ...node, enabled: true, params: createFilmResolutionParams({ amount: 0.8, response: 1.1 }), mask };
+    if (node.type === 'grain') return { ...node, enabled: true, params: createGrainParams({ amount: 0.55, size: 1.05, roughness: 0.6, chroma: 0.25, mode: 'analogue', seed: 0x2468ace0 }), mask };
+    return { ...node, enabled: true, mask };
+  });
+  const format = { gauge: '35mm', iso: 800 };
+  const document = { format, graph };
+  const context = { fullWidth: 1200, fullHeight: 800, quality: 'quality', format };
+  const plan = createFilmRenderPlan({
+    width, height, fullWidth: context.fullWidth, fullHeight: context.fullHeight,
+    graph, format, quality: 'quality', memoryMode: 'high', deviceMemoryGB: 16,
+  });
+
+  resetWasmBackend();
+  const status = await installWasmModule(readFileSync(wasmPath), readFileSync(wasmSimdPath));
+  assert.equal(status.available, true, status.error || 'WASM available');
+  assert.ok(status.metrics?.simdResident, 'SIMD artifact exposes explicit production-kernel capability');
+  assert.equal(status.metrics.simdQualified, true, 'the exact PF-12-qualified artifact pair promotes Auto');
+  assert.equal(setWasmSimdQualification({ correct: true, speedup: 0.099 }), false, 'sub-10% speedup cannot qualify');
+  setWasmExecutionMode('auto');
+  const autoResident = createV17ResidentBackend(plan);
+  assert.equal(autoResident?.stats().backendVariant, 'wasm-resident-scalar');
+  autoResident?.dispose();
+  setWasmSimdQualification({ correct: false, speedup: 0 });
+  const run = (mode) => {
+    setWasmExecutionMode(mode);
+    const resident = createV17ResidentBackend(plan);
+    assert.ok(resident?.supportsPlan(plan), `${mode} supports the fixed plan`);
+    const executor = createFilmExecutor(plan, { backend: mode, residentBackend: resident });
+    const result = executor.render({ width, height, rgb, alpha }, document, context);
+    const metrics = resident.stats();
+    executor.dispose();
+    return { result, metrics };
+  };
+  try {
+    const scalar = run('wasm-resident');
+    const simd = run('wasm-resident-simd');
+    let squared = 0;
+    let max = 0;
+    for (let index = 0; index < scalar.result.rgb.length; index += 1) {
+      const delta = simd.result.rgb[index] - scalar.result.rgb[index];
+      squared += delta * delta;
+      max = Math.max(max, Math.abs(delta));
+    }
+    const rms = Math.sqrt(squared / scalar.result.rgb.length);
+    assert.equal(scalar.result.stats.backendVariant, 'wasm-resident-scalar');
+    assert.equal(simd.result.stats.backendVariant, 'wasm-resident-simd');
+    assert.equal(scalar.result.alpha, alpha);
+    assert.equal(simd.result.alpha, alpha);
+    assert.ok(rms <= 1e-4, `SIMD/scalar RMS=${rms}`);
+    assert.ok(max <= 1e-3, `SIMD/scalar max=${max}`);
+    assert.ok(simd.metrics.actualArenaFloats <= simd.metrics.plannedArenaFloats);
+    assert.ok(simd.metrics.actualTransientFloats <= simd.metrics.plannedTransientFloats);
+    assert.ok(simd.metrics.allocationCount <= 1);
+  } finally {
+    setWasmExecutionMode('auto');
+    resetWasmBackend();
+  }
+});
+
+test('request-scoped resident sessions do not inherit a larger plan capacity', async (t) => {
+  if (!existsSync(wasmPath)) {
+    t.skip('assets/film_core.wasm not built; run npm run build:wasm');
+    return;
+  }
+  resetWasmBackend();
+  await installWasmModule(readFileSync(wasmPath));
+  const graph = createDefaultEffectGraph(createHalationParams({ strength: 0 }), 0x10203040)
+    .map((node) => ({ ...node, enabled: node.type === 'filmResolution' }));
+  const document = { format: { gauge: '35mm', iso: 400 }, graph };
+  const run = (width, height) => {
+    const pixels = width * height;
+    const rgb = new Float32Array(pixels * 3);
+    const alpha = new Float32Array(pixels).fill(1);
+    for (let index = 0; index < rgb.length; index += 1) rgb[index] = 0.05 + (index % 31) / 40;
+    const plan = createFilmRenderPlan({ width, height, fullWidth: width, fullHeight: height, graph, format: document.format, quality: 'quality', componentSize: 16, memoryMode: 'high', deviceMemoryGB: 16 });
+    const resident = createV17ResidentBackend(plan);
+    assert.ok(resident);
+    const executor = createFilmExecutor(plan, { backend: 'wasm-resident', residentBackend: resident });
+    const result = executor.render({ width, height, rgb, alpha }, document, { fullWidth: width, fullHeight: height, quality: 'quality', profileResident: true });
+    const scheduler = { ...result.stats.scheduler };
+    executor.dispose();
+    return scheduler;
+  };
+  const large = run(71, 53);
+  const small = run(31, 23);
+  const smallWarm = run(31, 23);
+  assert.equal(large.actualArenaFloats, large.plannedArenaFloats);
+  assert.equal(large.actualTransientFloats, large.plannedTransientFloats);
+  assert.equal(small.actualArenaFloats, small.plannedArenaFloats);
+  assert.equal(small.actualTransientFloats, small.plannedTransientFloats);
+  assert.ok(small.actualArenaFloats < large.actualArenaFloats);
+  assert.equal(smallWarm.actualArenaFloats, small.actualArenaFloats);
+  assert.equal(smallWarm.allocationCount, small.allocationCount, 'same-capacity warm session does not grow again');
   resetWasmBackend();
 });
 
@@ -638,8 +824,127 @@ test('resident ABI rejects malformed plans, non-finite values, stale handles, an
   let code = 1;
   while (code === 1) code = wasm.film_executor_step(handle, 1);
   assert.equal(code, -6);
+  assert.equal(wasm.film_executor_current_rgb_ptr(handle), wasm.film_executor_input_rgb_ptr(handle), 'failed partial output is not published');
   wasm.film_executor_destroy(handle);
   assert.equal(wasm.film_executor_reserve(handle, command.length, width, height, arenaFloats, transientFloats), -7);
+});
+
+test('resident budget=1 advances real work without publishing a partial node', async (t) => {
+  if (!existsSync(wasmPath)) { t.skip('assets/film_core.wasm not built; run npm run build:wasm'); return; }
+  const { instance } = await WebAssembly.instantiate(readFileSync(wasmPath), {});
+  const wasm = instance.exports;
+  const width = 32;
+  const height = 24;
+  const graph = createDefaultEffectGraph(createHalationParams({ strength: 0 }), 17).map((node) => ({
+    ...node,
+    enabled: node.type === 'defringe',
+    params: node.type === 'defringe' ? createDefringeParams({ amount: 0.8, radiusPx: 2.5 }) : node.params,
+  }));
+  const plan = createFilmRenderPlan({ width, height, graph, quality: 'quality', memoryMode: 'high' });
+  const command = createGraphCommandBuffer(plan, { width, height, quality: 'quality' });
+  const handle = wasm.film_executor_create(0);
+  assert.equal(wasm.film_executor_reserve(handle, command.length, width, height, width * height * 40, width * height * 8), 0);
+  new Uint8Array(wasm.memory.buffer, wasm.film_executor_command_ptr(handle), command.length).set(command);
+  const input = new Float32Array(wasm.memory.buffer, wasm.film_executor_input_rgb_ptr(handle), width * height * 3);
+  for (let i = 0; i < input.length; i += 1) input[i] = (i % 29) / 17;
+  new Float32Array(wasm.memory.buffer, wasm.film_executor_input_alpha_ptr(handle), width * height).fill(1);
+  const stable = new Float32Array(input);
+  const stablePtr = wasm.film_executor_current_rgb_ptr(handle);
+  assert.equal(wasm.film_executor_begin(handle, command.length), 0);
+  let previousPhase = 0;
+  let observedBoundary = false;
+  for (let call = 0; call < width * height * 8 && !observedBoundary; call += 1) {
+    const code = wasm.film_executor_step(handle, 1);
+    assert.equal(code, 1);
+    assert.ok(wasm.film_executor_step_work(handle) <= 1);
+    assert.ok(wasm.film_executor_last_step_reads(handle) + wasm.film_executor_last_step_writes(handle) > 0, 'every step performs real work');
+    assert.equal(wasm.film_executor_cursor(handle), 0);
+    assert.equal(wasm.film_executor_current_rgb_ptr(handle), stablePtr);
+    const current = new Float32Array(wasm.memory.buffer, stablePtr, stable.length);
+    assert.equal(current[(call * 13) % current.length], stable[(call * 13) % stable.length]);
+    const phase = wasm.film_executor_last_step_phase(handle);
+    if (phase !== previousPhase) observedBoundary = true;
+    previousPhase = phase;
+  }
+  assert.ok(observedBoundary, 'a semantic phase boundary is observable between calls');
+  wasm.film_executor_destroy(handle);
+});
+
+test('real resident cancellation after Bloom partial Highlight Protection is atomic and reusable', async (t) => {
+  if (!existsSync(wasmPath)) { t.skip('assets/film_core.wasm not built; run npm run build:wasm'); return; }
+  await installWasmModule(readFileSync(wasmPath));
+  const width = 128;
+  const height = 128;
+  const rgb = new Float32Array(width * height * 3).fill(0.18);
+  rgb[(64 * width + 64) * 3] = 3;
+  rgb[(64 * width + 64) * 3 + 1] = 2.2;
+  rgb[(64 * width + 64) * 3 + 2] = 1.4;
+  const graph = createDefaultEffectGraph(createHalationParams({ strength: 0 }), 23).map((node) => ({
+    ...node,
+    enabled: node.type === 'bloom' || node.type === 'highlightProtection',
+    params: node.type === 'bloom' ? createBloomParams({ amplify: 0.45, radius: 0.12 })
+      : node.type === 'highlightProtection' ? createHighlightProtectionParams({ amount: 0.8 }) : node.params,
+  }));
+  const document = { graph };
+  const plan = createFilmRenderPlan({ width, height, graph, quality: 'fast', memoryMode: 'high' });
+  const resident = createV17ResidentBackend(plan);
+  const executor = createFilmExecutor(plan, { backend: 'wasm-resident', residentBackend: resident });
+  const controller = new AbortController();
+  let cancelledAtHp = false;
+  assert.throws(() => executor.render({ width, height, rgb }, document, {
+    quality: 'fast',
+    signal: controller.signal,
+    onResidentStep(snapshot) {
+      if (!cancelledAtHp && snapshot.node === 1 && snapshot.phase === 0) {
+        cancelledAtHp = true;
+        controller.abort();
+      }
+    },
+  }), /cancelled/);
+  assert.ok(cancelledAtHp);
+  const retry = executor.render({ width, height, rgb }, document, { quality: 'fast' });
+  assert.equal(retry.stats.backend, 'wasm-resident');
+  assert.equal(retry.stats.fallback, null);
+  executor.dispose();
+  resetWasmBackend();
+});
+
+test('Bloom remains the published frame while Highlight Protection is partial or cancelled', async (t) => {
+  if (!existsSync(wasmPath)) { t.skip('assets/film_core.wasm not built; run npm run build:wasm'); return; }
+  const { instance } = await WebAssembly.instantiate(readFileSync(wasmPath), {});
+  const wasm = instance.exports;
+  const width = 48;
+  const height = 32;
+  const graph = createDefaultEffectGraph(createHalationParams({ strength: 0 }), 31).map((node) => ({
+    ...node,
+    enabled: node.type === 'bloom' || node.type === 'highlightProtection',
+    params: node.type === 'bloom' ? createBloomParams({ amplify: 0.4, radius: 0.1 })
+      : node.type === 'highlightProtection' ? createHighlightProtectionParams({ amount: 0.75 }) : node.params,
+  }));
+  const plan = createFilmRenderPlan({ width, height, graph, quality: 'fast', memoryMode: 'high' });
+  const command = createGraphCommandBuffer(plan, { width, height, quality: 'fast' });
+  const handle = wasm.film_executor_create(0);
+  assert.equal(wasm.film_executor_reserve(handle, command.length, width, height, width * height * 40, width * height * 8), 0);
+  new Uint8Array(wasm.memory.buffer, wasm.film_executor_command_ptr(handle), command.length).set(command);
+  const input = new Float32Array(wasm.memory.buffer, wasm.film_executor_input_rgb_ptr(handle), width * height * 3);
+  input.fill(0.18);
+  input[(16 * width + 24) * 3] = 2.5;
+  new Float32Array(wasm.memory.buffer, wasm.film_executor_input_alpha_ptr(handle), width * height).fill(1);
+  assert.equal(wasm.film_executor_begin(handle, command.length), 0);
+  let code = 1;
+  while (code === 1 && wasm.film_executor_cursor(handle) === 0) code = wasm.film_executor_step(handle, 256);
+  assert.equal(code, 1);
+  assert.equal(wasm.film_executor_cursor(handle), 1);
+  const bloomPtr = wasm.film_executor_current_rgb_ptr(handle);
+  const bloom = new Float32Array(new Float32Array(wasm.memory.buffer, bloomPtr, width * height * 3));
+  assert.equal(wasm.film_executor_step(handle, 1), 1);
+  assert.equal(wasm.film_executor_cursor(handle), 1);
+  assert.equal(wasm.film_executor_current_rgb_ptr(handle), bloomPtr);
+  const current = new Float32Array(wasm.memory.buffer, bloomPtr, bloom.length);
+  for (const index of [0, 17, current.length >> 1, current.length - 1]) assert.equal(current[index], bloom[index]);
+  assert.equal(wasm.film_executor_cancel(handle), -8);
+  assert.equal(wasm.film_executor_output_rgb_ptr(handle), bloomPtr);
+  wasm.film_executor_destroy(handle);
 });
 
 test('WASM blur-backed Fast pipeline matches the pure JavaScript fallback', async (t) => {

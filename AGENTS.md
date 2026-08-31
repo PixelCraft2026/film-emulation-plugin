@@ -4,13 +4,14 @@
 
 ## 1. 项目定位与当前真实状态
 
-这是 Photoshop UXP 静态图像胶片物理效果插件，不是色彩胶片配置工具。输入图像应已完成 RAW 解码、曝光与 Photoshop 颜色预设；插件只负责 Halation，以及后续规划中的 MTF、Grain、Bloom、Damage、Overscan 等非色彩物理效果。
+这是 Photoshop UXP 静态图像胶片物理效果插件，不是色彩胶片配置工具。输入图像应已完成 RAW 解码、曝光与 Photoshop 颜色预设；当前 V1.7 candidate 已包含 Defringe、Halation、Bloom、Highlight Protection、Film Resolution/MTF 与曝光相关 Grain 六节点连续图；Damage、Overscan 等仍属后续规划。
 
 不要把产品版本、算法版本和序列化版本混为一谈：
 
 | 项目 | 当前值 | 约束 |
 |---|---|---|
-| npm/package 版本 | `1.6.0` | 当前只是 V1.6 身份迁移基础，不代表 Grain/MTF 已完成 |
+| npm/package 版本 | `1.6.0` | 发布身份与迁移基础；不等于 graph 1.7 candidate 或 Halation 算法版本 |
+| graph 版本 | `1.7.0 candidate` | 六节点 graph/RenderPlan candidate；不改变 package 版本 |
 | 主插件 ID | `com.cheukwing.filmemulation` | V1.6 起固定使用 |
 | 主面板名 | `Film Emulation` | 与仓库、README 和正式安装包统一 |
 | entrypoint ID | `filmEmulationPanel` | 正式包使用；迁移桥保留旧 ID |
@@ -19,7 +20,7 @@
 | 旧 ID 迁移桥 | `com.cheukwing.filmhalation`, `filmHalationPanel`, V1.5.2 | 只能导出旧状态 |
 | Photoshop 最低版本 | 23.3 | 不因 WASM 提高最低版本 |
 
-当前 `processFilm()` 只支持 `halation` 节点。遇到 Grain 等未来节点必须明确报错，不能静默丢弃、改版本号或假装执行成功。
+当前 `processFilm()` 支持上述六个 candidate 节点；遇到 Damage、Overscan 或未知未来节点必须明确报错，不能静默丢弃、改版本号或假装执行成功。
 
 ## 2. 事实来源与文档边界
 
@@ -145,6 +146,7 @@ UXP `getDataFolder()` 按插件 ID 隔离，因此 ID 迁移必须保持双包�
 - 面板缓存后 1024px 算法预览目标 P95 不超过 500ms；首次 2048px Photoshop 读取另行记录。
 - 性能测量为 2 次预热、10 次正式测量，并记录 P50/P95、CPU、Photoshop 版本、位深、内存档和峰值内存。
 - 优化必须保持全图/分带、Fast/Quality、JS/WASM 在规定误差内一致，并检查 band seam 和底边相位。
+- PF-9～PF-12A 已在 Node/WASM 路径实现：RenderPlan 使用确定性 spatial segments 和逐 segment core height，resident-segmented 使用持久 Frame A/B/alpha、请求级容量隔离和 segment-local materialization；PF-11 增加物理 Bloom+Highlight Protection fusion、可恢复局部 traversal 和同尺度 downsample 复用；PF-12A 的 scalar/SIMD 共用 executor/kernel API。当前指纹的 Node 24MP 2+10 scalar P95 为 30.455s、SIMD P95 为 26.389s，SIMD 提升 15.41%，但 Photoshop 27.1 / UXP 9.0.2 实机 A/B 已确认当前 SIMD 工件会在加载阶段导致宿主进程退出，而 scalar-only 稳定。因此标准 UXP bundle/CCX 禁止读取、实例化或打包 SIMD，`Auto` 在宿主中保持 scalar；SIMD 仅保留于 `assets/` 供 Node QA。Decision B 的 59.3s 门禁通过，但 PF-11 相对 PF-10 仅 1.013×，未达到 1.3× 目标。PF-12B native/GPU 只作为独立开发 ID/包的可选 POC，不进入标准包。Photoshop 23.3/2024/2026、物理 16GB、Preview/Apply/cancel 实机矩阵仍需分别复核，未通过前不得标记 release-ready。
 
 ## 9. 编码约定
 

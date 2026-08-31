@@ -12,9 +12,103 @@ import {
 } from '../../src/core/index.js';
 
 function fullGraph() {
-  return createDefaultEffectGraph(createHalationParams({ sigma: 4 }), 0x12345678)
+  return createDefaultEffectGraph(createHalationParams({ sigma: 4, strength: 0.8 }), 0x12345678)
     .map((node) => ({ ...node, enabled: true }));
 }
+
+test('PF-9 compiles deterministic local segments and keeps Grain padding local', () => {
+  const graph = fullGraph();
+  const request = {
+    width: 320,
+    height: 205,
+    fullWidth: 2560,
+    fullHeight: 1600,
+    graph,
+    format: { gauge: '35mm', iso: 800 },
+    quality: 'quality',
+    memoryMode: 'balanced',
+    componentSize: 16,
+    deviceMemoryGB: 16,
+  };
+  const a = createFilmRenderPlan(request);
+  const b = createFilmRenderPlan(request);
+  assert.equal(a.planHash, b.planHash);
+  assert.deepEqual(a.spatialSegments.map((segment) => segment.segmentHash), b.spatialSegments.map((segment) => segment.segmentHash));
+  assert.deepEqual(a.spatialSegments.map((segment) => segment.nodeTypes), [
+    ['defringe'], ['halation'], ['bloom', 'highlightProtection'], ['filmResolution'], ['grain'],
+  ]);
+  const bloomHp = a.spatialSegments[2];
+  assert.equal(bloomHp.nodeIds.includes('bloom-main'), true);
+  assert.equal(bloomHp.nodeIds.includes('highlight-protection-main'), true);
+  const grain = a.spatialSegments.at(-1);
+  assert.equal(grain.inputHalo, 0);
+  assert.ok(grain.generatedFieldHalo > 0);
+  assert.ok(a.spatialSegments.slice(0, -1).every((segment) => segment.generatedFieldHalo === 0));
+  for (const segment of a.spatialSegments) {
+    assert.equal(segment.bands[0].start, 0);
+    assert.equal(segment.bands.at(-1).end, request.height);
+    assert.ok(segment.bands.every((band) => band.y0 < band.y1 && band.start <= band.y0 && band.y1 <= band.end));
+    assert.ok(segment.segmentHash);
+  }
+});
+
+test('PF-9 grows 16GB segment cores independently without spending Grain padding upstream', () => {
+  const plan = createFilmRenderPlan({
+    width: 6000,
+    height: 4000,
+    fullWidth: 6000,
+    fullHeight: 4000,
+    graph: fullGraph(),
+    format: { gauge: '35mm', iso: 800 },
+    quality: 'quality',
+    memoryMode: 'balanced',
+    componentSize: 16,
+    deviceMemoryGB: 16,
+  });
+  const bandHeights = new Set(plan.spatialSegments.map((segment) => segment.bandHeight));
+  const bloom = plan.spatialSegments.find((segment) => segment.nodeIds.includes('bloom-main'));
+  const grain = plan.spatialSegments.find((segment) => segment.nodeIds.includes('grain-main'));
+  assert.equal(plan.executionMode, 'resident-segmented');
+  assert.equal(plan.execution.candidates.residentSegmented.valid, true);
+  assert.ok(bandHeights.size > 1, 'segment-local memory envelopes choose independent core heights');
+  assert.ok(bloom.bands.length < grain.bands.length, 'wide-halo Bloom receives memory before zero-input-halo Grain');
+  assert.ok(bloom.estimatedCost.inputPixels / bloom.estimatedCost.corePixels < 1.5);
+  assert.equal(grain.inputHalo, 0);
+  assert.ok(plan.execution.selected.estimatedPeakBytes * 1.15 <= plan.budgetBytes);
+});
+
+test('PF-10 selects whole-frame for a safe canonical Preview', () => {
+  const plan = createFilmRenderPlan({
+    width: 1024,
+    height: 683,
+    fullWidth: 6000,
+    fullHeight: 4000,
+    previewScale: 1024 / 6000,
+    graph: fullGraph(),
+    format: { gauge: '35mm', iso: 800 },
+    quality: 'fast',
+    memoryMode: 'high',
+    componentSize: 32,
+    deviceMemoryGB: 16,
+  });
+  assert.equal(plan.execution.candidates.wholeFrame.valid, true);
+  assert.equal(plan.executionMode, 'whole-frame');
+  assert.equal(plan.execution.selected.mode, 'whole-frame');
+  assert.equal(plan.execution.selected.bandCount, 1);
+});
+
+test('PF-9 identity nodes stay in logical segment ranges without physical cost', () => {
+  const graph = fullGraph().map((node) => node.type === 'halation'
+    ? { ...node, params: createHalationParams({ ...node.params, strength: 0 }) }
+    : node);
+  const plan = createFilmRenderPlan({ width: 96, height: 64, graph, componentSize: 16, memoryMode: 'balanced' });
+  const ids = plan.spatialSegments.flatMap((segment) => segment.nodeIds);
+  assert.ok(ids.includes('halation-main'), 'identity node remains represented in a segment range');
+  const halation = plan.spatialSegments.find((segment) => segment.nodeIds.includes('halation-main'));
+  assert.ok(halation.inputHalo > 0, 'the neighboring Bloom halo belongs to the physical segment');
+  assert.equal(halation.generatedFieldHalo, 0);
+  assert.equal(halation.estimatedCost.estimatedPasses, 21, 'identity contributes no kernel passes');
+});
 
 test('RenderPlan uses cumulative source dependencies and isolates generated Grain halo', () => {
   const graph = fullGraph();

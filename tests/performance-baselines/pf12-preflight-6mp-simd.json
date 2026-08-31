@@ -1,0 +1,409 @@
+{
+  "generatedAt": "2026-08-31T01:37:37.611Z",
+  "node": "v24.19.0",
+  "platform": "win32-x64",
+  "cpu": "Intel64 Family 6 Model 151 Stepping 2, GenuineIntel",
+  "gitRevision": "0121b6443291af716d3e9ce8cb0d57c84178304d",
+  "workingTreeDirty": true,
+  "sourceFingerprint": "21ab630c0dacb2c35fe9a1530ee03718da5536e7755cf920d5f416d4c2b4bd72",
+  "wasmSha256": "6018cb3edee9fdde2a881e05b6850553fca5a4a3c82766c9f91c8af620f9bd9b",
+  "wasmSimdSha256": "cfe81488e3aa88ff4a2fd9bdb08fbb77b3a464b045fc2a0463f2897525a2c9c9",
+  "backend": {
+    "available": true,
+    "backend": "wasm-resident-simd",
+    "executionMode": "wasm-resident-simd",
+    "version": 67072,
+    "error": null,
+    "metrics": {
+      "copyInBytes": 0,
+      "copyOutBytes": 0,
+      "copyCount": 0,
+      "workspaceBytes": 0,
+      "capacityFloats": 0,
+      "grainCapacityFloats": 0,
+      "resident": {
+        "uploadBytes": 0,
+        "downloadBytes": 0,
+        "commandBytes": 0,
+        "steps": 0,
+        "stepCalls": 0,
+        "maxStepWork": 0,
+        "memoryGeneration": 0,
+        "fusionCount": 0,
+        "abiVersion": 1,
+        "capabilities": 125,
+        "backendVariant": "wasm-resident-scalar",
+        "nativeStepCalls": 0,
+        "nativeMaxStepWork": 0,
+        "plannedArenaFloats": 0,
+        "actualArenaFloats": 0,
+        "plannedTransientFloats": 0,
+        "actualTransientFloats": 0,
+        "allocationCount": 0
+      },
+      "simdResident": {
+        "uploadBytes": 0,
+        "downloadBytes": 0,
+        "commandBytes": 0,
+        "steps": 0,
+        "stepCalls": 0,
+        "maxStepWork": 0,
+        "memoryGeneration": 0,
+        "fusionCount": 0,
+        "abiVersion": 1,
+        "capabilities": 255,
+        "backendVariant": "wasm-resident-simd",
+        "nativeStepCalls": 0,
+        "nativeMaxStepWork": 0,
+        "plannedArenaFloats": 0,
+        "actualArenaFloats": 0,
+        "plannedTransientFloats": 0,
+        "actualTransientFloats": 0,
+        "allocationCount": 0
+      },
+      "simdQualified": false
+    }
+  },
+  "protocol": {
+    "warmups": 0,
+    "runs": 1,
+    "size": "3000x2000",
+    "width": 3000,
+    "height": 2000,
+    "componentSize": 16,
+    "profile": "sRGB",
+    "quality": "quality",
+    "memoryMode": "balanced",
+    "deviceMemoryGB": 16,
+    "backend": "simd",
+    "profileResident": false,
+    "collectStepSamples": false,
+    "graphFixtures": [
+      "v16-shipping-default",
+      "v16-full"
+    ]
+  },
+  "v16Full": {
+    "label": "3000x2000 V1.7 resident full Quality Balanced",
+    "warmups": 0,
+    "runs": 1,
+    "samplesMs": [
+      7421.8
+    ],
+    "p50Ms": 7421.8,
+    "p95Ms": 7421.8,
+    "peakRssMB": 1161.7,
+    "peakArrayBuffersMB": 351.5,
+    "checksum": 5845419,
+    "bands": 1,
+    "memoryMode": "balanced",
+    "graphHash": "bfba75d0",
+    "planHash": "a25257cf",
+    "backend": "wasm-resident-simd",
+    "backendVariant": "wasm-resident-simd",
+    "executionMode": "whole-frame",
+    "execution": {
+      "mode": "whole-frame",
+      "selected": {
+        "mode": "whole-frame",
+        "valid": true,
+        "reason": "whole-frame resident layout",
+        "estimatedPeakBytes": 1488003392,
+        "estimatedKernelPixelVisits": 306000000,
+        "trafficBytes": 168000000,
+        "bandCount": 1
+      },
+      "candidates": {
+        "wholeFrame": {
+          "mode": "whole-frame",
+          "valid": true,
+          "reason": "whole-frame resident layout",
+          "estimatedPeakBytes": 1488003392,
+          "estimatedKernelPixelVisits": 306000000,
+          "trafficBytes": 168000000,
+          "bandCount": 1
+        },
+        "residentSegmented": {
+          "mode": "resident-segmented",
+          "valid": true,
+          "reason": "segment-local frame materialization",
+          "estimatedPeakBytes": 1297011392,
+          "estimatedKernelPixelVisits": 306000000,
+          "trafficBytes": 1008000000,
+          "bandCount": 5
+        },
+        "legacyBanded": {
+          "mode": "legacy-banded",
+          "valid": true,
+          "reason": "compatibility fallback",
+          "estimatedPeakBytes": 456000000,
+          "estimatedKernelPixelVisits": 306000000,
+          "trafficBytes": 168000000,
+          "bandCount": 5
+        }
+      },
+      "persistentFrameBytes": 168000000,
+      "fixedBytes": 528003392,
+      "hostReadBytes": 48000000,
+      "commandBytes": 3392,
+      "stagingBytes": 168000000,
+      "wasmLimit": 4294967295
+    },
+    "segments": {},
+    "nodeTimingsMs": {
+      "defringe": {
+        "samples": [
+          0
+        ],
+        "p50": 0,
+        "p95": 0
+      },
+      "halation": {
+        "samples": [
+          0
+        ],
+        "p50": 0,
+        "p95": 0
+      },
+      "bloom": {
+        "samples": [
+          0
+        ],
+        "p50": 0,
+        "p95": 0
+      },
+      "highlightProtection": {
+        "samples": [
+          0
+        ],
+        "p50": 0,
+        "p95": 0
+      },
+      "filmResolution": {
+        "samples": [
+          0
+        ],
+        "p50": 0,
+        "p95": 0
+      },
+      "grain": {
+        "samples": [
+          0
+        ],
+        "p50": 0,
+        "p95": 0
+      }
+    },
+    "copies": {
+      "inputBytes": 96000000,
+      "outputBytes": 72000000,
+      "count": 2
+    },
+    "passes": {
+      "fullPixelPasses": 6,
+      "perNode": {
+        "defringe-main": 1,
+        "halation-main": 1,
+        "bloom-main": 1,
+        "highlight-protection-main": 1,
+        "film-resolution-main": 1,
+        "grain-main": 1
+      }
+    },
+    "timings": {
+      "total": 7171.4886,
+      "read": 0,
+      "process": 7171.4886,
+      "quantize": 0,
+      "write": 0,
+      "perNode": {
+        "defringe-main": 0,
+        "halation-main": 0,
+        "bloom-main": 0,
+        "highlight-protection-main": 0,
+        "film-resolution-main": 0,
+        "grain-main": 0
+      },
+      "perStage": {}
+    },
+    "scheduler": {
+      "stepCalls": 3889,
+      "maxStepWork": 0,
+      "plannedArenaFloats": 0,
+      "actualArenaFloats": 0,
+      "plannedTransientFloats": 0,
+      "actualTransientFloats": 0,
+      "allocationCount": 0,
+      "fusionCount": 0,
+      "stepLatencyMs": {
+        "count": 3889,
+        "total": 6820.127399999989,
+        "max": 34.43990000000031
+      },
+      "work": {
+        "pixelVisits": 0,
+        "pixelsRead": 0,
+        "pixelsWritten": 0,
+        "convolutionTaps": 0,
+        "downsamplePixels": 0,
+        "upsamplePixels": 0
+      }
+    },
+    "bandInputAmplification": 1,
+    "pixelVisitFactor": 0,
+    "fallback": null
+  },
+  "pf8HotspotDecision": {
+    "topFiveNodePhases": [],
+    "stageShare": {},
+    "memoryTraffic": {
+      "pixelVisits": 0,
+      "pixelsRead": 0,
+      "pixelsWritten": 0,
+      "convolutionTaps": 0,
+      "downsamplePixels": 0,
+      "upsamplePixels": 0
+    },
+    "bandInputAmplification": 1,
+    "pixelVisitFactor": 0,
+    "stepLatencyMs": {
+      "count": 3889,
+      "total": 6820.127399999989,
+      "max": 34.43990000000031
+    },
+    "recommendedPf9Segments": [
+      [
+        "defringe-main"
+      ],
+      [
+        "halation-main"
+      ],
+      [
+        "bloom-main",
+        "highlight-protection-main"
+      ],
+      [
+        "film-resolution-main"
+      ],
+      [
+        "grain-main"
+      ]
+    ],
+    "recommendation": "Start PF-9 with Defringe | Halation | Bloom + Highlight Protection | Film Resolution | Grain. Preserve the Bloom transient pair and isolate Grain's generated-field halo; band amplification 1.00x shows that PF-10 core materialization is still required. No planner change is applied in PF-8."
+  },
+  "pf10Decision": {
+    "executionMode": "whole-frame",
+    "execution": {
+      "mode": "whole-frame",
+      "selected": {
+        "mode": "whole-frame",
+        "valid": true,
+        "reason": "whole-frame resident layout",
+        "estimatedPeakBytes": 1488003392,
+        "estimatedKernelPixelVisits": 306000000,
+        "trafficBytes": 168000000,
+        "bandCount": 1
+      },
+      "candidates": {
+        "wholeFrame": {
+          "mode": "whole-frame",
+          "valid": true,
+          "reason": "whole-frame resident layout",
+          "estimatedPeakBytes": 1488003392,
+          "estimatedKernelPixelVisits": 306000000,
+          "trafficBytes": 168000000,
+          "bandCount": 1
+        },
+        "residentSegmented": {
+          "mode": "resident-segmented",
+          "valid": true,
+          "reason": "segment-local frame materialization",
+          "estimatedPeakBytes": 1297011392,
+          "estimatedKernelPixelVisits": 306000000,
+          "trafficBytes": 1008000000,
+          "bandCount": 5
+        },
+        "legacyBanded": {
+          "mode": "legacy-banded",
+          "valid": true,
+          "reason": "compatibility fallback",
+          "estimatedPeakBytes": 456000000,
+          "estimatedKernelPixelVisits": 306000000,
+          "trafficBytes": 168000000,
+          "bandCount": 5
+        }
+      },
+      "persistentFrameBytes": 168000000,
+      "fixedBytes": 528003392,
+      "hostReadBytes": 48000000,
+      "commandBytes": 3392,
+      "stagingBytes": 168000000,
+      "wasmLimit": 4294967295
+    },
+    "segments": {},
+    "bandInputAmplification": 1,
+    "pixelVisitFactor": 0,
+    "stepLatencyMs": {
+      "count": 3889,
+      "total": 6820.127399999989,
+      "max": 34.43990000000031
+    },
+    "recommendation": "PF-9/PF-10 segmented execution is enabled for the selected resident plan. Re-run the formal 24MP 2+10 gate and Photoshop UDT matrix before starting PF-11; no algorithm or planner changes are included here."
+  },
+  "backendFinal": {
+    "available": true,
+    "backend": "wasm-resident-simd",
+    "executionMode": "wasm-resident-simd",
+    "version": 67072,
+    "error": null,
+    "metrics": {
+      "copyInBytes": 0,
+      "copyOutBytes": 0,
+      "copyCount": 0,
+      "workspaceBytes": 0,
+      "capacityFloats": 0,
+      "grainCapacityFloats": 0,
+      "resident": {
+        "uploadBytes": 0,
+        "downloadBytes": 0,
+        "commandBytes": 0,
+        "steps": 0,
+        "stepCalls": 0,
+        "maxStepWork": 0,
+        "memoryGeneration": 0,
+        "fusionCount": 0,
+        "abiVersion": 1,
+        "capabilities": 125,
+        "backendVariant": "wasm-resident-scalar",
+        "nativeStepCalls": 0,
+        "nativeMaxStepWork": 0,
+        "plannedArenaFloats": 0,
+        "actualArenaFloats": 0,
+        "plannedTransientFloats": 0,
+        "actualTransientFloats": 0,
+        "allocationCount": 0
+      },
+      "simdResident": {
+        "uploadBytes": 0,
+        "downloadBytes": 0,
+        "commandBytes": 0,
+        "steps": 0,
+        "stepCalls": 0,
+        "maxStepWork": 0,
+        "memoryGeneration": 0,
+        "fusionCount": 0,
+        "abiVersion": 1,
+        "capabilities": 255,
+        "backendVariant": "wasm-resident-simd",
+        "nativeStepCalls": 0,
+        "nativeMaxStepWork": 0,
+        "plannedArenaFloats": 0,
+        "actualArenaFloats": 0,
+        "plannedTransientFloats": 0,
+        "actualTransientFloats": 0,
+        "allocationCount": 0
+      },
+      "simdQualified": false
+    }
+  }
+}

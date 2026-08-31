@@ -13,6 +13,7 @@ import {
   resolveSigmaParams,
   installWasmModule,
   getWasmBackendStatus,
+  setWasmExecutionMode,
   processHalation,
 } from '../../src/core/index.js';
 import { processTiledWithTrc } from '../../src/io/tileRender.js';
@@ -27,12 +28,21 @@ const RUNS = Number(process.env.FILM_BENCH_RUNS ?? 10);
 const DEVICE_MEMORY_GB = Number(process.env.FILM_BENCH_MEMORY_GB ?? 16);
 const SUITE = String(process.env.FILM_BENCH_SUITE ?? 'all');
 const FILM_MEMORY_MODE = String(process.env.FILM_BENCH_MEMORY_MODE ?? 'balanced');
+const FILM_BACKEND = String(process.env.FILM_BENCH_BACKEND ?? 'scalar');
 const ENABLED_NODE = String(process.env.FILM_BENCH_NODE ?? '');
+const COMPARE_PROFILER = process.env.FILM_BENCH_COMPARE_PROFILE === '1';
 if (!['all', 'legacy', 'v16', 'resident-shipping', 'resident-full', 'preview'].includes(SUITE)) throw new Error(`Unknown FILM_BENCH_SUITE: ${SUITE}`);
 if (!['auto', 'balanced', 'high'].includes(FILM_MEMORY_MODE)) throw new Error(`Unknown FILM_BENCH_MEMORY_MODE: ${FILM_MEMORY_MODE}`);
+if (!['scalar', 'simd', 'auto'].includes(FILM_BACKEND)) throw new Error(`Unknown FILM_BENCH_BACKEND: ${FILM_BACKEND}`);
+const EXECUTION_BACKEND = FILM_BACKEND === 'simd' ? 'wasm-resident-simd'
+  : FILM_BACKEND === 'scalar' ? 'wasm-resident' : 'auto';
 const LINEAR_TRC = { decode: (value) => value, encode: (value) => value, baseKey: 'sRGB' };
 const wasmPath = fileURLToPath(new URL('../../assets/film_core.wasm', import.meta.url));
-if (existsSync(wasmPath)) await installWasmModule(readFileSync(wasmPath));
+const wasmSimdPath = fileURLToPath(new URL('../../assets/film_core_simd.wasm', import.meta.url));
+if (existsSync(wasmPath)) {
+  await installWasmModule(readFileSync(wasmPath), existsSync(wasmSimdPath) ? readFileSync(wasmSimdPath) : null);
+  setWasmExecutionMode(EXECUTION_BACKEND);
+}
 
 function gitRevision() {
   try {
@@ -42,9 +52,33 @@ function gitRevision() {
   }
 }
 
-function wasmSha256() {
-  if (!existsSync(wasmPath)) return null;
-  return createHash('sha256').update(readFileSync(wasmPath)).digest('hex');
+function workingTreeDirty() {
+  try {
+    return execFileSync('git', ['status', '--porcelain'], { encoding: 'utf8' }).trim().length > 0;
+  } catch {
+    return true;
+  }
+}
+
+function sourceFingerprint() {
+  const files = [
+    'src/core/wasmBackend.js', 'src/core/film.js', 'src/core/renderPlan.js',
+    'src/core/commandBuffer.js', 'src/core/effectRegistry.js', 'src/io/tileRender.js',
+    'src/io/previewRender.js', 'native/film_core/src/lib.rs',
+    'native/film_core/src/cooperative.rs', 'tests/bench/perf.js', 'package.json',
+  ];
+  const hash = createHash('sha256');
+  for (const file of files) {
+    const path = fileURLToPath(new URL(`../../${file}`, import.meta.url));
+    hash.update(file).update('\0');
+    if (existsSync(path)) hash.update(readFileSync(path));
+  }
+  return hash.digest('hex');
+}
+
+function fileSha256(path) {
+  if (!existsSync(path)) return null;
+  return createHash('sha256').update(readFileSync(path)).digest('hex');
 }
 
 function percentile(values, p) {
@@ -141,17 +175,42 @@ async function renderFilm24MP(document = shippingGraphDocument) {
   let checksum = 0;
   let peak = memoryMB();
   const nodeTimings = {};
+  const nodeTimingsById = {};
   const stageTimings = {};
+  let processTimeMs = 0;
+  const residentWork = { pixelVisits: 0, pixelsRead: 0, pixelsWritten: 0, convolutionTaps: 0, downsamplePixels: 0, upsamplePixels: 0 };
+  const residentStepLatency = { count: 0, total: 0, max: 0, samples: [] };
+  const collectResidentStepSamples = process.env.FILM_BENCH_PROFILE !== '0' && process.env.FILM_BENCH_COLLECT_STEP_SAMPLES !== '0';
+  const residentScheduler = {};
   const copies = { inputBytes: 0, outputBytes: 0, count: 0 };
   const passes = { fullPixelPasses: 0, perNode: {} };
   let fallback = null;
   let selectedBackend = null;
+  let selectedBackendVariant = null;
+  const segmentStats = {};
   const resident = createV17ResidentBackend(geometry.plan);
-  const executor = createFilmExecutor(geometry.plan, { backend: 'auto', residentBackend: resident });
+  if (!resident && FILM_BACKEND !== 'auto') throw new Error(`Requested ${FILM_BACKEND} resident backend is unavailable`);
+  const executor = createFilmExecutor(geometry.plan, { backend: EXECUTION_BACKEND, residentBackend: resident });
+  const segmented = geometry.executionMode === 'resident-segmented' && resident?.supportsSegmented?.(geometry.plan);
   try {
-    for (const band of geometry.bands) {
+    const workBands = segmented
+      ? [{ start: 0, end: HEIGHT, y0: 0, y1: HEIGHT }]
+      : geometry.bands;
+    for (const band of workBands) {
       const source = makeBand(WIDTH, band.start, band.end);
-      const result = await processFilmBandWithTrcAsync(source, document, LINEAR_TRC, {
+      const result = segmented
+        ? await executor.renderAsync(source, document, {
+          fullWidth: WIDTH,
+          fullHeight: HEIGHT,
+          originY: 0,
+          quality: 'quality',
+          seed: 0x12345678,
+          intent: 'apply',
+          profileResident: process.env.FILM_BENCH_PROFILE !== '0',
+          collectStepSamples: process.env.FILM_BENCH_COLLECT_STEP_SAMPLES !== '0',
+          onResidentStep: collectResidentStepSamples ? (snapshot) => residentStepLatency.samples.push(Number(snapshot?.elapsedMs ?? 0)) : undefined,
+        })
+        : await processFilmBandWithTrcAsync(source, document, LINEAR_TRC, {
         fullWidth: WIDTH,
         fullHeight: HEIGHT,
         originY: band.start,
@@ -161,23 +220,53 @@ async function renderFilm24MP(document = shippingGraphDocument) {
         memoryMode: geometry.memoryMode,
         componentSize: 16,
         profileTimings: true,
+        profileResident: process.env.FILM_BENCH_PROFILE !== '0',
+        collectStepSamples: process.env.FILM_BENCH_COLLECT_STEP_SAMPLES !== '0',
+        onResidentStep: collectResidentStepSamples ? (snapshot) => residentStepLatency.samples.push(Number(snapshot?.elapsedMs ?? 0)) : undefined,
         executor,
-        backend: 'auto',
+        backend: EXECUTION_BACKEND,
         outputRows: { start: band.y0 - band.start, end: band.y1 - band.start },
         intent: 'apply',
         yieldIntervalMs: 50,
-      });
+        });
       selectedBackend = result.stats?.backend ?? selectedBackend;
+      selectedBackendVariant = result.stats?.backendVariant ?? selectedBackendVariant;
     for (const node of result.stats?.nodes ?? []) {
       nodeTimings[node.type] = (nodeTimings[node.type] ?? 0) + node.elapsedMs;
+      nodeTimingsById[node.id] = (nodeTimingsById[node.id] ?? 0) + node.elapsedMs;
     }
     for (const [stage, value] of Object.entries(result.stats?.timings?.perStage ?? {})) stageTimings[stage] = (stageTimings[stage] ?? 0) + value;
+    processTimeMs += Number(result.stats?.timings?.process ?? result.stats?.timings?.total ?? 0);
+    for (const key of Object.keys(residentWork)) if (key !== 'samples') residentWork[key] += Number(result.stats?.scheduler?.work?.[key] ?? 0);
+    const latency = result.stats?.scheduler?.stepLatencyMs;
+    if (result.stats?.scheduler) Object.assign(residentScheduler, result.stats.scheduler);
+    // The profiler-off protocol intentionally skips per-step counter queries,
+    // but SIMD qualification still needs a read-only end-of-request capacity
+    // audit so an apparent speedup cannot hide unexpected growth.
+    const residentDiagnostics = resident?.stats?.();
+    if (residentDiagnostics) Object.assign(residentScheduler, {
+      plannedArenaFloats: residentDiagnostics.plannedArenaFloats,
+      actualArenaFloats: residentDiagnostics.actualArenaFloats,
+      plannedTransientFloats: residentDiagnostics.plannedTransientFloats,
+      actualTransientFloats: residentDiagnostics.actualTransientFloats,
+      allocationCount: residentDiagnostics.allocationCount,
+      memoryGeneration: residentDiagnostics.memoryGeneration,
+    });
+    if (latency) {
+      residentStepLatency.count += Number(latency.count ?? 0);
+      residentStepLatency.total += Number(latency.total ?? 0);
+      residentStepLatency.max = Math.max(residentStepLatency.max, Number(latency.max ?? 0));
+    }
     copies.inputBytes += result.stats?.copies?.inputBytes ?? 0;
     copies.outputBytes += result.stats?.copies?.outputBytes ?? 0;
     copies.count += result.stats?.copies?.count ?? 0;
     passes.fullPixelPasses += result.stats?.passes?.fullPixelPasses ?? 0;
     for (const [id, value] of Object.entries(result.stats?.passes?.perNode ?? {})) passes.perNode[id] = (passes.perNode[id] ?? 0) + value;
     if (result.stats?.fallback) fallback = result.stats.fallback;
+      for (const [id, value] of Object.entries(result.stats?.segments ?? {})) segmentStats[id] = {
+        ...(segmentStats[id] ?? {}),
+        ...value,
+      };
       const firstSampleY = band.y0 + ((17 - (band.y0 % 17)) % 17);
       for (let absoluteY = firstSampleY; absoluteY < band.y1; absoluteY += 17) {
         const y = absoluteY - band.y0;
@@ -190,6 +279,9 @@ async function renderFilm24MP(document = shippingGraphDocument) {
   } finally {
     executor.dispose();
   }
+  const bandInputPixels = segmented
+    ? Object.values(segmentStats).reduce((sum, segment) => sum + Number(segment.inputPixels ?? 0), 0)
+    : geometry.bands.reduce((sum, band) => sum + WIDTH * Math.max(0, band.end - band.start), 0);
   return {
     checksum,
     peak,
@@ -198,12 +290,19 @@ async function renderFilm24MP(document = shippingGraphDocument) {
     nodeTimings,
     graphHash: geometry.graphHash,
     planHash: geometry.planHash,
+    execution: geometry.plan.execution,
     copies,
     passes,
     stageTimings,
+    segmentStats,
+    executionMode: geometry.executionMode,
     fallback,
     backend: selectedBackend,
-    stats: { backend: selectedBackend, copies, passes, timings: { perStage: stageTimings }, fallback },
+    backendVariant: selectedBackendVariant,
+    stats: { backend: selectedBackend, backendVariant: selectedBackendVariant, copies, passes, timings: { total: processTimeMs, process: processTimeMs, perNode: nodeTimingsById, perStage: stageTimings }, scheduler: { ...residentScheduler, work: residentWork, stepLatencyMs: { count: residentStepLatency.count, total: residentStepLatency.total, max: residentStepLatency.max, p50: percentile(residentStepLatency.samples, 0.5), p95: percentile(residentStepLatency.samples, 0.95) } }, bandInputPixels, fallback },
+    residentWork,
+    residentStepLatency: { count: residentStepLatency.count, total: residentStepLatency.total, max: residentStepLatency.max, p50: percentile(residentStepLatency.samples, 0.5), p95: percentile(residentStepLatency.samples, 0.95) },
+    bandInputPixels,
   };
 }
 
@@ -225,13 +324,21 @@ let previewCache = null;
 async function renderFilmPreview() {
   const width = 1024;
   const height = 683;
+  const stepSamples = [];
   const result = await renderPreviewIncremental(
     { width: WIDTH, height: HEIGHT },
     fullGraphDocument,
     { display: LINEAR_TRC, effect: LINEAR_TRC },
     previewCache,
     previewSource,
-    { returnDataUrl: false },
+    {
+      returnDataUrl: false,
+      profileResident: process.env.FILM_BENCH_PROFILE !== '0',
+      collectStepSamples: process.env.FILM_BENCH_COLLECT_STEP_SAMPLES !== '0',
+      onResidentStep: process.env.FILM_BENCH_PROFILE !== '0'
+        ? (snapshot) => stepSamples.push(Number(snapshot?.elapsedMs ?? 0))
+        : undefined,
+    },
   );
   previewCache = result.cache;
   const previewPlan = createFilmRenderPlan({
@@ -245,7 +352,32 @@ async function renderFilmPreview() {
     format: fullGraphDocument.format,
     memoryMode: 'balanced',
   });
-  return { checksum: result.cache.graphResult.rgb[0], bands: 1, memoryMode: 'n/a', graphHash: previewPlan.graphHash, planHash: previewPlan.planHash };
+  const total = stepSamples.reduce((sum, value) => sum + value, 0);
+  return {
+    checksum: result.cache.graphResult.rgb[0],
+    bands: 1,
+    memoryMode: 'n/a',
+    graphHash: previewPlan.graphHash,
+    planHash: previewPlan.planHash,
+    stats: {
+      timings: { total: result.ms, process: result.ms, perNode: {}, perStage: {} },
+      scheduler: {
+        stepLatencyMs: {
+          count: stepSamples.length,
+          total,
+          max: stepSamples.length ? Math.max(...stepSamples) : 0,
+          p50: percentile(stepSamples, 0.5),
+          p95: percentile(stepSamples, 0.95),
+        },
+        work: { pixelVisits: 0, pixelsRead: 0, pixelsWritten: 0, convolutionTaps: 0, downsamplePixels: 0, upsamplePixels: 0 },
+      },
+    },
+  };
+}
+
+async function renderFilmPreviewUncached() {
+  previewCache = null;
+  return renderFilmPreview();
 }
 
 async function measure(label, render, warmups = WARMUPS, runs = RUNS) {
@@ -258,6 +390,10 @@ async function measure(label, render, warmups = WARMUPS, runs = RUNS) {
   let graphHash = null;
   let planHash = null;
   let backend = null;
+  let backendVariant = null;
+  let executionMode = null;
+  let executionPlan = null;
+  let segmentStats = null;
   const nodeSamples = {};
   const statsSamples = [];
   for (let i = 0; i < runs; i++) {
@@ -271,6 +407,10 @@ async function measure(label, render, warmups = WARMUPS, runs = RUNS) {
     graphHash = typeof result === 'number' ? graphHash : result.graphHash ?? graphHash;
     planHash = typeof result === 'number' ? planHash : result.planHash ?? planHash;
     backend = typeof result === 'number' ? backend : result.backend ?? result.stats?.backend ?? backend;
+    backendVariant = typeof result === 'number' ? backendVariant : result.backendVariant ?? result.stats?.backendVariant ?? backendVariant;
+    executionMode = typeof result === 'number' ? executionMode : result.executionMode ?? result.stats?.executionMode ?? executionMode;
+    executionPlan = typeof result === 'number' ? executionPlan : result.execution ?? executionPlan;
+    segmentStats = typeof result === 'number' ? segmentStats : result.segmentStats ?? result.stats?.segments ?? segmentStats;
     const renderStats = result?.renderStats ?? result?.stats ?? null;
     if (renderStats) statsSamples.push(renderStats);
     for (const [type, value] of Object.entries(result?.nodeTimings ?? {})) {
@@ -293,6 +433,10 @@ async function measure(label, render, warmups = WARMUPS, runs = RUNS) {
     graphHash,
     planHash,
     backend,
+    backendVariant,
+    executionMode,
+    execution: executionPlan,
+    segments: segmentStats,
     nodeTimingsMs: Object.fromEntries(Object.entries(nodeSamples).map(([type, values]) => [type, {
       samples: values.map((value) => Math.round(value * 10) / 10),
       p50: Math.round(percentile(values, 0.5) * 10) / 10,
@@ -303,14 +447,22 @@ async function measure(label, render, warmups = WARMUPS, runs = RUNS) {
   summary.copies = lastStats.copies ?? { inputBytes: 0, outputBytes: 0, count: 0 };
   summary.passes = lastStats.passes ?? { fullPixelPasses: 0, perNode: {} };
   summary.timings = {
-    total: summary.p50Ms,
+    total: lastStats.timings?.total ?? summary.p50Ms,
     read: 0,
-    process: summary.p50Ms,
+    process: lastStats.timings?.process ?? summary.p50Ms,
     quantize: 0,
     write: 0,
-    perNode: Object.fromEntries(Object.entries(nodeSamples).map(([type, values]) => [type, percentile(values, 0.5)])),
+    perNode: lastStats.timings?.perNode ?? Object.fromEntries(Object.entries(nodeSamples).map(([type, values]) => [type, percentile(values, 0.5)])),
     perStage: lastStats.timings?.perStage ?? lastStats.stageTimings ?? {},
   };
+  const lastResultStats = statsSamples.at(-1) ?? {};
+  const finalPixels = WIDTH * HEIGHT;
+  const work = lastResultStats.scheduler?.work ?? {};
+  summary.scheduler = lastResultStats.scheduler ?? null;
+  summary.bandInputAmplification = typeof lastResultStats.bandInputPixels === 'number'
+    ? lastResultStats.bandInputPixels / finalPixels
+    : null;
+  summary.pixelVisitFactor = typeof work.pixelVisits === 'number' ? work.pixelVisits / finalPixels : null;
   summary.fallback = lastStats.fallback ?? null;
   console.log(`${label}: P50=${summary.p50Ms}ms P95=${summary.p95Ms}ms peakRSS=${summary.peakRssMB}MB`);
   return summary;
@@ -329,7 +481,10 @@ const report = {
   platform: `${process.platform}-${process.arch}`,
   cpu: process.env.PROCESSOR_IDENTIFIER ?? 'unknown',
   gitRevision: gitRevision(),
-  wasmSha256: wasmSha256(),
+  workingTreeDirty: workingTreeDirty(),
+  sourceFingerprint: sourceFingerprint(),
+  wasmSha256: fileSha256(wasmPath),
+  wasmSimdSha256: fileSha256(wasmSimdPath),
   backend: getWasmBackendStatus(),
   protocol: {
     warmups: WARMUPS,
@@ -342,6 +497,9 @@ const report = {
     quality: 'quality',
     memoryMode: FILM_MEMORY_MODE,
     deviceMemoryGB: DEVICE_MEMORY_GB,
+    backend: FILM_BACKEND,
+    profileResident: process.env.FILM_BENCH_PROFILE !== '0',
+    collectStepSamples: process.env.FILM_BENCH_COLLECT_STEP_SAMPLES !== '0',
     graphFixtures: ['v16-shipping-default', 'v16-full'],
   },
 };
@@ -354,8 +512,58 @@ if (['all', 'v16', 'resident-shipping', 'resident-full'].includes(SUITE)) {
   if (SUITE !== 'resident-full') report.v16ShippingDefault = await measure(`24MP V1.7 resident shipping-default Quality ${memoryLabel}`, () => renderFilm24MP(shippingGraphDocument));
   if (SUITE !== 'resident-shipping') report.v16Full = await measure(`${WIDTH}x${HEIGHT} V1.7 resident ${ENABLED_NODE || 'full'} Quality ${memoryLabel}`, () => renderFilm24MP(fullGraphDocument));
 }
+if (COMPARE_PROFILER && report.v16Full) {
+  const previousProfile = process.env.FILM_BENCH_PROFILE;
+  const previousSamples = process.env.FILM_BENCH_COLLECT_STEP_SAMPLES;
+  process.env.FILM_BENCH_PROFILE = '0';
+  process.env.FILM_BENCH_COLLECT_STEP_SAMPLES = '0';
+  try {
+    report.profilerOffV16Full = await measure(`${WIDTH}x${HEIGHT} V1.7 resident full Quality ${FILM_MEMORY_MODE} profiler-off`, () => renderFilm24MP(fullGraphDocument));
+  } finally {
+    if (previousProfile === undefined) delete process.env.FILM_BENCH_PROFILE; else process.env.FILM_BENCH_PROFILE = previousProfile;
+    if (previousSamples === undefined) delete process.env.FILM_BENCH_COLLECT_STEP_SAMPLES; else process.env.FILM_BENCH_COLLECT_STEP_SAMPLES = previousSamples;
+  }
+  report.profilerOverhead = {
+    p50Percent: 100 * (report.v16Full.p50Ms - report.profilerOffV16Full.p50Ms) / Math.max(1, report.profilerOffV16Full.p50Ms),
+    p95Percent: 100 * (report.v16Full.p95Ms - report.profilerOffV16Full.p95Ms) / Math.max(1, report.profilerOffV16Full.p95Ms),
+    protocol: 'same-process full graph, identical 24MP 2+10 protocol',
+  };
+}
 if (SUITE === 'all' || SUITE === 'v16' || SUITE === 'preview') {
-  report.v16Preview1024Cached = await measure('1024px V1.6 full cached preview', renderFilmPreview);
+  report.v16Preview1024Uncached = await measure('1024px V1.7 full uncached preview', renderFilmPreviewUncached);
+  report.v16Preview1024Cached = await measure('1024px V1.7 full cached preview', renderFilmPreview);
+}
+
+const hotspotSource = report.v16Full ?? report.v16ShippingDefault;
+if (hotspotSource) {
+  const stages = Object.entries(hotspotSource.timings?.perStage ?? {})
+    .filter(([name]) => !name.startsWith('resident.'))
+    .sort((a, b) => Number(b[1]) - Number(a[1]));
+  report.pf8HotspotDecision = {
+    topFiveNodePhases: stages.slice(0, 5).map(([phase, elapsedMs]) => ({ phase, elapsedMs })),
+    stageShare: Object.fromEntries(stages.map(([phase, elapsedMs]) => [phase, Number(elapsedMs) / Math.max(1, Number(hotspotSource.timings?.process ?? hotspotSource.p50Ms))])),
+    memoryTraffic: hotspotSource.scheduler?.work ?? null,
+    bandInputAmplification: hotspotSource.bandInputAmplification ?? null,
+    pixelVisitFactor: hotspotSource.pixelVisitFactor ?? null,
+    stepLatencyMs: hotspotSource.scheduler?.stepLatencyMs ?? null,
+    recommendedPf9Segments: [
+      ['defringe-main'],
+      ['halation-main'],
+      ['bloom-main', 'highlight-protection-main'],
+      ['film-resolution-main'],
+      ['grain-main'],
+    ],
+    recommendation: `Start PF-9 with Defringe | Halation | Bloom + Highlight Protection | Film Resolution | Grain. Preserve the Bloom transient pair and isolate Grain's generated-field halo; band amplification ${Number(hotspotSource.bandInputAmplification ?? 0).toFixed(2)}x shows that PF-10 core materialization is still required. No planner change is applied in PF-8.`,
+  };
+  report.pf10Decision = {
+    executionMode: hotspotSource.executionMode ?? null,
+    execution: hotspotSource.execution ?? null,
+    segments: hotspotSource.segments ?? null,
+    bandInputAmplification: hotspotSource.bandInputAmplification ?? null,
+    pixelVisitFactor: hotspotSource.pixelVisitFactor ?? null,
+    stepLatencyMs: hotspotSource.scheduler?.stepLatencyMs ?? null,
+    recommendation: 'PF-9/PF-10 segmented execution is enabled for the selected resident plan. Re-run the formal 24MP 2+10 gate and Photoshop UDT matrix before starting PF-11; no algorithm or planner changes are included here.',
+  };
 }
 
 report.backendFinal = getWasmBackendStatus();

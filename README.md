@@ -2,7 +2,7 @@
 
 Photoshop UXP 胶片模拟插件。当前仓库以 1.6.0 作为 npm/package 与 manifest 身份，包含 V1.6 的 Film Resolution/MTF、曝光相关 Film Grain，以及 V1.7 candidate 的 Defringe、Bloom、Highlight Protection 和通用亮度遮罩。V1.7 图算法使用 schema v2 graph、固定坐标和线性色彩路径；新节点默认关闭，因此不会改变旧画面。V1.5.1 Halation 引擎继续负责乳剂散射、红层回射、强光源保护和 HDR 安全合成。
 
-V1.7 当前达到 `EA-2 candidate-frozen`：JS 参考路径、graph/transient 语义、物理 RenderPlan layout、scalar resident WASM 的细粒度 pixel-visits 调度/取消和独立 SIMD artifact 已接入，并覆盖 `Defringe → Halation → Bloom → Highlight Protection → Resolution → Grain` 的完整连续段。候选冻结只冻结 ABI、command、buffer layout、错误码和回退语义，不等于 1.7.0 发布；完整 Apply P95 ≤6s、Photoshop 23.3、物理 16GB 主机及 Photoshop 2024/2026 UDT 仍是公开发布阻断项。
+V1.7 当前为 `EA-2 candidate`，PF-7～PF-12A 已接入：JS 参考路径、graph/transient 语义、真实 cooperative kernel、step telemetry、确定性 spatial segments、resident frame materialization、热点 traversal/fusion 优化，以及共享 executor/kernel API 的 scalar 与 SIMD resident WASM，均覆盖 `Defringe → Halation → Bloom → Highlight Protection → Resolution → Grain`。PF-12B native/GPU 保留为独立开发包的可选 POC，不进入当前主包。ABI、command、buffer layout、错误码和回退语义保持兼容；这仍不等于 1.7.0 发布，Photoshop 23.3、物理 16GB 主机及 Photoshop 2024/2026 UDT 仍是公开发布阻断项。
 
 当前正式产品名、manifest 名和 Photoshop 面板标签统一为 `Film Emulation`，主面板 entrypoint 为 `filmEmulationPanel`，正式插件 ID 为 `com.cheukwing.filmemulation`。为避免 UXP 按插件 ID 隔离的旧参数丢失，仓库同时生成仍使用旧 ID `com.cheukwing.filmhalation` 和旧 entrypoint `filmHalationPanel` 的 V1.5.2 迁移桥接包。
 
@@ -47,7 +47,7 @@ V1.7 的 Preview 顺序是 Defringe（显示代理与效果代理同时处理）
 
 迁移包使用 schema v2 逐项校验、规范化 UTF-8 CRC32、10MB/10000 文档限制及导入回执。损坏文件会被拒绝；单个无效文档不会阻止其余有效文档；旧插件目录和导出文件不会被删除。导入的图层绑定仍须通过现有严格验证，存在歧义时应选择原始像素层并点击 **Rebind Source**。
 
-迁移桥身份保持 `com.cheukwing.filmhalation` / `filmHalationPanel` / 1.5.2 / `export`，主包身份保持 `com.cheukwing.filmemulation` / `filmEmulationPanel` / 1.6.0 / `import`。迁移桥不显示 V1.7 控件，也不会把 V1.7 参数写入旧状态；当前两个 CCX 构建都会带上 scalar `film_core.wasm` 与独立 `film_core_simd.wasm`。`Auto` 只有在 SIMD 固定向量对拍和 ≥10% 协议加速通过后才选择 SIMD，否则保持 scalar；`wasm-resident` 强制模式仍是 scalar 别名。
+迁移桥身份保持 `com.cheukwing.filmhalation` / `filmHalationPanel` / 1.5.2 / `export`，主包身份保持 `com.cheukwing.filmemulation` / `filmEmulationPanel` / 1.6.0 / `import`。迁移桥不显示 V1.7 控件，也不会把 V1.7 参数写入旧状态；当前两个 CCX 构建只携带 scalar `film_core.wasm`。虽然当前 SIMD 工件组合通过了 Node 固定向量和 24MP 2+10 的 ≥10% 资格门禁，但 Photoshop 27.1 / UXP 9.0.2 实机 A/B 已确认加载该工件会导致宿主进程退出，因此标准 UXP runtime 不读取、不实例化也不打包 SIMD，`Auto` 在宿主中保持 scalar。`wasm-resident` 强制模式仍是 scalar 别名。
 
 ## Halation 1.5.1 核心行为
 
@@ -93,7 +93,11 @@ V1.7 的 Preview 顺序是 Defringe（显示代理与效果代理同时处理）
 - 状态栏显示 `Panel preview total (read ..., render ...)`：`read` 反映 Photoshop Imaging API/ICC 代理读取，`render` 反映算法和预览编码，便于定位真实瓶颈。
 - Apply 在创建效果层前完成内存预检；所有 band 成功后才执行一次最终 `putPixels`。任何失败路径都不会把源层作为写入目标。
 
-当前 scalar resident 的同机 Node 协议使用 6000×4000、16 位、Quality、Balanced、2 次预热 + 10 次正式测量：shipping-default Halation graph P50/P95 为 9.958/10.201s（2 个 band）；完整 V1.7 graph P50/P95 为 165.475/179.487s、峰值 RSS 约 2.90GB（16 个 band），每个 band 一次 RGB/alpha 上传和一次 RGB 下载，完整 resident 段没有 JS fallback。缓存 1024px Preview P50/P95 为 162.1/179.4ms；未缓存的 1024px Preview 本轮为 343.9/388.7ms，P95 略高于 ≤350ms 目标。完整 Apply 仍未通过 P95 ≤6s 门禁。完整报告见 [`tests/performance-data.json`](tests/performance-data.json)。以上均不是 Photoshop 实机计时。
+当前 PF-11/PF-12 Node 报告使用 6000×4000、16 位、Quality、Balanced、2 次预热 + 10 次正式测量，并按要求关闭细粒度 resident profiler。源码 fingerprint 为 `080124b3…`：scalar 完整 graph P50/P95 为 30.142/30.455s，qualified SIMD 为 26.153/26.389s，checksum、graph、计划、分配次数和无 fallback 状态一致；SIMD P95 提升 15.41%，超过 10% Auto 门禁。相对 Gate 0 完整 graph P95 177.875s，SIMD 为 6.74×。Apply 的最大真实 step 为 32.85ms，低于 75ms 门禁，峰值 RSS 约 3.00GB；当前指纹的 1024px Preview 2+10 单向复测中，uncached/cached step P95 分别为 4.20/2.38ms，均低于 20ms，cached 总 P95 为 202.1ms，低于 500ms。PF-11 的 6MP 归因样本把 pixel visits 降低 13.07%，但同协议 24MP scalar 相对 PF-10 P95 仅提高 1.013×，没有达到 1.3× 目标；该结果作为 CPU/内存流量天花板证据保留，不通过改变 Quality 或视觉常数掩盖。正式 scalar 结果见 [`tests/performance-data.json`](tests/performance-data.json)，SIMD、资格与 Preview 报告见 [`tests/performance-baselines/pf12-qualified-24mp-simd.json`](tests/performance-baselines/pf12-qualified-24mp-simd.json)、[`tests/performance-baselines/pf12-qualified-24mp-qualification.json`](tests/performance-baselines/pf12-qualified-24mp-qualification.json) 和 [`tests/performance-baselines/pf12-preview-qualified.json`](tests/performance-baselines/pf12-preview-qualified.json)。Decision B 的 59.3s 门槛继续通过；PF-12B 仅建议以独立开发 ID/包从 Halation segment 做可选 POC。本轮未重跑 profiler on/off，故 `<3%` profiler 开销门禁仍未重新认证。以上均不是 Photoshop 实机计时，也不能据此标记 release-ready。
+
+Gate 0 的冻结 HEAD 基线（同一 6000×4000、2+10 协议）单独保存在 [`tests/performance-baselines/0121b64-gate0.json`](tests/performance-baselines/0121b64-gate0.json)，包含 git/WASM SHA-256、dirty 状态和源码 fingerprint。PF-8 报告额外记录 resident step latency、node/phase 归因、读写/卷积访问量、band input amplification、pixel visit factor、RSS/ArrayBuffers 及 allocation/generation；PF-8 阶段归因合计误差为 0%，band input amplification 为 7.86×、pixel visit factor 为 1223.565×。这些数据驱动了下面的 PF-9 stage-local halo segment；算法参数、schema、预设和视觉常数未改变。
+
+PF-9 将图拆为 `Defringe | Halation | Bloom + Highlight Protection | Film Resolution | Grain`，在 segment 内反向累积输入 halo，并将 Grain 的 generated-field halo 隔离；Bloom transient 与 Highlight Protection 保持同一 segment，identity 节点只保留逻辑统计。PF-10 先按内存合法性和 kernel visits 选择 whole-frame/resident-segmented/legacy-banded 候选；resident-segmented 只上传一次 canonical RGB/alpha，使用持久 Frame A/B 和 segment-local frames，所有 core 完成后原子交换并只执行一次最终 `putPixels`。取消不会 fallback 或交换稳定帧，执行错误才从保留的 canonical source 完整 JS 重算。
 
 ## 参数和状态
 
@@ -116,7 +120,7 @@ V1.7 的 Preview 顺序是 Defringe（显示代理与效果代理同时处理）
 - schema v2 使用有序 `graph`、格式档案和严格 source/target layer bindings。
 - v1 `FilmLab/effects.halation` 文档会迁移成单个 halation 节点；比当前更新的 schema 会被拒绝。
 - 参数保存在 UXP PluginStorage。已保存文档按规范化路径精确匹配；未保存文档额外使用 Photoshop document id，避免 Untitled 冲突。
-- 当前包由 `__FILM_FEATURE_LEVEL__` 门控：主包可创建、保存并执行 V1.6 graph 与 V1.7 candidate；受支持的完整非零 graph 在 `Auto` 下选择 scalar resident，失败时丢弃整带结果、从保留的 canonical 输入完整 JS 重算，并在本请求中禁用后续 resident 尝试。V1.5.2 迁移桥只提供 Halation 与迁移导出，不暴露或写入 V1.6/V1.7 效果。
+- 当前包由 `__FILM_FEATURE_LEVEL__` 门控：主包可创建、保存并执行 V1.6 graph 与 V1.7 candidate；标准 Photoshop/UXP bundle 的 `Auto` 固定选择 scalar resident，Node QA 仍可显式加载独立 SIMD 工件。执行失败会丢弃整带结果、从保留的 canonical 输入完整 JS 重算，并在本请求中禁用后续 resident 尝试；取消不会触发 fallback。V1.5.2 迁移桥只提供 Halation 与迁移导出，不暴露或写入 V1.6/V1.7 效果。
 
 ## 构建与验证
 
@@ -127,6 +131,7 @@ npm run test:quick
 npm test
 npm run build:wasm
 npm run build
+npm run qa:simd -- tests/performance-data.json tests/performance-baselines/pf12-qualified-24mp-simd.json tests/performance-baselines/pf12-qualified-24mp-qualification.json
 npm run bench
 npm run validate
 npm run package
@@ -137,11 +142,11 @@ npm run package:migration
 
 `npm run package` 生成新 ID 的 `dist/FilmEmulation.ccx`。`npm run package:migration` 一次生成 `dist/FilmHalation-MigrationBridge.ccx` 和 `dist/FilmEmulation.ccx`，并保证工作区中的 `dist/main.js` 最终对应新插件导入版。
 
-`build:wasm` 需要开发机安装 Rust stable 和 `wasm32-unknown-unknown` target；它会生成 scalar `assets/film_core.wasm` 和独立 `assets/film_core_simd.wasm`，并自动复制到 UXP bundle 和 CCX。插件用户不需要 Rust。SIMD 工件只在 capability、ABI/layout hash 和固定向量自检通过且 QA 测得 ≥10% 加速后由 `Auto` 选择。
+`build:wasm` 需要开发机安装 Rust stable 和 `wasm32-unknown-unknown` target；它会生成 scalar `assets/film_core.wasm` 和独立的 Node QA 工件 `assets/film_core_simd.wasm`。`npm run build` 只把 scalar 复制到 UXP bundle，CCX 也只携带 scalar；插件用户不需要 Rust。SIMD 的 capability、ABI/layout hash、固定向量和性能资格仍由 Node QA 保留，但在完成新的 Photoshop/UXP 宿主兼容认证前不得进入标准包或 `Auto`。
 
 `npm run qa:matrix -- --out=tests/qa-matrix-report.json` 运行不含像素的 EA-2 Node 代理矩阵（36 个深度/profile/alpha 组合，逐行覆盖 JS/primitive/scalar，并附 16-bit sRGB forced-SIMD anchor、取消、故障回退和文档切换探针），输出明确列出 Photoshop 2024/2026 UDT、23.3 和物理 16GB 的待测缺口。该 JSON 是本地诊断产物，不属于发布包。
 
-最近一次候选验证中，`npm run build:wasm`、`npm run typecheck`、`npm test`、`npm run validate`、`npm run build`、`npm run bench`、`npm run package` 和 `npm run package:migration` 均通过执行；`git diff --check` 通过。Benchmark 的缓存 Preview 达标，完整 Apply 性能门禁失败；Node 协议不能替代下方的 Photoshop 实机门禁。
+PF-11/PF-12 的 Node 代码门禁中，`npm run build:wasm`、`npm test`、`npm run typecheck`、`npm run validate`、`npm run build`、`npm run qa:matrix`、`npm run qa:simd` 和 `git diff --check` 曾通过；当前源码的正式无 profiler full-graph 24MP 2+10 已通过 Decision B，SIMD 也通过 Node 10% 性能资格门禁。该结论不代表 UXP 宿主兼容：Photoshop 27.1 / UXP 9.0.2 的 A/B 结果要求标准包撤销 SIMD，改为 scalar-only。本轮未生成 CCX，完整 Photoshop 实机矩阵仍是发布门禁。
 
 ## Photoshop 支持
 
@@ -153,7 +158,7 @@ npm run package:migration
 ## 路线状态
 
 - V1.6：曝光/密度相关 Film Grain 与 Film Resolution/MTF（已实现，package/manifest 仍为 1.6.0）。
-- V1.7 EA-2 candidate-frozen：Defringe、Bloom、Highlight Protection、通用 luma mask、transient graph、RenderPlan 的真实 physical layout/liveness alias、≤262,144 pixel-visits 的 resident 协作调度、generation-safe 取消、scalar/SIMD capability 与 QA 回退已冻结。Photoshop 2024/2026 UDT、23.3、物理 16GB 和 ≤6s 绝对性能门禁未完成，不能标记 release-ready。
+- V1.7 EA-2 candidate：Defringe、Bloom、Highlight Protection、通用 luma mask、transient graph、PF-9 spatial segments、PF-10 persistent resident frames、PF-11 physical fusion/traversal reduction、≤262,144 pixel-visits 的 resident 协作调度和 generation-safe 取消均已实现；Node 24MP Decision B 已通过。PF-12A SIMD 仅保留为 Node QA 工件，标准 Photoshop 包因已确认的 UXP 宿主崩溃而固定使用 scalar。Photoshop 2024/2026 UDT、23.3、物理 16GB、Preview/Apply/cancel 与宿主绝对性能矩阵仍待完成，不能标记 release-ready。
 - V1.8 以后：Vignette、Film Damage、Overscan 与 Film Gate 尚未实现；本轮不会静默接受这些未来节点。
 - V2.0：统一 FilmLab 效果图、格式档案和物理效果预设，尚未开始。
 

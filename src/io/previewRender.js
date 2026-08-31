@@ -216,13 +216,18 @@ async function readPreviewSource(doc) {
  * @param {object|null} cache 上次的 canonical 输入和中间量缓存
  * @param {{display?:object,effect?:object,cacheKey?:string,width?:number,height?:number,rgb?:Float32Array,previewScale?:number,effectPreviewScale?:number,outputCrop?:{x:number,y:number,width:number,height:number}}|null} [source]
  *   双源模式：1024px ICC display + 2048px native effect；单源旧调用仍兼容。
- * @param {{signal?:AbortSignal,returnDataUrl?:boolean}} [options]
+ * @param {{signal?:AbortSignal,returnDataUrl?:boolean,profileResident?:boolean,collectStepSamples?:boolean,onResidentStep?:(snapshot:any)=>void}} [options]
  * @returns {Promise<{dataUrl:string|null,png:Uint8Array,width:number,height:number,ms:number,cache:object,timings:object}>}
  */
 export async function renderPreviewIncremental(doc, paramsOrDocument, trc, cache, source = null, options = {}) {
   const t0 = Date.now();
   const timings = { prepareMs: 0, algorithmMs: 0, encodeMs: 0, base64Ms: 0 };
   const signal = options.signal;
+  const residentTelemetry = {
+    profileResident: options.profileResident,
+    collectStepSamples: options.collectStepSamples,
+    onResidentStep: options.onResidentStep,
+  };
   throwIfCancelled(signal);
   const filmDocument = paramsOrDocument?.graph ? paramsOrDocument : null;
   const params = filmDocument?.graph.find((node) => node.type === 'halation')?.params ?? paramsOrDocument;
@@ -353,6 +358,7 @@ export async function renderPreviewIncremental(doc, paramsOrDocument, trc, cache
       previewScale,
       quality: renderQuality,
       signal,
+      ...residentTelemetry,
     })
     : { width: w, height: h, rgb: baseLinear, alpha: displayWork.alpha };
   const defringeEffect = defringeNodes.length
@@ -364,6 +370,7 @@ export async function renderPreviewIncremental(doc, paramsOrDocument, trc, cache
       previewScale: effectProxyScale,
       quality: renderQuality,
       signal,
+      ...residentTelemetry,
     })
     : { width: ew, height: eh, rgb: effectLinear, alpha: effectWork.alpha };
   const displayGraphLinear = defringeDisplay.rgb;
@@ -539,6 +546,7 @@ export async function renderPreviewIncremental(doc, paramsOrDocument, trc, cache
     seed: laterNodes.find((node) => node.type === 'grain')?.params.seed ?? 0,
     signal,
     nodeCaches,
+    ...residentTelemetry,
   });
   const preGrainKey = JSON.stringify({
     nodes: preGrainNodes,

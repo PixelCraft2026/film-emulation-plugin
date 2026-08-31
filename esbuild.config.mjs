@@ -1,5 +1,5 @@
 import esbuild from 'esbuild';
-import { copyFileSync, existsSync } from 'node:fs';
+import { copyFileSync, existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -33,6 +33,8 @@ const options = {
 await esbuild.build(options);
 const wasm = join(ROOT, 'assets', 'film_core.wasm');
 if (existsSync(wasm)) copyFileSync(wasm, join(ROOT, 'dist', 'film_core.wasm'));
-const wasmSimd = join(ROOT, 'assets', 'film_core_simd.wasm');
-if (existsSync(wasmSimd)) copyFileSync(wasmSimd, join(ROOT, 'dist', 'film_core_simd.wasm'));
+// Keep SIMD in assets for Node QA only. A real Photoshop 27.1 / UXP 9.0.2
+// A/B run proved that merely loading the current SIMD artifact can terminate
+// the host process, so standard UXP bundles must be scalar-only.
+rmSync(join(ROOT, 'dist', 'film_core_simd.wasm'), { force: true });
 console.log('build: dist/main.js written');

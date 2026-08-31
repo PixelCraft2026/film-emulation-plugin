@@ -1,0 +1,29 @@
+{
+  "generatedAt": "2026-08-31T15:04:29.835Z",
+  "scalarReport": "C:\\Users\\cheukwing\\Desktop\\dsh\\film-plugin\\tests\\performance-data.json",
+  "simdReport": "C:\\Users\\cheukwing\\Desktop\\dsh\\film-plugin\\tests\\performance-baselines\\pf12-final-24mp-simd.json",
+  "sourceFingerprint": "ba93e6b67bb563e0406bd795a06856e656cdc9ce58ed34281ce1569daefb6ad7",
+  "protocolMismatches": [],
+  "correctness": {
+    "passed": true,
+    "sameGraph": true,
+    "sameFingerprint": true,
+    "sameChecksum": true,
+    "noFallback": true,
+    "scalarIsScalar": true,
+    "simdIsSimd": true,
+    "noUnexpectedGrowth": true,
+    "matchingAllocations": true
+  },
+  "performance": {
+    "scalarP50Ms": 30368.5,
+    "scalarP95Ms": 30834.8,
+    "simdP50Ms": 26085.3,
+    "simdP95Ms": 26468.7,
+    "p50Speedup": 0.16419976001809444,
+    "p95Speedup": 0.16495332222587433,
+    "requiredP95Speedup": 0.1
+  },
+  "qualified": true,
+  "decision": "PASS: SIMD may be promoted for Auto in this qualified runtime."
+}

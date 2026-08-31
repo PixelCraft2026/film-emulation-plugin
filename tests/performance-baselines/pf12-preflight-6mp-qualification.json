@@ -1,0 +1,28 @@
+{
+  "generatedAt": "2026-08-31T01:37:52.699Z",
+  "scalarReport": "C:\\Users\\cheukwing\\Desktop\\dsh\\film-plugin\\tests\\performance-baselines\\pf12-preflight-6mp-scalar.json",
+  "simdReport": "C:\\Users\\cheukwing\\Desktop\\dsh\\film-plugin\\tests\\performance-baselines\\pf12-preflight-6mp-simd.json",
+  "sourceFingerprint": "21ab630c0dacb2c35fe9a1530ee03718da5536e7755cf920d5f416d4c2b4bd72",
+  "protocolMismatches": [],
+  "correctness": {
+    "passed": true,
+    "sameGraph": true,
+    "sameFingerprint": true,
+    "sameChecksum": true,
+    "noFallback": true,
+    "scalarIsScalar": true,
+    "simdIsSimd": true,
+    "noUnexpectedGrowth": true
+  },
+  "performance": {
+    "scalarP50Ms": 7054.4,
+    "scalarP95Ms": 7054.4,
+    "simdP50Ms": 7421.8,
+    "simdP95Ms": 7421.8,
+    "p50Speedup": -0.04950281602845674,
+    "p95Speedup": -0.04950281602845674,
+    "requiredP95Speedup": 0.1
+  },
+  "qualified": false,
+  "decision": "FAIL: keep Auto on the scalar resident backend."
+}

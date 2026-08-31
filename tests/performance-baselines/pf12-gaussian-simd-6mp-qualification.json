@@ -1,0 +1,28 @@
+{
+  "generatedAt": "2026-08-31T01:42:08.122Z",
+  "scalarReport": "C:\\Users\\cheukwing\\Desktop\\dsh\\film-plugin\\tests\\performance-baselines\\pf12-gaussian-simd-6mp-scalar.json",
+  "simdReport": "C:\\Users\\cheukwing\\Desktop\\dsh\\film-plugin\\tests\\performance-baselines\\pf12-gaussian-simd-6mp-simd.json",
+  "sourceFingerprint": "92987791e0491008143031f3db57da0fdc0f79a251606bb7e69562ecb15a7187",
+  "protocolMismatches": [],
+  "correctness": {
+    "passed": true,
+    "sameGraph": true,
+    "sameFingerprint": true,
+    "sameChecksum": true,
+    "noFallback": true,
+    "scalarIsScalar": true,
+    "simdIsSimd": true,
+    "noUnexpectedGrowth": true
+  },
+  "performance": {
+    "scalarP50Ms": 7025,
+    "scalarP95Ms": 7025,
+    "simdP50Ms": 5659.5,
+    "simdP95Ms": 5659.5,
+    "p50Speedup": 0.24127573107164935,
+    "p95Speedup": 0.24127573107164935,
+    "requiredP95Speedup": 0.1
+  },
+  "qualified": true,
+  "decision": "PASS: SIMD may be promoted for Auto in this qualified runtime."
+}

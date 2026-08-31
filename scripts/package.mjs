@@ -94,7 +94,7 @@ writeFileSync(join(stage, 'manifest.json'), `${JSON.stringify(manifest, null, 2)
 const indexHtml = readFileSync(join(ROOT, 'index.html'), 'utf8')
   .replace(/<title>[^<]*<\/title>/, `<title>${definition.htmlTitle}</title>`);
 writeFileSync(join(stage, 'index.html'), indexHtml);
-for (const fileName of ['main.js', 'main.js.map', 'film_core.wasm', 'film_core_simd.wasm']) {
+for (const fileName of ['main.js', 'main.js.map', 'film_core.wasm']) {
   copyFileSync(join(OUT_DIR, fileName), join(stage, 'dist', fileName));
 }
 

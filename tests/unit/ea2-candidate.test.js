@@ -17,13 +17,14 @@ test('EA-2 physical layout is deterministic, aligned, and frame-safe after HP', 
     return node;
   });
   const plan = createFilmRenderPlan({ width: 37, height: 29, fullWidth: 37, fullHeight: 29, graph, quality: 'quality', memoryMode: 'high' });
-  assert.equal(plan.physicalLayout.version, 1);
+  assert.equal(plan.physicalLayout.version, 2);
   assert.equal(plan.physicalLayout.alignmentFloats, 16);
   assert.equal(plan.arenaHighWaterFloats, plan.physicalLayout.scratchFloats);
   assert.equal(plan.transientHighWaterFloats, plan.physicalLayout.transientFloats);
   assert.ok(plan.physicalLayout.layoutHash);
   assert.ok(plan.physicalLayout.residentScratchFloats <= plan.physicalLayout.scratchFloats);
   assert.equal(plan.physicalLayout.residentBindings.length, plan.physicalLayout.bindings.length);
+  assert.ok(plan.physicalLayout.residentBindings.every((binding) => binding.residentScratchFloats >= 0));
   assert.ok(plan.physicalLayout.residentBindings.every((binding) => binding.buffers.every((buffer) => (
     buffer.kind === 'transient' || (buffer.offsetFloats + buffer.lengthFloats <= plan.physicalLayout.residentScratchFloats)
   ))));

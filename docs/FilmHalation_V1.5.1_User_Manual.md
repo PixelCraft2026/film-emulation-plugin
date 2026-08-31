@@ -49,7 +49,7 @@ Halation 模拟胶片乳剂内部散射、片基层回射以及缺少防光晕�
 4. 在新插件中点击 `Import V1.5 State` 并选择迁移文件。
 5. 打开目标文档，选中真正的原始像素层；若绑定无效，点击 `Rebind Source`。
 
-迁移只恢复旧 Halation 参数和安全绑定信息，不自动向旧文档注入 Resolution、Grain 或 V1.7 节点，也不包含任何图像像素。新 package 读取已有 V1.6 graph 时，会在内存中补齐关闭的 V1.7 节点和 `mask`，只有用户保存后才写回；已有同一文档状态时默认保留新状态，除非用户在冲突列表中明确选择覆盖。迁移桥仍保持旧 ID `com.cheukwing.filmhalation`、版本 1.5.2 和 export 角色，不显示 V1.7 控件。两个 CCX 构建同时携带 scalar `film_core.wasm` 与独立 `film_core_simd.wasm`；`Auto` 只有在 SIMD 固定向量对拍和至少 10% 协议加速通过后才会选择 SIMD，否则使用 scalar。
+迁移只恢复旧 Halation 参数和安全绑定信息，不自动向旧文档注入 Resolution、Grain 或 V1.7 节点，也不包含任何图像像素。新 package 读取已有 V1.6 graph 时，会在内存中补齐关闭的 V1.7 节点和 `mask`，只有用户保存后才写回；已有同一文档状态时默认保留新状态，除非用户在冲突列表中明确选择覆盖。迁移桥仍保持旧 ID `com.cheukwing.filmhalation`、版本 1.5.2 和 export 角色，不显示 V1.7 控件。两个 CCX 构建同时携带 scalar `film_core.wasm` 与独立 `film_core_simd.wasm`；当前精确工件已通过固定向量和至少 10% 的 24MP 协议资格，因此 `Auto` 使用 SIMD，任一工件重建、能力检查或资格失败都会安全回到 scalar。
 
 ## 3. 完整处理顺序与 Halation Pipeline
 
@@ -994,7 +994,7 @@ Fit 整图预览会采用速度优先路径；100% 原生像素检查与 Apply �
 
 ### 11.4 Candidate 验证状态
 
-当前代码已达到 `EA-2 candidate-frozen`：通过 WASM scalar/SIMD 工件重建、typecheck、Node 单元/数值测试、manifest validation、bundle build、36 组 QA 代理矩阵（JS/primitive/scalar、forced-SIMD anchor、取消、故障回退和文档切换探针）和两个 CCX 打包检查；迁移桥仍为旧 ID、1.5.2、export 角色，主包仍为新 ID、1.6.0、import 角色。Node benchmark 的缓存 Preview 门禁通过，完整 Apply P95 ≤6s 按用户要求暂缓且仅记录。Photoshop 2024/2026 UDT、Photoshop 23.3、物理 16GB 主机以及真实 Imaging API 的 8/16/32 位、四种 profile、透明边缘、文档切换、取消和失败回滚矩阵仍未完成，因此当前 candidate 不等同于 release-ready。
+当前代码达到 `EA-2 candidate` 的 PF-12A Node/WASM 状态：scalar/SIMD 工件、typecheck、Node 单元/数值测试、manifest validation、bundle build和 QA 代理矩阵均纳入门禁；当前 24MP、16-bit、Quality、Balanced、2+10 的 scalar P95 为 30.455s，SIMD P95 为 26.389s，后者提升 15.41% 并通过 Auto 资格。迁移桥仍为旧 ID、1.5.2、export 角色，主包仍为新 ID、1.6.0、import 角色；本轮没有生成新的 CCX。Node 数据不能替代 Photoshop：2024/2026 UDT、Photoshop 23.3、物理 16GB 主机以及真实 Imaging API 的 8/16/32 位、四种 profile、透明边缘、文档切换、取消和失败回滚矩阵仍未完成，因此当前 candidate 不等同于 release-ready。
 
 ## 12. 位深、工作空间与输出注意事项
 
@@ -1085,7 +1085,7 @@ Highlight Protection 只消费最近前置 Bloom 的 `bloomContribution`。如�
 
 ### 13.11 为什么状态显示 V1.7 candidate-frozen 而不是 1.7.0
 
-当前 package/manifest 仍为 1.6.0。V1.7 的 JS 语义、UI、真实 physical layout、scalar resident 协作调度和 SIMD artifact 已冻结为 EA-2 candidate；绝对性能门禁、Photoshop 23.3、物理 16GB 以及 2024/2026 UDT 仍未完成，因此本手册不把它描述为正式发布版。
+当前 package/manifest 仍为 1.6.0。V1.7 的 JS 语义、UI、真实 physical layout、scalar resident 协作调度、PF-11 fusion/traversal 优化和已资格化 SIMD artifact 已形成 EA-2 candidate；Photoshop 23.3、物理 16GB、真实 Preview/Apply/cancel 和 2024/2026 UDT 仍未完成，因此本手册不把它描述为正式发布版。
 
 ## 14. 推荐调参顺序速查
 

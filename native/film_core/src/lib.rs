@@ -5,9 +5,23 @@
 use std::mem;
 use std::slice;
 
+mod cooperative;
+use cooperative::{activate_kernel, step_kernel, ActiveKernel, BloomParams};
+
 const EXECUTOR_ABI_VERSION: u32 = 1;
 const EXECUTOR_CAPABILITY_SCALAR: u32 = 1;
 const EXECUTOR_CAPABILITY_SIMD: u32 = 1 << 1;
+/// The resident ABI remains version 1.  These feature bits are additive so a
+/// host can reject an older artifact without mistaking its coarse scheduler
+/// for a cooperative kernel.
+const EXECUTOR_CAPABILITY_COOPERATIVE_KERNELS: u32 = 1 << 2;
+const EXECUTOR_CAPABILITY_STEP_TELEMETRY: u32 = 1 << 3;
+const EXECUTOR_CAPABILITY_SEGMENTED_EXECUTION: u32 = 1 << 4;
+const EXECUTOR_CAPABILITY_RESIDENT_FRAME_MATERIALIZATION: u32 = 1 << 5;
+const EXECUTOR_CAPABILITY_KERNEL_FUSION: u32 = 1 << 6;
+/// The SIMD artifact contains explicit vectorized production kernels, not
+/// only the module-level simd128 target feature and capability probe.
+const EXECUTOR_CAPABILITY_SIMD_KERNELS: u32 = 1 << 7;
 const COMMAND_MAGIC: u32 = 0x464c4d47; // FLMG
 const COMMAND_VERSION: u16 = 1;
 const COMMAND_HEADER_BYTES: usize = 80;
@@ -39,6 +53,21 @@ struct ResidentState {
     frame_a: Vec<f32>,
     frame_b: Vec<f32>,
     alpha: Vec<f32>,
+    /// PF-10 persistent full-frame slots.  The legacy frame_a/frame_b fields
+    /// remain band-local so command ABI v1 kernels can be reused unchanged.
+    persistent_frame_a: Vec<f32>,
+    persistent_frame_b: Vec<f32>,
+    persistent_alpha: Vec<f32>,
+    full_height: usize,
+    segmented: bool,
+    stable_full_slot: usize,
+    pending_full_slot: usize,
+    segment_input_y0: usize,
+    segment_input_y1: usize,
+    segment_core_y0: usize,
+    segment_core_y1: usize,
+    segment_active: bool,
+    uploaded_rows: usize,
     scratch: Vec<f32>,
     transient: Vec<f32>,
     kernel: Vec<f32>,
@@ -58,6 +87,10 @@ struct ResidentState {
     current_column: u32,
     node_work_done: usize,
     node_work_total: usize,
+    phase_work_done: usize,
+    phase_work_total: usize,
+    phase_count: u32,
+    active_identity: bool,
     last_step_work: u32,
     steps: u64,
     max_step_work: u32,
@@ -66,11 +99,31 @@ struct ResidentState {
     allocation_count: u32,
     running: bool,
     current_slot: usize,
+    /// Logical graph slots are aliases to one of the two physical frames.
+    /// A node is only committed by changing this map after its output is
+    /// complete, so a cancelled request can never publish a partially written
+    /// frame.
+    logical_frames: [u8; 2],
+    active_output_physical: u8,
+    active_kernel: Option<ActiveKernel>,
     bloom_base_slot: i32,
     bloom_contribution_valid: bool,
+    pending_bloom_fusion: Option<BloomParams>,
+    debug_intermediates: bool,
+    fusion_count: u32,
     failure_node: i32,
     generation: u32,
     stats: Vec<u8>,
+    last_step_node: u32,
+    last_step_phase: u32,
+    last_step_channel: u32,
+    last_step_lobe: u32,
+    last_step_pass: u32,
+    last_step_reads: u32,
+    last_step_writes: u32,
+    last_step_taps: u32,
+    last_step_downsample_pixels: u32,
+    last_step_upsample_pixels: u32,
 }
 
 impl ResidentState {
@@ -82,6 +135,19 @@ impl ResidentState {
             frame_a: Vec::new(),
             frame_b: Vec::new(),
             alpha: Vec::new(),
+            persistent_frame_a: Vec::new(),
+            persistent_frame_b: Vec::new(),
+            persistent_alpha: Vec::new(),
+            full_height: 0,
+            segmented: false,
+            stable_full_slot: 0,
+            pending_full_slot: 1,
+            segment_input_y0: 0,
+            segment_input_y1: 0,
+            segment_core_y0: 0,
+            segment_core_y1: 0,
+            segment_active: false,
+            uploaded_rows: 0,
             scratch: Vec::new(),
             transient: Vec::new(),
             kernel: Vec::new(),
@@ -101,6 +167,10 @@ impl ResidentState {
             current_column: 0,
             node_work_done: 0,
             node_work_total: 0,
+            phase_work_done: 0,
+            phase_work_total: 0,
+            phase_count: 0,
+            active_identity: false,
             last_step_work: 0,
             steps: 0,
             max_step_work: 0,
@@ -109,11 +179,27 @@ impl ResidentState {
             allocation_count: 0,
             running: false,
             current_slot: 0,
+            logical_frames: [0, 1],
+            active_output_physical: 1,
+            active_kernel: None,
             bloom_base_slot: -1,
             bloom_contribution_valid: false,
+            pending_bloom_fusion: None,
+            debug_intermediates: false,
+            fusion_count: 0,
             failure_node: -1,
             generation: 1,
             stats: vec![0; 32],
+            last_step_node: u32::MAX,
+            last_step_phase: 0,
+            last_step_channel: 0,
+            last_step_lobe: 0,
+            last_step_pass: 0,
+            last_step_reads: 0,
+            last_step_writes: 0,
+            last_step_taps: 0,
+            last_step_downsample_pixels: 0,
+            last_step_upsample_pixels: 0,
         }
     }
 }
@@ -245,7 +331,14 @@ pub extern "C" fn film_executor_abi_version() -> u32 { EXECUTOR_ABI_VERSION }
 #[no_mangle]
 pub extern "C" fn film_executor_capabilities() -> u32 {
     EXECUTOR_CAPABILITY_SCALAR
-        | if cfg!(feature = "simd") { EXECUTOR_CAPABILITY_SIMD } else { 0 }
+        | EXECUTOR_CAPABILITY_COOPERATIVE_KERNELS
+        | EXECUTOR_CAPABILITY_STEP_TELEMETRY
+        | EXECUTOR_CAPABILITY_SEGMENTED_EXECUTION
+        | EXECUTOR_CAPABILITY_RESIDENT_FRAME_MATERIALIZATION
+        | EXECUTOR_CAPABILITY_KERNEL_FUSION
+        | if cfg!(feature = "simd") {
+            EXECUTOR_CAPABILITY_SIMD | EXECUTOR_CAPABILITY_SIMD_KERNELS
+        } else { 0 }
 }
 
 /// Small deterministic vector probe used by the JS loader before a SIMD
@@ -269,6 +362,16 @@ pub extern "C" fn film_executor_create(_flags: u32) -> u32 {
         table.push(Some(Box::new(ResidentState::new())));
         (table.len() - 1) as u32
     }
+}
+
+/// Additive PF-11 diagnostic option. Segmented Bloom + Highlight Protection
+/// fusion is disabled whenever a caller requests node-level intermediates.
+#[no_mangle]
+pub unsafe extern "C" fn film_executor_set_debug_intermediates(handle: u32, enabled: u32) -> i32 {
+    let state = match executor_mut(handle) { Some(value) => value, None => return ERR_STALE_HANDLE };
+    if state.running { return ERR_INTERNAL; }
+    state.debug_intermediates = enabled != 0;
+    0
 }
 
 #[no_mangle]
@@ -310,7 +413,13 @@ pub unsafe extern "C" fn film_executor_reserve(handle: u32, total_bytes: u32, wi
     // legal current radius is bounded by the active band geometry plus halo.
     let line_values = state.width.max(state.max_band_height).saturating_mul(12).saturating_add(64);
     if state.line.len() < line_values { state.line.resize(line_values, 0.0); }
-    if state.deque.len() < state.width.max(state.max_band_height) { state.deque.resize(state.width.max(state.max_band_height), 0); }
+    const MAX_FILTER_COLUMN_BLOCK: usize = 64;
+    let deque_capacity = state.width.max(
+        MAX_FILTER_COLUMN_BLOCK
+            .saturating_mul(state.max_band_height)
+            .saturating_add(MAX_FILTER_COLUMN_BLOCK * 3),
+    );
+    if state.deque.len() < deque_capacity { state.deque.resize(deque_capacity, 0); }
     if command_grew { state.command.resize(total_bytes as usize, 0); }
     state.command_len = 0;
     state.node_count = 0;
@@ -325,17 +434,83 @@ pub unsafe extern "C" fn film_executor_reserve(handle: u32, total_bytes: u32, wi
     state.current_column = 0;
     state.node_work_done = 0;
     state.node_work_total = 0;
+    state.phase_work_done = 0;
+    state.phase_work_total = 0;
+    state.phase_count = 0;
+    state.active_identity = false;
     state.last_step_work = 0;
     state.bloom_base_slot = -1;
     state.bloom_contribution_valid = false;
+    state.pending_bloom_fusion = None;
+    state.fusion_count = 0;
     state.steps = 0;
     state.max_step_work = 0;
+    state.logical_frames = [0, 1];
+    state.active_output_physical = 1;
+    state.active_kernel = None;
+    state.last_step_node = u32::MAX;
+    state.last_step_phase = 0;
+    state.last_step_channel = 0;
+    state.last_step_lobe = 0;
+    state.last_step_pass = 0;
+    state.last_step_reads = 0;
+    state.last_step_writes = 0;
+    state.last_step_taps = 0;
+    state.last_step_downsample_pixels = 0;
+    state.last_step_upsample_pixels = 0;
     state.running = false;
     state.current_slot = 0;
     state.bloom_base_slot = -1;
     state.bloom_contribution_valid = false;
     state.failure_node = -1;
+    state.segmented = false;
+    state.full_height = max_band_height as usize;
+    state.stable_full_slot = 0;
+    state.pending_full_slot = 1;
+    state.segment_active = false;
+    state.uploaded_rows = 0;
     if geometry_changed || frame_grew || command_grew || arena_grew || transient_grew {
+        state.generation = state.generation.wrapping_add(1).max(1);
+        state.allocation_count = state.allocation_count.saturating_add(1);
+    }
+    0
+}
+
+/// Reserve PF-10 storage.  The command ABI still describes one active band;
+/// the two persistent full-frame slots are an additive executor capability.
+#[no_mangle]
+pub unsafe extern "C" fn film_executor_reserve_segmented(
+    handle: u32,
+    total_bytes: u32,
+    width: u32,
+    full_height: u32,
+    max_band_height: u32,
+    arena_floats: u32,
+    transient_floats: u32,
+) -> i32 {
+    if full_height == 0 || max_band_height == 0 || full_height < max_band_height { return ERR_BAD_LENGTH; }
+    let code = film_executor_reserve(handle, total_bytes, width, max_band_height, arena_floats, transient_floats);
+    if code != 0 { return code; }
+    let state = match executor_mut(handle) { Some(value) => value, None => return ERR_STALE_HANDLE };
+    let full_pixels = match (width as usize).checked_mul(full_height as usize) { Some(value) => value, None => return ERR_OVERFLOW };
+    let full_values = match full_pixels.checked_mul(3) { Some(value) => value, None => return ERR_OVERFLOW };
+    let persistent_grew = state.persistent_frame_a.len() < full_values
+        || state.persistent_frame_b.len() < full_values
+        || state.persistent_alpha.len() < full_pixels;
+    if state.persistent_frame_a.len() < full_values { state.persistent_frame_a.resize(full_values, 0.0); }
+    if state.persistent_frame_b.len() < full_values { state.persistent_frame_b.resize(full_values, 0.0); }
+    if state.persistent_alpha.len() < full_pixels { state.persistent_alpha.resize(full_pixels, 1.0); }
+    state.full_height = full_height as usize;
+    state.segmented = true;
+    state.stable_full_slot = 0;
+    state.pending_full_slot = 1;
+    state.segment_active = false;
+    state.uploaded_rows = 0;
+    state.segment_input_y0 = 0;
+    state.segment_input_y1 = 0;
+    state.segment_core_y0 = 0;
+    state.segment_core_y1 = 0;
+    if persistent_grew {
         state.generation = state.generation.wrapping_add(1).max(1);
         state.allocation_count = state.allocation_count.saturating_add(1);
     }
@@ -361,6 +536,145 @@ pub unsafe extern "C" fn film_executor_input_rgb_ptr(handle: u32) -> u32 {
 #[no_mangle]
 pub unsafe extern "C" fn film_executor_input_alpha_ptr(handle: u32) -> u32 {
     executor_mut(handle).map(|state| state.alpha.as_mut_ptr() as u32).unwrap_or(0)
+}
+
+/// PF-10 staging aliases.  The first `rows` in these buffers are copied into
+/// the persistent stable frame by `film_executor_upload_rows`.
+#[no_mangle]
+pub unsafe extern "C" fn film_executor_staging_rgb_ptr(handle: u32) -> u32 {
+    film_executor_input_rgb_ptr(handle)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn film_executor_staging_alpha_ptr(handle: u32) -> u32 {
+    film_executor_input_alpha_ptr(handle)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn film_executor_upload_rows(handle: u32, y0: u32, rows: u32) -> i32 {
+    let state = match executor_mut(handle) { Some(value) => value, None => return ERR_STALE_HANDLE };
+    if !state.segmented || state.running || state.segment_active { return ERR_INTERNAL; }
+    let start = y0 as usize;
+    let count = rows as usize;
+    if count == 0 || start != state.uploaded_rows || start.checked_add(count).map_or(true, |end| end > state.full_height || count > state.max_band_height) {
+        return ERR_BAD_LENGTH;
+    }
+    let width = state.width;
+    let row_rgb = match width.checked_mul(3) { Some(value) => value, None => return ERR_OVERFLOW };
+    let values = match count.checked_mul(row_rgb) { Some(value) => value, None => return ERR_OVERFLOW };
+    let pixels = match count.checked_mul(width) { Some(value) => value, None => return ERR_OVERFLOW };
+    let dst_rgb = if state.stable_full_slot == 0 { &mut state.persistent_frame_a } else { &mut state.persistent_frame_b };
+    let dst_rgb_offset = match start.checked_mul(row_rgb) { Some(value) => value, None => return ERR_OVERFLOW };
+    dst_rgb[dst_rgb_offset..dst_rgb_offset + values].copy_from_slice(&state.frame_a[..values]);
+    let dst_alpha = &mut state.persistent_alpha;
+    let dst_alpha_offset = match start.checked_mul(width) { Some(value) => value, None => return ERR_OVERFLOW };
+    dst_alpha[dst_alpha_offset..dst_alpha_offset + pixels].copy_from_slice(&state.alpha[..pixels]);
+    state.uploaded_rows = start + count;
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn film_executor_finish_upload(handle: u32) -> i32 {
+    let state = match executor_mut(handle) { Some(value) => value, None => return ERR_STALE_HANDLE };
+    if !state.segmented || state.running || state.segment_active { return ERR_INTERNAL; }
+    if state.uploaded_rows != state.full_height { return ERR_BAD_LENGTH; }
+    0
+}
+
+/// Copy one segment's halo-complete input window from the stable full frame
+/// into the legacy local command buffers.  The command ABI remains band-local.
+#[no_mangle]
+pub unsafe extern "C" fn film_executor_begin_segment_band(
+    handle: u32,
+    input_y0: u32,
+    input_y1: u32,
+    core_y0: u32,
+    core_y1: u32,
+) -> i32 {
+    let state = match executor_mut(handle) { Some(value) => value, None => return ERR_STALE_HANDLE };
+    // A segment keeps `segment_active` true across its bands so that the
+    // pending frame cannot be swapped until the final `commit_segment`.
+    // Re-entering here after `commit_band` starts the next local window.
+    if !state.segmented || state.running { return ERR_INTERNAL; }
+    let input_start = input_y0 as usize;
+    let input_end = input_y1 as usize;
+    let core_start = core_y0 as usize;
+    let core_end = core_y1 as usize;
+    if input_start >= input_end || input_end > state.full_height || input_end - input_start > state.max_band_height
+        || core_start < input_start || core_end > input_end || core_start >= core_end {
+        return ERR_BAD_LENGTH;
+    }
+    let width = state.width;
+    let row_rgb = match width.checked_mul(3) { Some(value) => value, None => return ERR_OVERFLOW };
+    let rows = input_end - input_start;
+    let values = match rows.checked_mul(row_rgb) { Some(value) => value, None => return ERR_OVERFLOW };
+    let src_rgb = if state.stable_full_slot == 0 { &state.persistent_frame_a } else { &state.persistent_frame_b };
+    let src_offset = match input_start.checked_mul(row_rgb) { Some(value) => value, None => return ERR_OVERFLOW };
+    state.frame_a[..values].copy_from_slice(&src_rgb[src_offset..src_offset + values]);
+    let src_alpha_offset = match input_start.checked_mul(width) { Some(value) => value, None => return ERR_OVERFLOW };
+    let alpha_values = rows.saturating_mul(width);
+    state.alpha[..alpha_values].copy_from_slice(&state.persistent_alpha[src_alpha_offset..src_alpha_offset + alpha_values]);
+    state.height = rows;
+    state.segment_input_y0 = input_start;
+    state.segment_input_y1 = input_end;
+    state.segment_core_y0 = core_start;
+    state.segment_core_y1 = core_end;
+    state.segment_active = true;
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn film_executor_commit_band(handle: u32) -> i32 {
+    let state = match executor_mut(handle) { Some(value) => value, None => return ERR_STALE_HANDLE };
+    if !state.segmented || state.running || !state.segment_active { return ERR_INTERNAL; }
+    let output_slot = state.logical_frames[state.current_slot.min(1)] as usize;
+    let source = if output_slot == 0 { &state.frame_a } else { &state.frame_b };
+    let width = state.width;
+    let row_rgb = width.saturating_mul(3);
+    let core_rows = state.segment_core_y1.saturating_sub(state.segment_core_y0);
+    let local_start = state.segment_core_y0.saturating_sub(state.segment_input_y0);
+    let values = core_rows.saturating_mul(row_rgb);
+    let source_offset = local_start.saturating_mul(row_rgb);
+    let dst_offset = state.segment_core_y0.saturating_mul(row_rgb);
+    let target = if state.pending_full_slot == 0 { &mut state.persistent_frame_a } else { &mut state.persistent_frame_b };
+    if source_offset.saturating_add(values) > source.len() || dst_offset.saturating_add(values) > target.len() { return ERR_CAPACITY; }
+    target[dst_offset..dst_offset + values].copy_from_slice(&source[source_offset..source_offset + values]);
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn film_executor_commit_segment(handle: u32) -> i32 {
+    let state = match executor_mut(handle) { Some(value) => value, None => return ERR_STALE_HANDLE };
+    if !state.segmented || state.running || !state.segment_active { return ERR_INTERNAL; }
+    state.stable_full_slot = state.pending_full_slot;
+    state.pending_full_slot = 1 - state.stable_full_slot;
+    state.segment_active = false;
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn film_executor_abort_segment(handle: u32) -> i32 {
+    let state = match executor_mut(handle) { Some(value) => value, None => return ERR_STALE_HANDLE };
+    if !state.segmented || state.running { return ERR_INTERNAL; }
+    state.segment_active = false;
+    state.active_kernel = None;
+    state.running = false;
+    state.segment_active = false;
+    state.uploaded_rows = 0;
+    state.pending_bloom_fusion = None;
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn film_executor_stable_rgb_ptr(handle: u32) -> u32 {
+    executor_mut(handle).map(|state| {
+        if state.stable_full_slot == 0 { state.persistent_frame_a.as_mut_ptr() as u32 } else { state.persistent_frame_b.as_mut_ptr() as u32 }
+    }).unwrap_or(0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn film_executor_stable_alpha_ptr(handle: u32) -> u32 {
+    executor_mut(handle).map(|state| state.persistent_alpha.as_mut_ptr() as u32).unwrap_or(0)
 }
 
 #[no_mangle]
@@ -393,13 +707,32 @@ pub unsafe extern "C" fn film_executor_begin(handle: u32, command_bytes: u32) ->
     state.current_column = 0;
     state.node_work_done = 0;
     state.node_work_total = 0;
+    state.phase_work_done = 0;
+    state.phase_work_total = 0;
+    state.phase_count = 0;
+    state.active_identity = false;
     state.last_step_work = 0;
+    state.logical_frames = [0, 1];
+    state.active_output_physical = 1;
+    state.active_kernel = None;
+    state.last_step_node = u32::MAX;
+    state.last_step_phase = 0;
+    state.last_step_channel = 0;
+    state.last_step_lobe = 0;
+    state.last_step_pass = 0;
+    state.last_step_reads = 0;
+    state.last_step_writes = 0;
+    state.last_step_taps = 0;
+    state.last_step_downsample_pixels = 0;
+    state.last_step_upsample_pixels = 0;
     state.steps = 0;
     state.max_step_work = 0;
     state.running = true;
     state.current_slot = 0;
     state.bloom_base_slot = -1;
     state.bloom_contribution_valid = false;
+    state.pending_bloom_fusion = None;
+    state.fusion_count = 0;
     state.failure_node = -1;
     state.stats.fill(0);
     0
@@ -611,113 +944,57 @@ fn copy_resident_slot(state: &mut ResidentState, input_slot: usize, output_slot:
 pub unsafe extern "C" fn film_executor_step(handle: u32, work_budget: u32) -> i32 {
     let state = match executor_mut(handle) { Some(value) => value, None => return ERR_STALE_HANDLE };
     if !state.running { return ERR_NOT_RUNNING; }
-    // V1.7 defines work_budget as pixel-visits, not node count. Clamp the
-    // public budget so a caller can never monopolise the host event loop.
     let budget = (work_budget as usize).clamp(1, 262_144);
     state.steps = state.steps.saturating_add(1);
     state.last_step_work = 0;
-    let mut remaining_budget = budget;
-    while state.cursor < state.node_count {
-        let command = &state.command[..state.command_len];
-        let Some((opcode, node_hash, input_slot, output_slot, params_start, params_end)) = command_node_record(command, state.cursor) else {
-            state.running = false;
-            return ERR_INVALID_PLAN;
-        };
-        if input_slot != state.current_slot {
-            state.running = false;
-            return ERR_INVALID_PLAN;
-        }
-        let amount = object_f32(command, params_start, params_end, HASH_AMOUNT).unwrap_or(f32::NAN);
-        let identity = match opcode {
-            10 => amount == 0.0 || object_f32(command, params_start, params_end, HASH_EDGE_SENSITIVITY) == Some(0.0),
-            30 => object_f32(command, params_start, params_end, HASH_STRENGTH) == Some(0.0),
-            40 => object_f32(command, params_start, params_end, HASH_AMPLIFY) == Some(0.0),
-            50 | 70 => amount == 0.0,
-            60 => amount == 0.0,
-            _ => false,
-        };
-        // Each node exposes a deterministic amount of pixel work. The actual
-        // kernel is committed only at a safe pass boundary after the budget is
-        // fully accumulated; no partially written frame is ever published.
-        if state.node_work_total == 0 {
-            let pixels = state.width.saturating_mul(state.height).max(1);
-            let multiplier = match opcode {
-                10 => 8,
-                30 => 32,
-                40 => 32,
-                50 => 2,
-                60 => 16,
-                70 => 24,
-                _ => 1,
-            };
-            state.current_node = state.cursor;
-            state.current_stage = opcode as u32;
-            state.current_substage = 0;
-            state.current_channel = 0;
-            state.current_lobe = 0;
-            state.current_pass = 0;
-            state.current_row = 0;
-            state.current_column = 0;
-            state.node_work_done = 0;
-            state.node_work_total = pixels.saturating_mul(multiplier).max(1);
-        }
-        let remaining_work = state.node_work_total.saturating_sub(state.node_work_done);
-        let consumed = remaining_budget.min(remaining_work);
-        state.node_work_done = state.node_work_done.saturating_add(consumed);
-        state.last_step_work = state.last_step_work.saturating_add(consumed.min(u32::MAX as usize) as u32);
-        state.max_step_work = state.max_step_work.max(state.last_step_work);
-        remaining_budget -= consumed;
-        let fraction = state.node_work_done as f32 / state.node_work_total.max(1) as f32;
-        state.current_substage = (fraction * 4.0).floor().min(3.0) as u32;
-        state.current_channel = ((fraction * 3.0).floor().min(2.0)) as u32;
-        state.current_lobe = ((fraction * 3.0).floor().min(2.0)) as u32;
-        state.current_pass = state.current_substage;
-        state.current_row = ((fraction * state.height.max(1) as f32).floor().min(state.height.saturating_sub(1) as f32)) as u32;
-        state.current_column = ((fraction * state.width.max(1) as f32).floor().min(state.width.saturating_sub(1) as f32)) as u32;
-        if state.node_work_done < state.node_work_total {
-            return 1;
-        }
-        let code = match opcode {
-            10 if !identity => execute_resident_defringe(state, input_slot, output_slot, params_start, params_end),
-            30 if !identity => execute_resident_halation(state, input_slot, output_slot, params_start, params_end),
-            40 => execute_resident_bloom(state, input_slot, output_slot, params_start, params_end),
-            50 => execute_resident_highlight_protection(state, input_slot, output_slot, params_start, params_end),
-            60 if !identity => execute_resident_resolution(state, input_slot, output_slot, params_start, params_end),
-            70 if !identity => execute_resident_grain(state, input_slot, output_slot, params_start, params_end, node_hash),
-            _ if identity => copy_resident_slot(state, input_slot, output_slot),
-            _ => ERR_UNSUPPORTED_NODE,
-        };
-        if code != 0 {
-            state.failure_node = state.cursor as i32;
-            state.running = false;
-            return code;
-        }
-        state.cursor += 1;
-        state.current_node = state.cursor;
-        state.current_stage = 0;
-        state.current_substage = 0;
-        state.current_channel = 0;
-        state.current_lobe = 0;
-        state.current_pass = 0;
-        state.current_row = 0;
-        state.current_column = 0;
-        state.node_work_done = 0;
-        state.node_work_total = 0;
-        if remaining_budget == 0 {
-            if state.cursor < state.node_count { return 1; }
-            break;
-        }
-    }
-    if state.cursor < state.node_count { return 1; }
-    let values = state.width * state.height * 3;
-    let current = if state.current_slot == 0 { &state.frame_a[..values] } else { &state.frame_b[..values] };
-    if current.iter().any(|value| !value.is_finite()) {
+    state.last_step_reads = 0;
+    state.last_step_writes = 0;
+    state.last_step_taps = 0;
+    state.last_step_downsample_pixels = 0;
+    state.last_step_upsample_pixels = 0;
+    if state.cursor >= state.node_count {
         state.running = false;
-        return ERR_NONFINITE_OUTPUT;
+        return 0;
     }
-    if state.current_slot == 0 {
-        state.frame_b[..values].copy_from_slice(&state.frame_a[..values]);
+    if state.active_kernel.is_none() {
+        let record = match command_node_record(&state.command[..state.command_len], state.cursor) { Some(value)=>value, None=>{state.running=false;return ERR_INVALID_PLAN} };
+        let (opcode,node_hash,input_slot,output_slot,params_start,params_end)=record;
+        if input_slot!=state.current_slot {state.running=false;return ERR_INVALID_PLAN}
+        match activate_kernel(state,state.cursor,node_hash,opcode,input_slot,output_slot,params_start,params_end) {
+            Ok(kernel)=>state.active_kernel=Some(kernel),
+            Err(code)=>{state.failure_node=state.cursor as i32;state.running=false;return code;}
+        }
     }
+    let mut kernel=state.active_kernel.take().unwrap();
+    let result=match step_kernel(state,&mut kernel,budget){Ok(value)=>value,Err(code)=>{state.failure_node=state.cursor as i32;state.running=false;return code;}};
+    let cursor=kernel.cursor();
+    state.current_node=cursor.node;state.current_stage=cursor.opcode as u32;state.current_substage=cursor.phase;state.current_channel=cursor.channel;state.current_lobe=cursor.lobe;state.current_pass=cursor.pass;state.current_row=cursor.row;state.current_column=cursor.column;
+    state.last_step_node=cursor.node as u32;state.last_step_phase=cursor.phase;state.last_step_channel=cursor.channel;state.last_step_lobe=cursor.lobe;state.last_step_pass=cursor.pass;
+    state.last_step_work=result.work;state.last_step_reads=result.reads;state.last_step_writes=result.writes;state.last_step_taps=result.taps;state.last_step_downsample_pixels=result.downsample_pixels;state.last_step_upsample_pixels=result.upsample_pixels;state.max_step_work=state.max_step_work.max(result.work);state.node_work_done=state.node_work_done.saturating_add(result.work as usize);
+    if !result.done {state.active_kernel=Some(kernel);return 1;}
+    let identity=kernel.identity();let output_slot=cursor.output_slot;let input_slot=cursor.input_slot;
+    if identity {state.logical_frames[output_slot.min(1)]=state.logical_frames[input_slot.min(1)];}
+    else {state.logical_frames[output_slot.min(1)]=kernel.output_physical() as u8;}
+    if let Some(base)=kernel.bloom_base_on_commit(){state.bloom_base_slot=base as i32;state.bloom_contribution_valid=true;}
+    if let Some(params)=kernel.bloom_fusion_on_commit(){state.pending_bloom_fusion=Some(params);}
+    state.cursor += 1;
+    state.current_slot = output_slot;
+    state.current_node = state.cursor;
+    state.current_stage = 0;
+    state.current_substage = 0;
+    state.current_channel = 0;
+    state.current_lobe = 0;
+    state.current_pass = 0;
+    state.current_row = 0;
+    state.current_column = 0;
+    state.node_work_done = 0;
+    state.node_work_total = 0;
+    state.phase_work_done = 0;
+    state.phase_work_total = 0;
+    state.phase_count = 0;
+    state.active_identity = false;
+    state.active_kernel = None;
+    if state.cursor < state.node_count { return 1; }
     state.running = false;
     state.stats[0..4].copy_from_slice(&(state.node_count as u32).to_le_bytes());
     state.stats[8..16].copy_from_slice(&state.steps.to_le_bytes());
@@ -727,12 +1004,30 @@ pub unsafe extern "C" fn film_executor_step(handle: u32, work_budget: u32) -> i3
 
 #[no_mangle]
 pub unsafe extern "C" fn film_executor_output_rgb_ptr(handle: u32) -> u32 {
-    executor_mut(handle).map(|state| state.frame_b.as_mut_ptr() as u32).unwrap_or(0)
+    executor_mut(handle).map(|state| {
+        // PF-10 sessions publish complete logical frames in the persistent
+        // A/B slots.  Returning the legacy band-local frame here would expose
+        // only the last materialized band to callers that use the original
+        // output export; keep the legacy path unchanged for non-segmented
+        // command execution.
+        if state.segmented {
+            return if state.stable_full_slot == 0 {
+                state.persistent_frame_a.as_mut_ptr() as u32
+            } else {
+                state.persistent_frame_b.as_mut_ptr() as u32
+            };
+        }
+        let physical = state.logical_frames[state.current_slot.min(1)] as usize;
+        if physical == 0 { state.frame_a.as_mut_ptr() as u32 } else { state.frame_b.as_mut_ptr() as u32 }
+    }).unwrap_or(0)
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn film_executor_current_rgb_ptr(handle: u32) -> u32 {
-    executor_mut(handle).map(|state| if state.current_slot == 0 { state.frame_a.as_mut_ptr() as u32 } else { state.frame_b.as_mut_ptr() as u32 }).unwrap_or(0)
+    executor_mut(handle).map(|state| {
+        let physical = state.logical_frames[state.current_slot.min(1)] as usize;
+        if physical == 0 { state.frame_a.as_mut_ptr() as u32 } else { state.frame_b.as_mut_ptr() as u32 }
+    }).unwrap_or(0)
 }
 
 #[no_mangle]
@@ -796,6 +1091,56 @@ pub unsafe extern "C" fn film_executor_max_step_work(handle: u32) -> u32 {
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn film_executor_last_step_node(handle: u32) -> u32 {
+    executor_mut(handle).map(|state| state.last_step_node).unwrap_or(u32::MAX)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn film_executor_last_step_phase(handle: u32) -> u32 {
+    executor_mut(handle).map(|state| state.last_step_phase).unwrap_or(0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn film_executor_last_step_channel(handle: u32) -> u32 {
+    executor_mut(handle).map(|state| state.last_step_channel).unwrap_or(0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn film_executor_last_step_lobe(handle: u32) -> u32 {
+    executor_mut(handle).map(|state| state.last_step_lobe).unwrap_or(0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn film_executor_last_step_pass(handle: u32) -> u32 {
+    executor_mut(handle).map(|state| state.last_step_pass).unwrap_or(0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn film_executor_last_step_reads(handle: u32) -> u32 {
+    executor_mut(handle).map(|state| state.last_step_reads).unwrap_or(0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn film_executor_last_step_writes(handle: u32) -> u32 {
+    executor_mut(handle).map(|state| state.last_step_writes).unwrap_or(0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn film_executor_last_step_taps(handle: u32) -> u32 {
+    executor_mut(handle).map(|state| state.last_step_taps).unwrap_or(0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn film_executor_last_step_downsample_pixels(handle: u32) -> u32 {
+    executor_mut(handle).map(|state| state.last_step_downsample_pixels).unwrap_or(0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn film_executor_last_step_upsample_pixels(handle: u32) -> u32 {
+    executor_mut(handle).map(|state| state.last_step_upsample_pixels).unwrap_or(0)
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn film_executor_planned_arena_floats(handle: u32) -> u32 {
     executor_mut(handle).map(|state| state.planned_arena_floats.min(u32::MAX as usize) as u32).unwrap_or(0)
 }
@@ -818,6 +1163,11 @@ pub unsafe extern "C" fn film_executor_actual_transient_floats(handle: u32) -> u
 #[no_mangle]
 pub unsafe extern "C" fn film_executor_allocation_count(handle: u32) -> u32 {
     executor_mut(handle).map(|state| state.allocation_count).unwrap_or(0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn film_executor_fusion_count(handle: u32) -> u32 {
+    executor_mut(handle).map(|state| state.fusion_count).unwrap_or(0)
 }
 
 #[no_mangle]
@@ -856,10 +1206,16 @@ pub unsafe extern "C" fn film_executor_reset(handle: u32) -> i32 {
     state.current_column = 0;
     state.node_work_done = 0;
     state.node_work_total = 0;
+    state.phase_work_done = 0;
+    state.phase_work_total = 0;
+    state.phase_count = 0;
+    state.active_identity = false;
     state.last_step_work = 0;
     state.steps = 0;
     state.max_step_work = 0;
+    state.active_kernel = None;
     state.running = false;
+    state.pending_bloom_fusion = None;
     0
 }
 
@@ -884,9 +1240,15 @@ pub unsafe extern "C" fn film_executor_cancel(handle: u32) -> i32 {
     state.current_column = 0;
     state.node_work_done = 0;
     state.node_work_total = 0;
+    state.phase_work_done = 0;
+    state.phase_work_total = 0;
+    state.phase_count = 0;
     state.last_step_work = 0;
+    state.active_kernel = None;
     state.bloom_base_slot = -1;
     state.bloom_contribution_valid = false;
+    state.pending_bloom_fusion = None;
+    state.segment_active = false;
     ERR_CANCELLED
 }
 
@@ -1522,7 +1884,6 @@ fn execute_resident_bloom(state: &mut ResidentState, input_slot: usize, output_s
 }
 
 fn execute_resident_highlight_protection(state: &mut ResidentState, input_slot: usize, output_slot: usize, params_start: usize, params_end: usize) -> i32 {
-    if input_slot != output_slot { return ERR_INVALID_PLAN; }
     let command = &state.command[..state.command_len];
     let amount = object_f32(command, params_start, params_end, HASH_AMOUNT).unwrap_or(f32::NAN);
     let threshold_ev = object_f32(command, params_start, params_end, HASH_THRESHOLD_EV).unwrap_or(f32::NAN);
@@ -1531,6 +1892,11 @@ fn execute_resident_highlight_protection(state: &mut ResidentState, input_slot: 
     if [amount, threshold_ev, softness_ev].iter().any(|value| !value.is_finite()) { return ERR_NONFINITE_PARAM; }
     if state.bloom_base_slot < 0 || !state.bloom_contribution_valid {
         state.stats[4] = 1; // missingBloomContribution
+        if input_slot != output_slot {
+            let values = state.width * state.height * 3;
+            if input_slot == 0 && output_slot == 1 { let (a, b) = (&state.frame_a[..values], &mut state.frame_b[..values]); b.copy_from_slice(a); }
+            else if input_slot == 1 && output_slot == 0 { let (a, b) = (&state.frame_b[..values], &mut state.frame_a[..values]); b.copy_from_slice(a); }
+        }
         state.current_slot = output_slot;
         return 0;
     }
@@ -1541,20 +1907,24 @@ fn execute_resident_highlight_protection(state: &mut ResidentState, input_slot: 
     if state.transient.len() < values { return ERR_CAPACITY; }
     let contribution = &state.transient[..values];
     let base_slot = state.bloom_base_slot as usize;
-    let (base, current): (&[f32], &mut [f32]) = match (base_slot, input_slot) {
-        (0, 1) => (&state.frame_a[..values], &mut state.frame_b[..values]),
-        (1, 0) => (&state.frame_b[..values], &mut state.frame_a[..values]),
-        _ => return ERR_INVALID_PLAN,
-    };
+    if base_slot > 1 || input_slot > 1 || output_slot > 1 { return ERR_INVALID_PLAN; }
+    // The two physical frames are sufficient here: read the base/current
+    // values before writing each output pixel.  This permits the output to
+    // reuse the base frame while the stable logical mapping still points to
+    // the previous current frame until commit.
+    let base_ptr = if base_slot == 0 { state.frame_a.as_ptr() } else { state.frame_b.as_ptr() };
+    let input_ptr = if input_slot == 0 { state.frame_a.as_ptr() } else { state.frame_b.as_ptr() };
+    let output_ptr = if output_slot == 0 { state.frame_a.as_mut_ptr() } else { state.frame_b.as_mut_ptr() };
     for i in 0..n {
         let p = i * 3;
-        let input_rgb = [current[p], current[p + 1], current[p + 2]];
-        let protection = resident_smoothstep(threshold, gate_end, base[p].max(base[p + 1]).max(base[p + 2]));
+        let input_rgb = unsafe { [*input_ptr.add(p), *input_ptr.add(p + 1), *input_ptr.add(p + 2)] };
+        let base_rgb = unsafe { [*base_ptr.add(p), *base_ptr.add(p + 1), *base_ptr.add(p + 2)] };
+        let protection = resident_smoothstep(threshold, gate_end, base_rgb[0].max(base_rgb[1]).max(base_rgb[2]));
         let keep = 1.0 - amount * protection;
         let coverage = resident_mask_coverage(mask, input_rgb[0], input_rgb[1], input_rgb[2]);
         for channel in 0..3 {
-            let effected = base[p + channel] + contribution[p + channel] * keep;
-            current[p + channel] = input_rgb[channel] + (effected - input_rgb[channel]) * coverage;
+            let effected = base_rgb[channel] + contribution[p + channel] * keep;
+            unsafe { *output_ptr.add(p + channel) = input_rgb[channel] + (effected - input_rgb[channel]) * coverage; }
         }
     }
     state.current_slot = output_slot;
@@ -2863,14 +3233,14 @@ const HALATION_GREEN_RESPONSE: [f64; 6] = [0.35, 1.25, 0.85, 0.008, 0.001, 0.12]
 const HALATION_BLUE_RESPONSE: [f64; 6] = [0.10, 0.08, 0.04, 0.002, 0.0, 0.04];
 
 #[inline]
-fn smoothstep_f64(edge0: f64, edge1: f64, x: f64) -> f64 {
+pub(super) fn smoothstep_f64(edge0: f64, edge1: f64, x: f64) -> f64 {
     if edge0 == edge1 { return if x >= edge1 { 1.0 } else { 0.0 }; }
     let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
 
 #[inline]
-fn reconstructed_source_exposure(radiance: f64, threshold: f64) -> f64 {
+pub(super) fn reconstructed_source_exposure(radiance: f64, threshold: f64) -> f64 {
     let e = if radiance.is_finite() { radiance.max(0.0) } else { 0.0 };
     let t = if threshold.is_finite() { threshold.max(0.0) } else { 0.0 };
     if e <= t { return 0.0; }
@@ -2882,7 +3252,7 @@ fn reconstructed_source_exposure(radiance: f64, threshold: f64) -> f64 {
 }
 
 #[inline]
-fn compressed_highlight_response(radiance: f64, threshold: f64, impact: f64) -> f64 {
+pub(super) fn compressed_highlight_response(radiance: f64, threshold: f64, impact: f64) -> f64 {
     let normalized = reconstructed_source_exposure(radiance, threshold);
     if normalized <= 0.0 { return 0.0; }
     let exponent = 1.0 + 1.5 * impact.clamp(0.0, 1.0);

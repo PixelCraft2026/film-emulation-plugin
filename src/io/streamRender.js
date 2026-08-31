@@ -4,7 +4,8 @@ import { processTiledWithTrc, processFilmBandWithTrcAsync } from './tileRender.j
 import { readDocumentPixels, encodeDisplayRgbaBuffer, writeDocumentRgbaBuffer } from './imageAccess.js';
 import { streamGeometry, streamFilmGeometry } from './streamGeometry.js';
 import { normalizeComponentSize } from './bitDepth.js';
-import { documentProfileName, resolvePixelTRC } from './colorPipeline.js';
+import { decodeToLinear, encodeFromLinear, documentProfileName, primariesMatrices, resolvePixelTRC } from './colorPipeline.js';
+import { applyMatrix3 } from '../core/color/primaries.js';
 import { BufferArena, FILM_GRAPH_VERSION, createFilmExecutor, createV17ResidentBackend } from '../core/index.js';
 export { streamGeometry, streamFilmGeometry } from './streamGeometry.js';
 const nowMs = () => globalThis.performance?.now?.() ?? Date.now();
@@ -132,6 +133,94 @@ export async function renderDocumentToLayer(doc, sourceLayer, targetLayer, sourc
   };
 }
 
+/** PF-10 host adapter: upload each source row once, execute segment-local
+ * resident frames, then perform the single target putPixels. */
+async function renderSegmentedFilmDocumentToLayer(doc, sourceLayer, targetLayer, sourceBounds, targetBounds, document, geometry, executor, componentSize, options = {}) {
+  const totalStarted = nowMs();
+  const width = sourceBounds.right - sourceBounds.left;
+  const height = sourceBounds.bottom - sourceBounds.top;
+  const canonicalRgb = new Float32Array(width * height * 3);
+  const canonicalAlpha = new Float32Array(width * height);
+  const uploadBands = geometry.uploadBands ?? [{ start: 0, end: height, y0: 0, y1: height }];
+  let sourceTrc = null;
+  let profileName = '';
+  const uploadTimings = { readMs: 0, processMs: 0 };
+  for (const band of uploadBands) {
+    if (options.signal?.aborted) throw new Error('Film render cancelled');
+    const started = nowMs();
+    const source = await readDocumentPixels(doc, {
+      componentSize,
+      layerID: sourceLayer.id,
+      layerName: sourceLayer.name,
+      bounds: { left: sourceBounds.left, top: sourceBounds.top + band.y0, right: sourceBounds.right, bottom: sourceBounds.top + band.y1 },
+    });
+    uploadTimings.readMs += nowMs() - started;
+    const blockTrc = resolvePixelTRC(doc, source.colorProfile);
+    const blockProfile = String(source.colorProfile || documentProfileName(doc)).trim();
+    if (!sourceTrc) { sourceTrc = blockTrc; profileName = blockProfile; }
+    else if (blockProfile && profileName && blockProfile !== profileName) throw new Error(`Imaging API changed color profile between upload bands: "${profileName}" vs "${blockProfile}"`);
+    const linear = decodeToLinear(source.rgb, sourceTrc);
+    const { toSRGB } = primariesMatrices(sourceTrc && sourceTrc.baseKey);
+    if (toSRGB) applyMatrix3(linear, toSRGB);
+    const rows = band.y1 - band.y0;
+    canonicalRgb.set(linear, band.y0 * width * 3);
+    canonicalAlpha.set(source.alpha ?? new Float32Array(width * rows).fill(1), band.y0 * width);
+    uploadTimings.processMs += nowMs() - started;
+    options.onProgress?.(0.25 * ((band.y1) / height));
+    await yieldRenderControl(options.signal);
+  }
+  if (!sourceTrc) sourceTrc = resolvePixelTRC(doc, '');
+  const started = nowMs();
+  const rendered = await executor.renderAsync({ width, height, rgb: canonicalRgb, alpha: canonicalAlpha }, document, {
+    fullWidth: Number(doc.width ?? width),
+    fullHeight: Number(doc.height ?? height),
+    originX: sourceBounds.left,
+    originY: sourceBounds.top,
+    quality: options.quality ?? geometry.quality ?? 'quality',
+    seed: options.seed ?? document.graph.find((node) => node.type === 'grain')?.params.seed ?? 0,
+    signal: options.signal,
+    profileResident: options.profileResident,
+    collectStepSamples: options.collectStepSamples,
+    intent: 'apply',
+    yieldIntervalMs: 50,
+  });
+  const processMs = nowMs() - started;
+  const outputRgb = new Float32Array(rendered.rgb);
+  const { fromSRGB } = primariesMatrices(sourceTrc && sourceTrc.baseKey);
+  if (fromSRGB) applyMatrix3(outputRgb, fromSRGB);
+  const encoded = encodeFromLinear(outputRgb, sourceTrc);
+  const halation = document.graph.find((node) => node.type === 'halation');
+  const quantizeStarted = nowMs();
+  const output = encodeDisplayRgbaBuffer({ width, height, rgb: encoded, alpha: rendered.alpha ?? canonicalAlpha }, componentSize, {
+    rolloff: halation?.params?.rolloff ?? 0,
+    dither: componentSize !== 32,
+    seed: options.seed ?? 0x46534c4d,
+    pixelOffset: sourceBounds.top * width,
+  });
+  const quantizeMs = nowMs() - quantizeStarted;
+  if (options.signal?.aborted) throw new Error('Film render cancelled');
+  const writeStarted = nowMs();
+  await writeDocumentRgbaBuffer(doc, { width, height, buffer: output }, { componentSize, layerID: targetLayer.id, layerName: targetLayer.name, bounds: targetBounds, colorProfile: '' });
+  const writeMs = nowMs() - writeStarted;
+  options.onProgress?.(1);
+  const effectiveExecutionMode = rendered.stats?.executionMode ?? 'resident-segmented';
+  return {
+    width,
+    height,
+    bands: geometry.bands.length,
+    memoryMode: geometry.memoryMode,
+    executionMode: effectiveExecutionMode,
+    estimatedWorkingBytes: geometry.estimatedBytes,
+    estimatedBandBytes: geometry.estimatedBandBytes,
+    outputBytes: output.byteLength,
+    colorProfile: profileName,
+    timings: { readMs: uploadTimings.readMs, processMs, quantizeMs, writeMs, totalMs: nowMs() - totalStarted },
+    algorithmTimings: {},
+    renderStats: { ...(rendered.stats ?? {}), executionMode: effectiveExecutionMode, timings: { ...(rendered.stats?.timings ?? {}), total: nowMs() - totalStarted, read: uploadTimings.readMs, process: processMs, quantize: quantizeMs, write: writeMs } },
+    graphStats: { ...(rendered.stats ?? {}), executionMode: effectiveExecutionMode },
+  };
+}
+
 /** V1.6 graph-aware Apply path. It keeps the one-final-putPixels invariant. */
 export async function renderFilmDocumentToLayer(doc, sourceLayer, targetLayer, sourceBounds, targetBounds, document, trc, options = {}) {
   const totalStarted = nowMs();
@@ -180,6 +269,20 @@ export async function renderFilmDocumentToLayer(doc, sourceLayer, targetLayer, s
   const seed = options.seed ?? document.graph.find((node) => node.type === 'grain')?.params.seed ?? 0;
   const halation = document.graph.find((node) => node.type === 'halation');
   try {
+    if (geometry.executionMode === 'resident-segmented' && residentBackend?.supportsSegmented?.(geometry.plan)) {
+      return await renderSegmentedFilmDocumentToLayer(
+        doc,
+        sourceLayer,
+        targetLayer,
+        sourceBounds,
+        targetBounds,
+        document,
+        geometry,
+        executor,
+        componentSize,
+        options,
+      );
+    }
     for (let bandIndex = 0; bandIndex < geometry.bands.length; bandIndex++) {
     if (options.signal?.aborted) throw new Error('Film render cancelled');
     const band = geometry.bands[bandIndex];
