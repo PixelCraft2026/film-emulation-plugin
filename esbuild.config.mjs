@@ -1,12 +1,13 @@
 import esbuild from 'esbuild';
-import { copyFileSync, existsSync, rmSync } from 'node:fs';
+import { copyFileSync, existsSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = fileURLToPath(new URL('.', import.meta.url));
 const pluginId = process.env.FILM_PLUGIN_ID || 'com.cheukwing.filmemulation';
-const migrationRole = process.env.FILM_MIGRATION_ROLE || 'import';
-const featureLevel = process.env.FILM_FEATURE_LEVEL || 'current';
+const packageMetadata = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
+const packageVersion = String(packageMetadata.version);
+const releaseName = process.env.FILM_RELEASE_NAME || 'Film Emulation V1.7 Public Beta 1';
 
 /** UXP panel bundle: self-contained IIFE, browser-ish platform (UXP provides DOM globals). */
 const options = {
@@ -25,8 +26,8 @@ const options = {
   external: ['photoshop', 'uxp'],
   define: {
     __FILM_PLUGIN_ID__: JSON.stringify(pluginId),
-    __FILM_MIGRATION_ROLE__: JSON.stringify(migrationRole),
-    __FILM_FEATURE_LEVEL__: JSON.stringify(featureLevel),
+    __FILM_PACKAGE_VERSION__: JSON.stringify(packageVersion),
+    __FILM_RELEASE_NAME__: JSON.stringify(releaseName),
   },
 };
 

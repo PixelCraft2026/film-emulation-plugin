@@ -172,7 +172,7 @@ export function createSelect(o) {
  * Effect enable switch. It is a native button with switch semantics instead
  * of a Spectrum-only custom element so the control remains usable on older
  * Photoshop UXP hosts as well.
- * @param {{id:string,label:string,enabled:boolean,onChange:(enabled:boolean)=>void}} o
+ * @param {{id:string,label:string,enabled:boolean,onChange:(enabled:boolean)=>void,onLabel?:string,offLabel?:string,ariaLabel?:string,title?:string}} o
  * @returns {{element:HTMLElement,setEnabled:(enabled:boolean)=>void}}
  */
 export function createEffectSwitch(o) {
@@ -181,8 +181,8 @@ export function createEffectSwitch(o) {
   button.id = o.id;
   button.classList.add('fhal-effect-toggle');
   button.setAttribute('role', 'switch');
-  button.setAttribute('aria-label', `Enable ${o.label}`);
-  button.title = `${o.label}: enable or disable`;
+  button.setAttribute('aria-label', o.ariaLabel ?? `Enable ${o.label}`);
+  button.title = o.title ?? `${o.label}: enable or disable`;
 
   const track = document.createElement('span');
   track.classList.add('fhal-toggle-track');
@@ -197,7 +197,7 @@ export function createEffectSwitch(o) {
     const value = enabled === true;
     button.setAttribute('aria-checked', String(value));
     button.setAttribute('data-enabled', String(value));
-    state.textContent = value ? 'On' : 'Off';
+    state.textContent = value ? (o.onLabel ?? 'On') : (o.offLabel ?? 'Off');
   };
   setEnabled(o.enabled);
   button.addEventListener('click', () => {

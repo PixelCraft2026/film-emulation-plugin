@@ -1,16 +1,17 @@
-# Film Emulation V1.7 Candidate 用户手册
+# Film Emulation V1.7 Public Beta 1 用户手册
 
-状态：V1.7 EA-2 candidate-frozen 当前实现说明（未发布）
-适用版本：Film Emulation 1.6.0 package / V1.7 candidate
+状态：第一个公开 Beta 版本（Windows 测试版）
+适用版本：Film Emulation 1.7.0 package / V1.7 Public Beta 1
 Halation 引擎版本：1.5.1
 Photoshop 最低版本：23.3  
-最后核对：2026-08-30
+测试平台范围：Windows 10/11；macOS 未验证，不纳入本 Beta 的支持声明
+最后核对：2026-09-02
 
-> 文件名继续沿用 `FilmHalation_V1.5.1_User_Manual.md` 以保持公开链接兼容；文档标题和内容已按当前 Film Emulation 1.6.0 package 与 V1.7 EA-2 candidate-frozen 更新。候选冻结只冻结 ABI、command、buffer layout、错误码和回退语义，不代表 V1.7.0 已发布。
+> 文件名继续沿用 `FilmHalation_V1.5.1_User_Manual.md` 作为仓库历史路径；文档标题和内容以 Film Emulation V1.7 Public Beta 1 为准。本次为 Windows 测试版，仍需要真实 Photoshop 主机矩阵持续验证，不等于正式稳定版。
 
 ## 1. 插件用途与边界
 
-Film Emulation 是 Photoshop 静态图像胶片物理效果插件。当前 package 为 1.6.0，graph 语义已包含 V1.7 candidate，按固定物理顺序排列：
+Film Emulation 是 Photoshop 静态图像胶片物理效果插件。当前 package 和 graph 语义版本均为 1.7.0，按固定物理顺序排列：
 
 ```text
 Defringe → Vignette（未来） → Halation → Bloom → Highlight Protection → Film Resolution / MTF → Film Grain → Damage（未来） → Overscan（未来）
@@ -20,11 +21,11 @@ Halation 模拟胶片乳剂内部散射、片基层回射以及缺少防光晕�
 
 - 输入图像应当已经完成 RAW 解码、曝光调整和 Photoshop 颜色预设。
 - 插件只处理非色彩的胶片物理效果，不提供胶片色彩 LUT，也不复制任何第三方代码、参数或资产。
-- `Tungsten 800 No-Remjet` 只描述无 Remjet 胶片的视觉方向，不是 CineStill 官方预设。
+- `CineStill 800T` 只描述无 Remjet 胶片的视觉方向，是本项目独立模拟的项目预设标签，不是 CineStill 官方预设。
 - 当前输入必须是 RGB 像素层。智能对象、文字、调整层和组需要先进入内容或栅格化。
 - Apply 创建或更新独立效果像素层，绑定的源图层不会被写入。
-- 新建文档默认包含六个节点（Defringe、Halation、Bloom、Highlight Protection、Resolution、Grain），只启用 Halation；其余节点默认关闭。关闭时不会执行对应计算，图像逐样本保持不变，同时保留该模块的参数。读取 V1.6 graph 时，V1.7 节点和默认 `mask` 只在内存中补齐，用户保存后才写回；V1.5 迁移状态仍只恢复原 Halation。
-- 所有当前节点都可使用共享的 Luma mask；默认 `mode=none`，因此升级不会隐式改变旧画面。未来的 Vignette、Damage、Overscan 在本 candidate 中仍明确拒绝执行。
+- 新建文档默认包含六个节点（Defringe、Halation、Bloom、Highlight Protection、Resolution、Grain），只启用 Halation；其余节点默认关闭。关闭时不会执行对应计算，图像逐样本保持不变，同时保留该模块的参数。读取较早 graph 时，V1.7 节点和默认 `mask` 只在内存中补齐，用户保存后才写回。
+- 所有当前节点都可使用共享的 Luma mask；默认 `mode=none`，因此读取较早状态不会隐式改变画面。未来的 Vignette、Damage、Overscan 在本 Beta 中仍明确拒绝执行。
 
 ## 2. 推荐工作流程
 
@@ -39,17 +40,11 @@ Halation 模拟胶片乳剂内部散射、片基层回射以及缺少防光晕�
 
 如果文档曾保存过旧参数，Reload 插件不会自动覆盖它们。若要强制载入新版预设值，先切换到另一个预设，再重新选择目标预设。
 
-### 2.1 从 V1.5 迁移参数
+### 2.1 首次公开安装与界面语言
 
-当前 package 使用新的插件 ID，Photoshop/UXP 不会让新插件直接读取旧 ID 的 PluginStorage。需要通过迁移桥转移参数：
+Public Beta 1 是第一个公开版本。发布包只有 `FilmEmulation.ccx`，插件 ID 为 `com.cheukwing.filmemulation`；没有外部旧 ID 用户需要迁移，因此面板不提供旧状态导入/导出按钮，也不需要安装迁移桥。
 
-1. 安装 `FilmHalation-MigrationBridge.ccx`，它使用旧插件 ID 并可访问原 V1.5 状态。
-2. 在迁移桥面板点击 `Export Migration Package`，保存 `.filmemulation-migrate.json` 文件。
-3. 安装 `FilmEmulation.ccx`。
-4. 在新插件中点击 `Import V1.5 State` 并选择迁移文件。
-5. 打开目标文档，选中真正的原始像素层；若绑定无效，点击 `Rebind Source`。
-
-迁移只恢复旧 Halation 参数和安全绑定信息，不自动向旧文档注入 Resolution、Grain 或 V1.7 节点，也不包含任何图像像素。新 package 读取已有 V1.6 graph 时，会在内存中补齐关闭的 V1.7 节点和 `mask`，只有用户保存后才写回；已有同一文档状态时默认保留新状态，除非用户在冲突列表中明确选择覆盖。迁移桥仍保持旧 ID `com.cheukwing.filmhalation`、版本 1.5.2 和 export 角色，不显示 V1.7 控件。两个 CCX 构建同时携带 scalar `film_core.wasm` 与独立 `film_core_simd.wasm`；当前精确工件已通过固定向量和至少 10% 的 24MP 协议资格，因此 `Auto` 使用 SIMD，任一工件重建、能力检查或资格失败都会安全回到 scalar。
+首次运行会根据 Photoshop/系统 locale 选择中文或英文。底栏的 `界面语言 / Language` 可即时切换，选择会保存为插件全局偏好；它不写入文档 schema，不改变 graph、颗粒 seed、格式参数或源/目标图层绑定。标准 CCX 只携带 scalar `film_core.wasm`；SIMD 工件仅保留给 Node QA，不会被 Photoshop 包读取、实例化或分发。
 
 ## 3. 完整处理顺序与 Halation Pipeline
 
@@ -261,13 +256,13 @@ EV = log2(max(Y, 2^-24) / 0.18)
 
 ### 3.9 V1.7 候选的执行后端
 
-当前 candidate 已接入 transient bus、RenderPlan 的真实 physical layout/liveness alias、command-buffer v1、executor ABI v1、Frame A/B、只读 alpha、预留 scratch、容量/偏移/finite 检查、取消、Debug dual-run 和整带 JS 回退。`Defringe → Halation → Bloom → Highlight Protection → Resolution → Grain` 已可在同一 scalar resident segment 中执行；每个连续 band 只上传一次 RGB/alpha、下载一次 RGB，Bloom contribution 保留在 transient arena 内，release 路径不会把中间帧复制回 JS。逻辑 RenderPlan 保留完整 alias/lifetime 高水位，resident 执行器根据节点互斥生命周期使用 planner 生成的 compact scratch arena，避免跨 band 递增扩容。每次 `film_executor_step` 的预算按 pixel-visits 解释并限制在 262,144，节点内部保存当前阶段/通道/lobe/row cursor；取消会 reset 并且不触发耗时 fallback。独立 `film_core_simd.wasm` 只在 ABI/layout/固定向量自检和 ≥10% QA 加速门通过后由 `Auto` 选择，否则保持 scalar。
+当前 Beta 已接入 transient bus、RenderPlan 的真实 physical layout/liveness alias、command-buffer v1、executor ABI v1、Frame A/B、只读 alpha、预留 scratch、容量/偏移/finite 检查、取消、Debug dual-run 和整带 JS 回退。`Defringe → Halation → Bloom → Highlight Protection → Resolution → Grain` 已可在同一 scalar resident segment 中执行；每个连续 band 只上传一次 RGB/alpha、下载一次 RGB，Bloom contribution 保留在 transient arena 内，release 路径不会把中间帧复制回 JS。逻辑 RenderPlan 保留完整 alias/lifetime 高水位，resident 执行器根据节点互斥生命周期使用 planner 生成的 compact scratch arena，避免跨 band 递增扩容。每次 `film_executor_step` 的预算按 pixel-visits 解释并限制在 262,144，节点内部保存当前阶段/通道/lobe/row cursor；取消会 reset 并且不触发耗时 fallback。独立 `film_core_simd.wasm` 只用于 Node QA；Photoshop `Auto` 固定使用 scalar，公开包不包含 SIMD 工件。
 
 ## 4. Halation 预设说明
 
 ### 4.1 Neutral / Legacy
 
-克制但可见的通用 Halation。Sigma 随画面对角线缩放，使用较高光源门槛、窄范围 Source Expansion、短红尾和近乎关闭的 Global Diffusion；它优先保护光源本体和高纯度蓝/青 LED，避免城市窗户阵列累积成红雾，也不追求 No-Remjet 的浓重深红尾。
+克制但可见的通用 Halation。Sigma 随画面对角线缩放，使用较高光源门槛、窄范围 Source Expansion、短红尾和近乎关闭的 Global Diffusion；它优先保护光源本体和高纯度蓝/青 LED，避免城市窗户阵列累积成红雾，也不追求 CineStill 800T（无 Remjet 方向）的浓重深红尾。
 
 适合：
 
@@ -276,7 +271,7 @@ EV = log2(max(Y, 2^-24) / 0.18)
 - 作为手动调参的起点；
 - 已有较强色彩风格、只需增加适度物理质感的照片。
 
-### 4.2 Tungsten 800 No-Remjet
+### 4.2 CineStill 800T
 
 高能量、强种子扩张、强红层长尾和较高色密度的实验性物理预设。目标形态是“白芯—橙红肩—深红尾”。
 
@@ -293,53 +288,54 @@ EV = log2(max(Y, 2^-24) / 0.18)
 
 ### 4.4 当前预设参数对照
 
-| 参数 | Neutral / Legacy | Tungsten 800 No-Remjet |
+| 参数 | Neutral / Legacy | CineStill 800T |
 |---|---:|---:|
-| Strength | 68 | 82 |
-| Sigma | 3.6 diagonal units | 5.2 diagonal units |
-| Threshold | 0.74 linear | 0.86 linear |
-| Red-Layer Threshold Bias | 0.00 | 0.00 |
-| Source Softness | 0.04 | 0.03 |
-| Background Softness | 0.10 | 0.24 |
-| PSF Smoothness | 0.14 | 0.14 |
-| Background Threshold | 0.36 | 0.48 |
-| Source Impact | 0.88 | 1.00 |
-| Halation Amplify | 1.65 | 2.20 |
-| Strong Source Expansion | 0.16 | 0.85 |
-| Red Tail | 0.28 | 0.80 |
-| Blue Compensation | 0.35 | 0.90 |
-| Halation Color Density | 0.045 | 0.68 |
-| Source Interior Protection | 1.00 | 0.00 |
-| Strong Source Level | 0.42 | 0.45 |
-| Strong Core | 0.62 | 0.90 |
-| Global Source Level | 1.05 | 0.78 |
-| Hue Response | 1.00 | 1.00 |
-| Red Shift R/G/B | 1.08 / 0.10 / 0.01 | 1.25 / 0.12 / 0.00 |
-| Sigma Ratio R/G/B | 1.05 / 0.50 / 0.28 | 1.15 / 0.42 / 0.18 |
-| Global Red Diffusion | 0.008 | 0.05 |
-| Center Attenuation | 0.45 | 0.35 |
-| Blend Mode | additive | additive |
-| Diffusion | fast | fast |
-| Highlight Extraction | spill | spill |
-| Spill Mix | 0.55 | 0.70 |
-| Highlight Rolloff | 0 | 0 |
+| Strength（强度） | 68 | 82 |
+| Sigma（半径 Sigma） | 3.6 diagonal units | 5.2 diagonal units |
+| Threshold（阈值） | 0.74 linear | 0.86 linear |
+| Red-Layer Threshold Bias（红色感光层阈值偏移） | 0.00 | 0.00 |
+| Source Softness（光源柔和度） | 0.04 | 0.03 |
+| Background Softness（背景柔和度） | 0.10 | 0.24 |
+| PSF Smoothness（PSF 平滑度） | 0.14 | 0.14 |
+| Background Threshold（背景阈值） | 0.36 | 0.48 |
+| Source Impact（光源影响） | 0.88 | 1.00 |
+| Halation Amplify（胶片光晕增益） | 1.65 | 2.20 |
+| Strong Source Expansion（强光源扩张） | 0.16 | 0.85 |
+| Red Tail（红色尾部） | 0.28 | 0.80 |
+| Blue Compensation（蓝色补偿） | 0.35 | 0.90 |
+| Halation Color Density（胶片光晕色彩密度） | 0.045 | 0.68 |
+| Source Interior Protection（光源内部保护） | 1.00 | 0.00 |
+| Strong Source Level（强光源级别） | 0.42 | 0.45 |
+| Strong Core（强光核心） | 0.62 | 0.90 |
+| Global Source Level（全局光源级别） | 1.05 | 0.78 |
+| Hue Response（色相响应） | 1.00 | 1.00 |
+| Red Shift R/G/B（红移 R/G/B） | 1.08 / 0.10 / 0.01 | 1.25 / 0.12 / 0.00 |
+| Sigma Ratio R/G/B（Sigma 比例 R/G/B） | 1.05 / 0.50 / 0.28 | 1.15 / 0.42 / 0.18 |
+| Global Red Diffusion（全局红色扩散） | 0.008 | 0.05 |
+| Center Attenuation（中心衰减） | 0.45 | 0.35 |
+| Blend Mode（混合模式） | additive | additive |
+| Diffusion（扩散模式） | fast | fast |
+| Highlight Extraction（高光提取） | spill | spill |
+| Spill Mix（溢出混合） | 0.55 | 0.70 |
+| Highlight Rolloff（高光滚降） | 0 | 0 |
 
 `5.2 diagonal units` 在当前实现中表示对角线的 5.2‰，即 0.52%，不是 5.2%。
 
 ## 5. Halation 参数详细说明
 
 以下顺序按照算法 pipeline 分组，而不是完全照搬面板排列顺序。
+本节中的参数均采用“English（中文菜单名）”写法；括号内名称与插件当前菜单一致，便于在中英文界面之间对应。
 
-### 5.1 Preset
+### 5.1 Preset（预设）
 
-类型：`Neutral / Legacy`、`Tungsten 800 No-Remjet`、`Custom`。
+类型：`Neutral / Legacy`、`CineStill 800T`、`Custom`。
 
 - 选择内置预设会一次性载入完整参数组合。
 - 修改任一参数后状态变为 Custom。
 - 切换回内置预设会覆盖当前 Custom 数值。
 - 文档保存的旧参数优先于新版内置值；需要重新选择预设才能刷新。
 
-### 5.2 Strength
+### 5.2 Strength（强度）
 
 范围：0–100。阶段：最终合成。
 
@@ -350,7 +346,7 @@ EV = log2(max(Y, 2^-24) / 0.18)
 
 建议先用 Amplify 把光晕形态调正确，再用 Strength 做最终总量微调。
 
-### 5.3 Threshold Units
+### 5.3 Threshold Units（阈值单位）
 
 类型：`linear` 或 `stops (EV)`。阶段：高光提取与背景门控。
 
@@ -359,7 +355,7 @@ EV = log2(max(Y, 2^-24) / 0.18)
 - EV 示例：-2 = 0.045，0 = 0.18，+1 = 0.36，+2 = 0.72。
 - 切换单位时，当前 Threshold 和 Background Threshold 数字不会自动换算，必须重新调整。
 
-### 5.4 Highlight Extraction
+### 5.4 Highlight Extraction（高光提取）
 
 类型：`luma (Y)` 或 `spill (max RGB)`。阶段：高光提取。
 
@@ -375,7 +371,7 @@ EV = log2(max(Y, 2^-24) / 0.18)
 - 更容易提取红色灯牌、饱和霓虹和单通道接近剪切的高光；
 - 必须配合 Hue Response，避免蓝/青数字光源错误产生红晕。
 
-### 5.5 Spill Mix
+### 5.5 Spill Mix（溢出混合）
 
 范围：0–1。仅在 Highlight Extraction=`spill` 时生效。
 
@@ -386,7 +382,7 @@ EV = log2(max(Y, 2^-24) / 0.18)
 
 一般建议从 0.4–0.7 开始，并与 Hue Response 联动。
 
-### 5.5a Red-Layer Threshold Bias
+### 5.5a Red-Layer Threshold Bias（红色感光层阈值偏移）
 
 范围：0–1。阶段：两条高光源场完成各自阈值和曝光响应之后、进入光谱分层之前。
 
@@ -399,7 +395,7 @@ EV = log2(max(Y, 2^-24) / 0.18)
 
 调整该滑块会把当前状态标记为 `Custom`。建议先确定倾向，再调整 Threshold 和 Source Impact，因为它会同时影响基础源场、Strong Source 与 Global Source 的曝光坐标。此前短期版本保存的 `legacy` 开关自动迁移为 0，`red-layer` 自动迁移为 1。
 
-### 5.6 Threshold
+### 5.6 Threshold（阈值）
 
 范围：linear 0–1；stops 界面范围 -4–+4 EV。阶段：高光提取。
 
@@ -409,7 +405,7 @@ EV = log2(max(Y, 2^-24) / 0.18)
 
 如果强灯不够明显但弱窗已经很多，不要继续降低 Threshold；优先提高 Amplify、Source Expansion 或 Strong Core。
 
-### 5.7 Source Softness
+### 5.7 Source Softness（光源柔和度）
 
 范围：0–1。阶段：高光提取边缘。
 
@@ -420,7 +416,7 @@ EV = log2(max(Y, 2^-24) / 0.18)
 
 它只软化光源提取，不改变 PSF 模糊半径。
 
-### 5.8 Source Impact
+### 5.8 Source Impact（光源影响）
 
 范围：0–1。阶段：曝光响应。
 
@@ -432,7 +428,7 @@ EV = log2(max(Y, 2^-24) / 0.18)
 
 如果出现“所有窗户强度差不多”，提高 Source Impact；如果只有最亮灯芯有反应，适当降低。
 
-### 5.9 Hue Response
+### 5.9 Hue Response（色相响应）
 
 范围：0–1。阶段：光谱源场。
 
@@ -443,7 +439,7 @@ EV = log2(max(Y, 2^-24) / 0.18)
 
 如果纯蓝 LED 出现红晕，提高 Hue Response。若希望蓝紫霓虹也产生风格化红边，可降低，但这不再是严格物理模式。
 
-### 5.10 Strong Source Level
+### 5.10 Strong Source Level（强光源级别）
 
 范围：0–4。阶段：强光分类。
 
@@ -455,7 +451,7 @@ EV = log2(max(Y, 2^-24) / 0.18)
 
 Strong Source Level 不决定高光是否进入基础源场；那是 Threshold 的职责。
 
-### 5.11 Strong Source Expansion
+### 5.11 Strong Source Expansion（强光源扩张）
 
 范围：0–1。阶段：强种子邻域扩张。
 
@@ -468,7 +464,7 @@ Strong Source Level 不决定高光是否进入基础源场；那是 Threshold �
 
 如果高亮只出现细红线而没有扎实肩部，提高它；如果弱窗连成片，先提高 Strong Source Level，而不是只降低 Expansion。
 
-### 5.12 Halation Amplify
+### 5.12 Halation Amplify（胶片光晕增益）
 
 范围：0–4。阶段：PSF 之前的乳剂返回能量。
 
@@ -480,7 +476,7 @@ Strong Source Level 不决定高光是否进入基础源场；那是 Threshold �
 
 Strength 与 Amplify 都会增强效果，但推荐把 Amplify 用于建立“乳剂能量感”，把 Strength 用于最后总量。
 
-### 5.13 Background Threshold
+### 5.13 Background Threshold（背景阈值）
 
 范围：与 Threshold Units 相同。阶段：局部承载背景门控。
 
@@ -492,7 +488,7 @@ Strength 与 Amplify 都会增强效果，但推荐把 Amplify 用于建立“�
 
 如果暗天空的红晕正常、但建筑亮表面完全看不到效果，可适当提高；如果整片暖色墙面泛红，应降低。
 
-### 5.14 Background Softness
+### 5.14 Background Softness（背景柔和度）
 
 范围：0–1。阶段：局部承载背景门控。
 
@@ -503,7 +499,7 @@ Strength 与 Amplify 都会增强效果，但推荐把 Amplify 用于建立“�
 
 它与 Source Softness 完全独立：前者控制承载背景，后者控制发光源。
 
-### 5.15 Blue Compensation
+### 5.15 Blue Compensation（蓝色补偿）
 
 范围：0–1。阶段：局部门控和色密度合成。
 
@@ -515,7 +511,7 @@ Strength 与 Amplify 都会增强效果，但推荐把 Amplify 用于建立“�
 
 “蓝色背景中的白灯无红晕”应提高本参数；“纯蓝灯出现红晕”应提高 Hue Response，而不是降低 Blue Compensation。
 
-### 5.16 Sigma Units
+### 5.16 Sigma Units（Sigma 单位）
 
 类型：`pixels` 或 `% of diagonal`。阶段：空间尺度换算。
 
@@ -533,7 +529,7 @@ Strength 与 Amplify 都会增强效果，但推荐把 Amplify 用于建立“�
 
 切换单位不会自动把当前 Sigma 数字换算成等效值，需要重新调整。
 
-### 5.17 Sigma
+### 5.17 Sigma（半径 Sigma）
 
 范围：pixels 模式 0.5–50；diagonal 模式 0.1–10。阶段：PSF 基准半径。
 
@@ -544,7 +540,7 @@ Strength 与 Amplify 都会增强效果，但推荐把 Amplify 用于建立“�
 
 Sigma 不是最终可见半径。最终各通道半径还要乘 Sigma Ratio 和 PSF 各瓣比例。
 
-### 5.18 PSF Smoothness
+### 5.18 PSF Smoothness（PSF 平滑度）
 
 范围：0–1。阶段：三瓣 PSF 形态。
 
@@ -555,7 +551,7 @@ Sigma 不是最终可见半径。最终各通道半径还要乘 Sigma Ratio 和 
 
 希望图像更宽但仍有实体感时，优先提高 Red Tail 或 Sigma，不要只把 Smoothness 拉满。
 
-### 5.19 Red Tail
+### 5.19 Red Tail（红色尾部）
 
 范围：0–1。阶段：深红层专属 PSF。
 
@@ -565,7 +561,7 @@ Sigma 不是最终可见半径。最终各通道半径还要乘 Sigma Ratio 和 
 - PSF 总权重会重新归一化，Red Tail 主要重排空间能量，而不是简单增加总能量。
 - 过大：小光源可能出现过长红尾，城市灯光之间开始相互连接。
 
-### 5.20 Sigma Ratio R / G / B
+### 5.20 Sigma Ratio R / G / B（Sigma 比例 R / G / B）
 
 范围：每通道 0.1–2。阶段：逐通道 PSF 半径。
 
@@ -583,7 +579,7 @@ Sigma 不是最终可见半径。最终各通道半径还要乘 Sigma Ratio 和 
 
 典型物理顺序为 `R > G > B`。
 
-### 5.21 Red Shift R / G / B
+### 5.21 Red Shift R / G / B（红移 R / G / B）
 
 范围：每通道 0–2。阶段：扩散后的通道能量增益。
 
@@ -603,7 +599,7 @@ Diffused B × Red Shift B
 
 先用 Sigma Ratio 调空间层次，再用 Red Shift 调每层的相对亮度。
 
-### 5.22 Center Attenuation
+### 5.22 Center Attenuation（中心衰减）
 
 范围：0–1。阶段：局部光晕中心扣除。
 
@@ -614,7 +610,7 @@ Diffused B × Red Shift B
 
 如果光晕像柔焦 Bloom，适当提高；如果灯芯外围出现空心红圈，降低。
 
-### 5.22a Source Interior Protection
+### 5.22a Source Interior Protection（光源内部保护）
 
 范围：0–1。阶段：局部光晕源体内部保护。
 
@@ -623,9 +619,9 @@ Diffused B × Red Shift B
 - 0–1：在兼容核芯和纯外缘之间连续混合。
 - 只作用于局部 Halation；Global Red Diffusion 仍可让高亮内部产生轻微、宽范围的暖色偏移。
 
-人物白衣、大面积高亮或灯芯内部出现粉红块时提高它。当前算法通过保留原始底图光源并只在外围加入红层扩散，避免保护核心被误解为亮度空洞；需要无 Remjet 式全面实体核芯时再降低。Neutral 默认为 1，Tungsten 800 No-Remjet 默认为 0。
+人物白衣、大面积高亮或灯芯内部出现粉红块时提高它。当前算法通过保留原始底图光源并只在外围加入红层扩散，避免保护核心被误解为亮度空洞；需要无 Remjet 式全面实体核芯时再降低。Neutral 默认为 1，CineStill 800T 默认为 0。
 
-### 5.23 Strong Core
+### 5.23 Strong Core（强光核心）
 
 范围：0–1。阶段：强源局部核芯。
 
@@ -636,7 +632,7 @@ Diffused B × Red Shift B
 
 它与 Center Attenuation 是一对控制：Center Attenuation 决定普通源扣除量，Strong Core 决定强源能保留多少实体感。
 
-### 5.24 Global Source Level
+### 5.24 Global Source Level（全局光源级别）
 
 范围：0–4。阶段：独立全局红层源选择。
 
@@ -645,7 +641,7 @@ Diffused B × Red Shift B
 - 与 Strong Source Level 独立，不影响局部核芯和 Source Expansion。
 - 过低：密集窗户虽然经过软饱和，仍可能形成大范围红雾。
 
-### 5.25 Global Red Diffusion
+### 5.25 Global Red Diffusion（全局红色扩散）
 
 范围：0–1。阶段：独立宽红层。
 
@@ -657,7 +653,7 @@ Diffused B × Red Shift B
 
 建议先用局部 PSF 调出正确形状，最后只添加少量 Global Red Diffusion。
 
-### 5.26 Halation Color Density
+### 5.26 Halation Color Density（胶片光晕色彩密度）
 
 范围：0–1。阶段：最终合成前的亮度安全色度覆盖。
 
@@ -669,7 +665,7 @@ Diffused B × Red Shift B
 
 如果光晕宽度正确但仍像淡红色透明雾，提高它；如果已经出现纯红剪切，先降低它，再考虑降低 Amplify。
 
-### 5.27 Blend Mode
+### 5.27 Blend Mode（混合模式）
 
 类型：`additive` 或 `screen`。阶段：最终合成。
 
@@ -687,7 +683,7 @@ Diffused B × Red Shift B
 - HDR >1 使用正增益，原始高光不会反向变暗；
 - 视觉上通常比 additive 柔和。
 
-### 5.28 Diffusion
+### 5.28 Diffusion（扩散模式）
 
 类型：`fast` 或 `quality`。阶段：高斯 PSF 数值实现。
 
@@ -699,7 +695,7 @@ Diffused B × Red Shift B
 
 在当前验收标准下两种模式应非常接近。只有在高分辨率细边、极大 Sigma 或需要最终输出时才有必要使用 quality。
 
-### 5.29 Highlight Rolloff
+### 5.29 Highlight Rolloff（高光滚降）
 
 范围：0–1。阶段：输出编码/写回前软肩。
 
@@ -713,7 +709,7 @@ Diffused B × Red Shift B
 
 ## 6. 参数之间最重要的关系
 
-### 6.1 Threshold、Source Impact、Strong Source Level
+### 6.1 Threshold（阈值）、Source Impact（光源影响）、Strong Source Level（强光源级别）
 
 三者职责不同：
 
@@ -725,7 +721,7 @@ Strong Source Level → 哪些已提取光源触发强核芯和邻域扩张
 
 城市弱窗过多时，先提高 Threshold 或 Source Impact。只有强灯太软时，提高 Strong Core 或降低 Strong Source Level。
 
-### 6.2 Sigma、PSF Smoothness、Red Tail
+### 6.2 Sigma（半径 Sigma）、PSF Smoothness（PSF 平滑度）、Red Tail（红色尾部）
 
 ```text
 Sigma          → 整个 PSF 的基础尺度
@@ -735,33 +731,33 @@ Red Tail       → 只把深红层能量推向更宽的肩和尾
 
 需要“宽而扎实”时，提高 Sigma/Red Tail，并保持较低 Smoothness；需要“柔和雾化”时才提高 Smoothness。
 
-### 6.3 Amplify、Strength、Color Density
+### 6.3 Halation Amplify（胶片光晕增益）、Strength（强度）、Halation Color Density（胶片光晕色彩密度）
 
 ```text
-Amplify      → PSF 前的乳剂返回能量
-Strength     → 最后的线性混合量
-Color Density→ 红橙覆盖的浓度与厚度
+Halation Amplify（胶片光晕增益） → PSF 前的乳剂返回能量
+Strength（强度）                 → 最后的线性混合量
+Halation Color Density（胶片光晕色彩密度） → 红橙覆盖的浓度与厚度
 ```
 
 推荐顺序：Amplify 建立能量 → Color Density 建立质感 → Strength 做总量微调。
 
-### 6.4 Background Threshold、Blue Compensation、Hue Response
+### 6.4 Background Threshold（背景阈值）、Blue Compensation（蓝色补偿）、Hue Response（色相响应）
 
 ```text
-Background Threshold → 背景是否允许承载局部红晕
-Blue Compensation    → 冷色背景上的可见性补偿
-Hue Response         → 发光体本身是否能激发红/绿层
+Background Threshold（背景阈值） → 背景是否允许承载局部红晕
+Blue Compensation（蓝色补偿）    → 冷色背景上的可见性补偿
+Hue Response（色相响应）         → 发光体本身是否能激发红/绿层
 ```
 
 蓝天里的白灯应调 Blue Compensation；纯蓝 LED 的红泄漏应调 Hue Response。不要混淆背景颜色和光源颜色。
 
-### 6.5 Center Attenuation、Strong Core、Source Expansion、Source Interior Protection
+### 6.5 Center Attenuation（中心衰减）、Strong Core（强光核心）、Strong Source Expansion（强光源扩张）、Source Interior Protection（光源内部保护）
 
 ```text
-Center Attenuation → 普通光源中心扣除量
-Strong Core        → 强光源保留的实体核芯
-Source Expansion   → 强光周围已有光学 glow 的吸收范围
-Interior Protection → 把局部效果从高亮内部移到源体外缘
+Center Attenuation（中心衰减） → 普通光源中心扣除量
+Strong Core（强光核心）        → 强光源保留的实体核芯
+Strong Source Expansion（强光源扩张） → 强光周围已有光学 glow 的吸收范围
+Source Interior Protection（光源内部保护） → 把局部效果从高亮内部移到源体外缘
 ```
 
 “细红线”通常需要 Source Expansion；“空心红圈”需要降低 Center Attenuation；“强灯不够扎实”需要提高 Strong Core；“白衣内部变粉但轮廓外没有红晕”应提高 Source Interior Protection。
@@ -774,32 +770,32 @@ Interior Protection → 把局部效果从高亮内部移到源体外缘
 
 从 Neutral / Legacy 开始：
 
-- Strength：55–70
-- Amplify：1.1–1.4
-- Source Expansion：0.10–0.25
-- Red Tail：0.15–0.30
-- Color Density：0.05–0.20
-- Global Red Diffusion：0–0.03
+- Strength（强度）：55–70
+- Halation Amplify（胶片光晕增益）：1.1–1.4
+- Strong Source Expansion（强光源扩张）：0.10–0.25
+- Red Tail（红色尾部）：0.15–0.30
+- Halation Color Density（胶片光晕色彩密度）：0.05–0.20
+- Global Red Diffusion（全局红色扩散）：0–0.03
 
 ### 7.2 浓郁无 Remjet 红晕
 
-从 Tungsten 800 No-Remjet 开始：
+从 CineStill 800T 开始：
 
-- 保持较高 Threshold 和 Source Impact，避免弱窗成雾；
-- Amplify：1.8–2.5；
-- Source Expansion：0.65–0.90；
-- Red Tail：0.65–0.90；
-- Color Density：0.45–0.75；
-- Hue Response：0.9–1；
-- Strength 最后微调。
+- 保持较高 Threshold（阈值）和 Source Impact（光源影响），避免弱窗成雾；
+- Halation Amplify（胶片光晕增益）：1.8–2.5；
+- Strong Source Expansion（强光源扩张）：0.65–0.90；
+- Red Tail（红色尾部）：0.65–0.90；
+- Halation Color Density（胶片光晕色彩密度）：0.45–0.75；
+- Hue Response（色相响应）：0.9–1；
+- Strength（强度）最后微调。
 
 ### 7.3 蓝色天空背景中的白色路灯
 
-- Hue Response：0.9–1，保证纯蓝灯仍被拒绝；
-- Blue Compensation：0.7–1；
-- Source Expansion：0.5–0.85，吸收白灯已有 glow；
-- Strong Source Level：确保灯芯能成为种子；
-- 如果只有淡白光、没有红色厚度，再提高 Color Density。
+- Hue Response（色相响应）：0.9–1，保证纯蓝灯仍被拒绝；
+- Blue Compensation（蓝色补偿）：0.7–1；
+- Strong Source Expansion（强光源扩张）：0.5–0.85，吸收白灯已有 glow；
+- Strong Source Level（强光源级别）：确保灯芯能成为种子；
+- 如果只有淡白光、没有红色厚度，再提高 Halation Color Density（胶片光晕色彩密度）。
 
 略偏冷但仍接近白色的路灯不应被 Hue Response 拒绝。若只有高饱和蓝色 LED 被抑制而冷白灯正常，这是预期行为。
 
@@ -807,29 +803,29 @@ Interior Protection → 把局部效果从高亮内部移到源体外缘
 
 按顺序处理：
 
-1. 提高 Threshold；
-2. 提高 Source Impact；
-3. 提高 Strong Source Level；
-4. 提高 Global Source Level 或降低 Global Red Diffusion；
-5. 必要时降低 Source Expansion；
-6. 最后才降低 Strength。
+1. 提高 Threshold（阈值）；
+2. 提高 Source Impact（光源影响）；
+3. 提高 Strong Source Level（强光源级别）；
+4. 提高 Global Source Level（全局光源级别）或降低 Global Red Diffusion（全局红色扩散）；
+5. 必要时降低 Strong Source Expansion（强光源扩张）；
+6. 最后才降低 Strength（强度）。
 
 只降低 Strength 会让强灯和弱窗一起变弱，不能真正改善强弱分离。
 
 ### 7.5 强光红晕太软、缺乏冲击力
 
-- 降低 PSF Smoothness；
-- 提高 Strong Core；
-- 降低 Center Attenuation；
-- 适度提高 Source Expansion；
-- 用 Red Tail 增加远端红色，而不是把 Smoothness 拉高。
+- 降低 PSF Smoothness（PSF 平滑度）；
+- 提高 Strong Core（强光核心）；
+- 降低 Center Attenuation（中心衰减）；
+- 适度提高 Strong Source Expansion（强光源扩张）；
+- 用 Red Tail（红色尾部）增加远端红色，而不是把 PSF Smoothness 拉高。
 
 ### 7.6 纯蓝或青色灯出现红晕
 
-- 提高 Hue Response；
-- 检查 Highlight Extraction 是否为高 Spill Mix；
-- 不要通过降低 Blue Compensation 解决，因为它主要处理承载背景；
-- 若追求严格物理响应，可把 Hue Response 设为 1。
+- 提高 Hue Response（色相响应）；
+- 检查 Highlight Extraction（高光提取）是否为高 Spill Mix（溢出混合）；
+- 不要通过降低 Blue Compensation（蓝色补偿）解决，因为它主要处理承载背景；
+- 若追求严格物理响应，可把 Hue Response（色相响应）设为 1。
 
 这里的“蓝/青灯”指高色纯度 LED。带少量蓝偏色但 R/G 通道仍充足的白灯会继续产生 Halation，不应通过进一步收紧 Hue Response 把它误杀。
 
@@ -837,18 +833,18 @@ Interior Protection → 把局部效果从高亮内部移到源体外缘
 
 按顺序处理：
 
-1. 降低 Halation Color Density；
-2. 降低 Halation Amplify；
-3. 降低 Red Shift R；
-4. 降低 Source Expansion；
-5. 8/16 位输出可少量增加 Highlight Rolloff；
-6. 最后再降低 Strength。
+1. 降低 Halation Color Density（胶片光晕色彩密度）；
+2. 降低 Halation Amplify（胶片光晕增益）；
+3. 降低 Red Shift R（红移 R）；
+4. 降低 Strong Source Expansion（强光源扩张）；
+5. 8/16 位输出可少量增加 Highlight Rolloff（高光滚降）；
+6. 最后再降低 Strength（强度）。
 
-## 8. V1.7 candidate 界面布局与共享胶片设置
+## 8. V1.7 Public Beta 1 界面布局与共享胶片设置
 
 宽面板分成三个区域：左侧领域导航、中间参数页、右侧检查预览。左侧只显示 `Halation`、`Defringe`、`Bloom`、`Resolution`、`Grain` 五个名称，不再把 `HAL / 30` 等内部阶段码拼接到模块名后；Highlight Protection 位于 Bloom 域。点击按钮只切换参数页，不会改变物理处理顺序；实际执行顺序始终是 Defringe、Halation、Bloom/Highlight Protection、Resolution、Grain。各效果标题右侧有 On/Off 开关，新节点默认关闭；关闭时跳过该模块且不改变图像，重新打开会继续使用已保存参数。窄停靠状态会自动改为上下布局。
 
-当前 package 在 Photoshop 中显示为 `Film Emulation`，主面板 entrypoint 为 `filmEmulationPanel`。旧 ID 的迁移桥仍显示 `Film Halation Migration` 并保留 `filmHalationPanel`，因此迁移桥和正式插件会作为两个不同面板出现。从早期 V1.6 构建升级后，如主面板未自动出现，请从插件菜单重新打开并停靠；这不会清除文档参数。
+当前 package 在 Photoshop 中显示为 `Film Emulation`，唯一面板 entrypoint 为 `filmEmulationPanel`。底栏提供 `中文 / English` 选择；首次运行按宿主/系统语言选择，手动选择会跨会话保留，但不会写入文档状态。
 
 Halation 页的 Basic 区域直接显示 Preset、Strength、Sigma 和 Threshold。其余低频参数继续位于 Advanced。Defringe 页默认切换到 100%/Actual，便于检查边缘；Bloom 页默认 Fit，便于检查整体高光扩散。Resolution 与 Grain 共用 `Film stock` 设置：
 
@@ -859,43 +855,44 @@ Halation 页的 Basic 区域直接显示 Preset、Strength、Sigma 和 Threshold
 - 每个领域记住本次面板会话中最后选择的模式；用户可随时手动切换。
 - 100% 初次进入时定位源图层中央。按住预览拖动可检查其他区域；方向键每次移动 64px，按住 Shift 时每次移动 256px。
 
-| Film format | 内部有效画幅 | 典型视觉倾向 |
+| Film format（胶片格式） | 内部有效画幅 | 典型视觉倾向 |
 |---|---:|---|
 | Super 8 | 5.79 × 4.01 mm | 同分辨率下颗粒最大、解析度损失最明显 |
 | Super 16 | 12.52 × 7.41 mm | 颗粒和柔化较明显 |
 | Super 35 4-perf | 24.89 × 18.66 mm | 默认、均衡 |
 | 65mm 5-perf | 52.15 × 23.07 mm | 颗粒较细、细节保留较多 |
 
-`ISO` 范围为 25–3200，默认 250。提高 ISO 会同时增大颗粒尺度与强度，并轻微降低目标分辨率。Film format 和 ISO 是共享物理设置；在 Resolution 页修改后，Grain 页会使用相同值，反之亦然。
+`ISO（ISO）` 范围为 25–3200，默认 250。提高 ISO 会同时增大颗粒尺度与强度，并轻微降低目标分辨率。Film format（胶片格式）和 ISO（ISO）是共享物理设置；在 Resolution 页修改后，Grain 页会使用相同值，反之亦然。
 
-每个效果的 Luma mask 能力保留，但默认收在 `Advanced` 中。UI 不再直接使用内部名 `Luma mask`：普通节点显示 `Effect area`，Halation/Bloom 显示 `Halation output area` / `Bloom output area`，Highlight Protection 显示 `Protection area`。`Apply to: Entire image` 时整帧生效；选择 `Exposure range` 后才显示 `Lower bound`、`Upper bound`、`Edge softness` 和 `Inside/Outside EV range`。Bloom output area 只限制扩散结果落在哪里，不改变哪些高光被提取成 Bloom 光源。mask 默认关闭，不会改变旧图；启用曝光范围后，当前节点的最小 engine version 会提升为 1.7.0。
+每个效果的 Luma mask 能力保留，但默认收在 `Advanced` 中。UI 不再直接使用内部名 `Luma mask`：普通节点显示 `Effect area（效果区域）`，Halation/Bloom 显示 `Halation output area（胶片光晕输出区域）` / `Bloom output area（泛光输出区域）`，Highlight Protection 显示 `Protection area（保护区域）`。`Apply to（应用于）: Entire image（整张图像）` 时整帧生效；选择 `Exposure range（曝光范围）` 后才显示 `Lower bound（下限）`、`Upper bound（上限）`、`Edge softness（边缘柔和度）` 和 `Inside/Outside EV range（EV 范围内/外）`。Bloom output area 只限制扩散结果落在哪里，不改变哪些高光被提取成 Bloom 光源。mask 默认关闭，不会改变旧图；启用曝光范围后，当前节点的最小 engine version 会提升为 1.7.0。
 
 ## 9. Film Resolution / MTF
 
 Film Resolution 在线性 RGB 中对三个通道使用同一空间响应，不会造成彩边；alpha 不参与模糊并原样保留。它模拟胶片记录材料的有限 MTF，而不是锐化滤镜。参数在正常范围内只做非负权重的细节损失，不生成锐化负瓣、暗边或明显过冲。
+本节参数同样采用“English（中文菜单名）”写法。
 
 ### 9.1 参数速查
 
 | 参数 | 范围 | 默认值 | 作用 |
 |---|---:|---:|---|
-| Material | Negative / Positive | Negative | Negative 解析度较高；Positive / print 更柔和 |
-| Resolution loss | 0–1.5 | 1.00 | 总体分辨率损失；0 为逐样本关闭 |
-| MTF response | 0.5–2.0 | 1.00 | 越高越保留细节，越低越柔和 |
-| Shadow loss | 0–1 | 0.25 | 增加暗部趾部的分辨率损失 |
-| Highlight loss | 0–1 | 0.15 | 增加高光肩部的分辨率损失 |
+| Material（材料） | Negative / Positive | Negative | Negative 解析度较高；Positive / print 更柔和 |
+| Resolution loss（解析度损失） | 0–1.5 | 1.00 | 总体分辨率损失；0 为逐样本关闭 |
+| MTF response（MTF 响应） | 0.5–2.0 | 1.00 | 越高越保留细节，越低越柔和 |
+| Shadow loss（暗部损失） | 0–1 | 0.25 | 增加暗部趾部的分辨率损失 |
+| Highlight loss（高光损失） | 0–1 | 0.15 | 增加高光肩部的分辨率损失 |
 
-### 9.2 Resolution loss
+### 9.2 Resolution loss（解析度损失）
 
 - `0`：关闭 Film Resolution，输出与该节点输入逐浮点样本一致。
 - `0–1`：从原始细节连续混合到目标胶片 MTF。
 - `1`：完整应用由 Material、Film format、ISO 和 MTF response 决定的目标响应。
 - `1–1.5`：进一步向更宽的胶片响应过渡，适合明显的低解析度风格，但不会转成锐化或产生负权重。
 
-### 9.3 MTF response
+### 9.3 MTF response（MTF 响应）
 
 该参数改变胶片材料的目标 MTF50。向右调高会保留更多高频细节；向左调低会增加柔化。它不是后期锐化 Amount，因此不会恢复源图中不存在的细节。
 
-### 9.4 Shadow loss 与 Highlight loss
+### 9.4 Shadow loss（暗部损失）与 Highlight loss（高光损失）
 
 胶片在曝光曲线趾部和肩部的细节响应通常不同于中间调。Shadow loss 只额外影响较暗区域，Highlight loss 只额外影响较亮区域；中间调保持接近基础 Resolution loss。
 
@@ -906,40 +903,41 @@ Film Resolution 在线性 RGB 中对三个通道使用同一空间响应，不�
 Film Grain 使用与完整图像绝对坐标绑定的固定随机场。相同文档、节点和 seed 在 Preview、Apply、重新打开、不同分带高度以及 JavaScript/WASM 回退时保持同一颗粒排列。它不使用当前时间或 `Math.random()`，因此重复 Apply 不会无故改变纹理。
 
 颗粒以线性光中的曝光相关密度变化合成，并保持统计平均亮度。RGB 共享大部分颗粒结构，再按 Chroma 加入少量独立通道成分；这与把彩色数字噪点直接叠在图像上不同。
+本节参数同样采用“English（中文菜单名）”写法。
 
 ### 10.1 参数速查
 
 | 参数 | 范围 | 默认值 | 作用 |
 |---|---:|---:|---|
-| Material | Negative / Positive | Negative | 选择负片或正片/印片的曝光响应分布 |
-| Correlation | Analogue / Fast | Analogue | 颗粒尺度组合与速度模式 |
-| Amount | 0–2 | 1.00 | 颗粒总体强度；0 为逐样本关闭 |
-| Size | 0.5–2 | 1.00 | 物理颗粒直径倍率 |
-| Roughness | 0–1 | 0.55 | 细颗粒与粗颗粒的比例 |
-| Chroma | 0–1 | 0.18 | RGB 独立颗粒成分比例 |
+| Material（材料） | Negative / Positive | Negative | 选择负片或正片/印片的曝光响应分布 |
+| Correlation（相关模式） | Analogue / Fast | Analogue | 颗粒尺度组合与速度模式 |
+| Amount（数量） | 0–2 | 1.00 | 颗粒总体强度；0 为逐样本关闭 |
+| Size（尺寸） | 0.5–2 | 1.00 | 物理颗粒直径倍率 |
+| Roughness（粗糙度） | 0–1 | 0.55 | 细颗粒与粗颗粒的比例 |
+| Chroma（色度） | 0–1 | 0.18 | RGB 独立颗粒成分比例 |
 
-### 10.2 Material
+### 10.2 Material（材料）
 
 - `Negative`：默认负片曝光包络，较宽范围的阴影和中间调具有可见颗粒。
 - `Positive / print`：颗粒更集中在特定中间调曝光区域，适合正片或印片方向。
 
 Material 只改变颗粒随曝光分布的方式，不替代胶片色彩预设。
 
-### 10.3 Correlation
+### 10.3 Correlation（相关模式）
 
 - `Analogue`：分别组合 fine、medium、coarse 三个相关尺度，结构最完整。
 - `Fast`：把 fine 与 medium 合并为一个等效尺度并保留 coarse，减少计算量；颗粒仍由相同的确定性坐标随机源产生。
 
 Fit 整图预览会采用速度优先路径；100% 原生像素检查与 Apply 使用当前选择和渲染质量。需要最终输出时优先使用 Analogue，快速整图调参或批量工作可使用 Fast。
 
-### 10.4 Amount、Size、Roughness 与 Chroma
+### 10.4 Amount（数量）、Size（尺寸）、Roughness（粗糙度）与 Chroma（色度）
 
 - `Amount` 控制颗粒强度，不改变固定 seed 对应的排列。只调整 Amount 时，预览可以复用已经生成的单位颗粒场。
 - `Size` 改变物理颗粒直径。小格式和高 ISO 会在此基础上进一步放大可见颗粒。
 - `Roughness` 越高，细尺度权重越大、纹理更密；越低，粗尺度相对更多、颗粒团块感更明显。
 - `Chroma=0` 时 RGB 完全共享颗粒结构，观感最接近中性亮度颗粒；向右调高会增加通道差异。过高可能呈现彩色数字噪声感。
 
-### 10.5 Randomize grain
+### 10.5 Randomize grain（随机化颗粒）
 
 点击 `Randomize grain` 会生成下一组确定性 seed，并立即更新预览。新 seed 会随文档状态保存；重新打开后仍得到相同颗粒。Randomize 只改变颗粒排列，不改变 Amount、Size、Roughness、Chroma、格式或 ISO。
 
@@ -955,7 +953,7 @@ Fit 整图预览会采用速度优先路径；100% 原生像素检查与 Apply �
 - Film Resolution 与 Grain 在前序 graph 输出之后执行，并按原图尺寸、预览比例、Film format 和 ISO 换算物理尺度。
 - Fit 使用速度优先的 graph 渲染质量，Halation、Defringe 和 Bloom 使用对应的 fast 数值近似；100% 的左右画面共用 Photoshop ICC 转换后的 sRGB 显示底板，同时使用 Quality/Analogue 路径和完整物理尺度。Fast 与 Quality 保持相同效果语义、PSF 瓣和坐标。
 - 预览按 sRGB TRC 编码显示，不把 Rec.2020 数值直接当作 sRGB。
-- 首次读取或绑定新源时，面板会先显示色彩管理后的 1024px 源图，并提示 `Source loaded. Refining film effects…`，随后替换为完整效果，避免处理期间显示空白或黑屏。
+- 首次打开插件、读取文档或绑定新源时，面板会自动发起预览，先显示色彩管理后的 1024px 源图，并提示 `Source loaded. Refining film effects…`，随后替换为完整效果。文档轮询已登记首个活动文档，不会在约 750ms 后把同一文档误判为切换并清空图像。
 - 同一源图层且 Photoshop 历史状态未改变时，再次 Rebind 会复用读取和效果缓存。
 - 完成后状态显示 `Panel preview 总时间 (read 读取时间, render 渲染时间)`。`read` 主要反映 Photoshop Imaging API 和色彩代理读取；`render` 包含 Defringe、Halation、Bloom/Highlight Protection、Resolution、Grain 与预览编码。
 - 快速连续拖动时，旧渲染会被取消或丢弃，不会覆盖最新参数的结果。
@@ -992,9 +990,9 @@ Fit 整图预览会采用速度优先路径；100% 原生像素检查与 Apply �
 
 不要把已经带有效果的 Film Emulation 输出层绑定为新源，否则会人为形成重复烘焙。同一源图层的重复 Rebind 应直接复用缓存；若源像素已经改变，请先让 Photoshop 生成新的历史状态，再等待预览刷新。
 
-### 11.4 Candidate 验证状态
+### 11.4 Public Beta 验证状态
 
-当前代码达到 `EA-2 candidate` 的 PF-12A Node/WASM 状态：scalar/SIMD 工件、typecheck、Node 单元/数值测试、manifest validation、bundle build和 QA 代理矩阵均纳入门禁；当前 24MP、16-bit、Quality、Balanced、2+10 的 scalar P95 为 30.455s，SIMD P95 为 26.389s，后者提升 15.41% 并通过 Auto 资格。迁移桥仍为旧 ID、1.5.2、export 角色，主包仍为新 ID、1.6.0、import 角色；本轮没有生成新的 CCX。Node 数据不能替代 Photoshop：2024/2026 UDT、Photoshop 23.3、物理 16GB 主机以及真实 Imaging API 的 8/16/32 位、四种 profile、透明边缘、文档切换、取消和失败回滚矩阵仍未完成，因此当前 candidate 不等同于 release-ready。
+当前代码进入 `V1.7 Public Beta 1` Windows 测试版：typecheck、Node 单元/数值测试、manifest validation、bundle build 和 QA 代理矩阵均纳入门禁；公开安装身份为 `com.cheukwing.filmemulation` / `filmEmulationPanel` / 1.7.0，唯一安装包为 `FilmEmulation.ccx`。2026-09-02 当前源码 fingerprint `e1c5592c…` 的 24MP、16-bit、Quality、Balanced、2+10 scalar P50/P95 为 29.229/29.858s，峰值 RSS 约 3.01GB，无 fallback；checksum、graph hash、plan hash 和 scalar WASM SHA-256 与冻结基线一致，本轮没有算法输出变化。历史 SIMD P95 26.389s 只作为独立 Node QA 结果保留，Photoshop 标准包固定使用 scalar。Node 数据不能替代 Photoshop：Windows 10/11 上的 2024/2026 UDT、Photoshop 23.3、物理 16GB 主机以及真实 Imaging API 的 8/16/32 位、四种 profile、透明边缘、文档切换、取消和失败回滚矩阵仍需继续完成。macOS 未验证，不纳入本 Beta 的支持声明。
 
 ## 12. 位深、工作空间与输出注意事项
 
@@ -1052,7 +1050,7 @@ Hue Response 判断发光体本身的色谱；Blue Compensation 判断背景承�
 
 ### 13.6 Rebind Source 后预览短暂显示原图
 
-这是当前 candidate 的渐进预览行为。插件先显示已经完成色彩管理的源图，避免读取和物理效果计算期间出现黑色空窗；状态显示 `Refining film effects…` 时仍在计算，完成后会自动替换为 Defringe、Halation、Bloom/Highlight Protection、Resolution 和 Grain 的最终预览。
+这是当前 Beta 的渐进预览行为。插件先显示已经完成色彩管理的源图，避免读取和物理效果计算期间出现黑色空窗；状态显示 `Refining film effects…` 时仍在计算，完成后会自动替换为 Defringe、Halation、Bloom/Highlight Protection、Resolution 和 Grain 的最终预览。
 
 如果预览长时间保持全黑或不再更新：
 
@@ -1083,40 +1081,40 @@ Highlight Protection 只消费最近前置 Bloom 的 `bloomContribution`。如�
 
 `mode=none` 才是全覆盖。`mode=luma` 使用线性 sRGB Rec.709 的 EV 带通；请确认 `Low EV < High EV`，并注意 softness 会在两侧形成渐变。加性效果只缩放贡献，替换效果则在输入与效果之间混合；alpha 不受 mask 改变。
 
-### 13.11 为什么状态显示 V1.7 candidate-frozen 而不是 1.7.0
+### 13.11 为什么名称是 Public Beta 1
 
-当前 package/manifest 仍为 1.6.0。V1.7 的 JS 语义、UI、真实 physical layout、scalar resident 协作调度、PF-11 fusion/traversal 优化和已资格化 SIMD artifact 已形成 EA-2 candidate；Photoshop 23.3、物理 16GB、真实 Preview/Apply/cancel 和 2024/2026 UDT 仍未完成，因此本手册不把它描述为正式发布版。
+当前 package/manifest 与 graph 均为 1.7.0，公开名称使用 `Film Emulation V1.7 Public Beta 1` 来明确发布通道，并在界面和文档中标注为 Windows 测试版。功能和自动门禁已经进入公开测试阶段，但 Windows 10/11 上的 Photoshop 23.3、物理 16GB、真实 Preview/Apply/cancel 和 2024/2026 UDT 仍需继续覆盖，因此尚不称为正式稳定版；macOS 暂不在本 Beta 的支持声明内。
 
 ## 14. 推荐调参顺序速查
 
 ```text
-1. Film format + ISO（Resolution / Grain 共享）
-2. Defringe 开关、Amount + Radius（先用 100%/Actual 检查）
-3. Defringe 色度阈值/柔化 + Edge sensitivity
-4. Halation Preset
-5. Threshold Units / Sigma Units
-6. Highlight Extraction + Spill Mix
-7. Red-Layer Threshold Bias
-8. Threshold + Source Softness
-9. Source Impact + Strong Source Level
-10. Hue Response
-11. Strong Source Expansion
-12. Sigma + PSF Smoothness + Red Tail
-13. Sigma Ratio + Red Shift
-14. Center Attenuation + Strong Core + Source Interior Protection
-15. Background Threshold + Blue Compensation
-16. Global Source Level + Global Red Diffusion
-17. Halation Amplify + Color Density
-18. Halation Strength + Blend Mode + Highlight Rolloff
-19. Bloom Threshold/Softness + Radius
-20. Bloom Amplify + Saturation + Save lights
-21. Highlight Protection Amount + Threshold/Softness
+1. Film format（胶片格式） + ISO（ISO）（Resolution / Grain 共享）
+2. Defringe 开关、Amount（数量） + Radius（半径）（先用 100%/Actual 检查）
+3. Defringe Chroma threshold（色度阈值）/Chroma softness（色度柔和度） + Edge sensitivity（边缘灵敏度）
+4. Halation Preset（预设）
+5. Threshold Units（阈值单位） / Sigma Units（Sigma 单位）
+6. Highlight Extraction（高光提取） + Spill Mix（溢出混合）
+7. Red-Layer Threshold Bias（红色感光层阈值偏移）
+8. Threshold（阈值） + Source Softness（光源柔和度）
+9. Source Impact（光源影响） + Strong Source Level（强光源级别）
+10. Hue Response（色相响应）
+11. Strong Source Expansion（强光源扩张）
+12. Sigma（半径 Sigma） + PSF Smoothness（PSF 平滑度） + Red Tail（红色尾部）
+13. Sigma Ratio（Sigma 比例） + Red Shift（红移）
+14. Center Attenuation（中心衰减） + Strong Core（强光核心） + Source Interior Protection（光源内部保护）
+15. Background Threshold（背景阈值） + Blue Compensation（蓝色补偿）
+16. Global Source Level（全局光源级别） + Global Red Diffusion（全局红色扩散）
+17. Halation Amplify（胶片光晕增益） + Halation Color Density（胶片光晕色彩密度）
+18. Strength（强度） + Blend Mode（混合模式） + Highlight Rolloff（高光滚降）
+19. Threshold (EV)（阈值（EV））/Softness (EV)（柔和度（EV）） + Radius (% diagonal)（半径（对角线百分比））
+20. Amplify（增益） + Saturation（饱和度） + Save lights（保留高光）
+21. Amount（数量） + Threshold (EV)（阈值（EV））/Softness (EV)（柔和度（EV））
 22. 各节点 Luma mask（需要局部曝光范围时）
-23. Resolution loss + MTF response
-24. Shadow loss + Highlight loss
-25. Grain Amount + Size
-26. Grain Roughness + Chroma + Correlation
-27. Randomize grain（需要另一套排列时）
+23. Resolution loss（解析度损失） + MTF response（MTF 响应）
+24. Shadow loss（暗部损失） + Highlight loss（高光损失）
+25. Grain Amount（数量） + Size（尺寸）
+26. Grain Roughness（粗糙度） + Chroma（色度） + Correlation（相关模式）
+27. Randomize grain（随机化颗粒）（需要另一套排列时）
 ```
 
 这套顺序先决定物理画幅和感光度，再处理边缘色差，接着决定“谁产生 Halation/Bloom”和“光晕长什么样”，随后确定高光保护、解析度和颗粒，最后固定随机排列。mask 适合在效果方向确定后收窄曝光范围；这样比一开始反复拉 Strength 或 Grain Amount 更容易获得可控、可重复的结果。

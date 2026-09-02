@@ -13,13 +13,7 @@
  * 限制（README/UI 告知）：machine-local；文档移动/改名后 fingerprint 变化需重新关联；不支持跨机器。
  */
 import { StorageBackend } from './backends.js';
-import { serializeParams, serializeDocument, parseDocument, toDocument } from './serializer.js';
-import {
-  MIGRATION_EXTENSION,
-  createMigrationBundle,
-  serializeMigrationBundle,
-  parseMigrationBundle,
-} from './migration.js';
+import { serializeDocument, parseDocument, toDocument } from './serializer.js';
 
 function fnv1a(str) {
   let h = 0x811c9dc5;
@@ -173,110 +167,5 @@ export async function loadParamsForDoc(doc) {
   return { params, version, key, document, graph: document.graph, bindings: document.bindings, format: document.format };
 }
 
-const migrationReceiptKey = (crc) => `migration-receipt-${String(crc).toLowerCase()}.json`;
-
-/** Export every valid old-ID document cache to a user-selected migration file. */
-export async function exportMigrationState() {
-  const documents = [];
-  const invalidEntries = [];
-  for (const name of (await pluginStorage.listNames()).sort()) {
-    try {
-      const { document } = parseDocument(await pluginStorage.load(name));
-      documents.push(document);
-    } catch (error) {
-      invalidEntries.push({ name, error: error instanceof Error ? error.message : String(error) });
-    }
-  }
-  const bundle = createMigrationBundle(documents);
-  const text = serializeMigrationBundle(bundle);
-  const { localFileSystem } = require('uxp').storage;
-  const file = await localFileSystem.getFileForSaving(
-    `FilmEmulation-State${MIGRATION_EXTENSION}`,
-    { types: ['json'] },
-  );
-  if (!file) return { cancelled: true, exported: 0, invalidEntries };
-  if (!String(file.name || '').toLowerCase().endsWith(MIGRATION_EXTENSION)) {
-    throw new Error(`Migration file name must end with ${MIGRATION_EXTENSION}`);
-  }
-  await file.write(text);
-  return {
-    cancelled: false,
-    exported: documents.length,
-    invalidEntries,
-    crc32: bundle.crc32,
-    fileName: file.name,
-  };
-}
-
-/** Pick and validate a bundle without changing new-plugin state. */
-export async function prepareMigrationImport() {
-  const { localFileSystem } = require('uxp').storage;
-  const selected = await localFileSystem.getFileForOpening({ types: ['json'], allowMultiple: false });
-  const file = Array.isArray(selected) ? selected[0] : selected;
-  if (!file) return { cancelled: true };
-  if (!String(file.name || '').toLowerCase().endsWith(MIGRATION_EXTENSION)) {
-    throw new Error(`Select a ${MIGRATION_EXTENSION} file`);
-  }
-  const parsed = parseMigrationBundle(await file.read());
-  const receiptKey = migrationReceiptKey(parsed.crc32);
-  if (await pluginStorage.exists(receiptKey)) {
-    return { cancelled: false, repeated: true, parsed, receiptKey, fileName: file.name };
-  }
-  const fresh = [];
-  const conflicts = [];
-  for (const entry of parsed.documents) {
-    const key = fingerprintKey(entry.document.documentFingerprint);
-    const item = {
-      ...entry,
-      key,
-      label: entry.document.documentFingerprint.fileName || key,
-    };
-    (await pluginStorage.exists(key) ? conflicts : fresh).push(item);
-  }
-  return {
-    cancelled: false,
-    repeated: false,
-    parsed,
-    receiptKey,
-    fileName: file.name,
-    fresh,
-    conflicts,
-  };
-}
-
-/** Commit a prepared import. Existing new-ID state is preserved unless selected explicitly. */
-export async function commitMigrationImport(plan, options = {}) {
-  if (!plan || plan.cancelled || plan.repeated) throw new Error('Migration import plan is not writable');
-  const overwriteKeys = new Set(options.overwriteKeys || []);
-  let imported = 0;
-  let overwritten = 0;
-  let preserved = 0;
-  for (const entry of plan.fresh) {
-    await pluginStorage.save(entry.key, JSON.stringify(entry.document));
-    imported++;
-  }
-  for (const entry of plan.conflicts) {
-    if (!overwriteKeys.has(entry.key)) {
-      preserved++;
-      continue;
-    }
-    await pluginStorage.save(entry.key, JSON.stringify(entry.document));
-    imported++;
-    overwritten++;
-  }
-  const receipt = {
-    kind: 'FilmEmulationMigrationReceipt',
-    bundleCrc32: plan.parsed.crc32,
-    importedAt: new Date().toISOString(),
-    sourceEngineVersion: plan.parsed.sourceEngineVersion,
-    imported,
-    overwritten,
-    preserved,
-    invalid: plan.parsed.invalidEntries.length,
-  };
-  await pluginStorage.save(plan.receiptKey, JSON.stringify(receipt, null, 2));
-  return { ...receipt, receiptKey: plan.receiptKey };
-}
-
 /** 供 Node 测试：纯 fingerprint 计算（不触碰 UXP）。 */
-export const _test = { normalizePath, fnv1a, fingerprintMatches, migrationReceiptKey };
+export const _test = { normalizePath, fnv1a, fingerprintMatches };

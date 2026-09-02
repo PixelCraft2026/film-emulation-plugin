@@ -47,6 +47,18 @@ if (packageJson.name !== 'film-emulation' || packageJson.version !== manifest.ve
   console.error('manifest/package identity mismatch');
   process.exit(1);
 }
+if (
+  manifest.version !== '1.7.0'
+  || !packageJson.description.includes('Film Emulation V1.7 Public Beta 1')
+  || !packageJson.description.includes('Windows test build')
+) {
+  console.error('manifest/package release identity must be Film Emulation V1.7 Public Beta 1 / 1.7.0 / Windows test build');
+  process.exit(1);
+}
+if (packageJson.scripts?.['package:migration'] || packageJson.scripts?.['package:migration-bridge']) {
+  console.error('retired migration bridge scripts must not be exposed by the public beta package');
+  process.exit(1);
+}
 
 console.log(
   'manifest.json validation OK (name=%s, id=%s, panel=%s, minVersion=%s)',

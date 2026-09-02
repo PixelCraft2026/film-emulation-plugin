@@ -13,7 +13,8 @@ import {
 } from '../../src/storage/migration.js';
 import { createHalationParams } from '../../src/core/index.js';
 import { toDocument } from '../../src/storage/serializer.js';
-import { commitMigrationImport, pluginStorage } from '../../src/storage/pluginStorage.js';
+import { pluginStorage } from '../../src/storage/pluginStorage.js';
+import { commitMigrationImport } from '../../src/storage/legacyMigrationBridge.js';
 
 const fingerprint = (name = 'photo.psd') => ({
   pathHash: 'a12bc34d',

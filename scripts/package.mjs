@@ -1,8 +1,6 @@
 /**
- * Package one UXP identity from the shared source tree.
- *
- *   node scripts/package.mjs current  -> V1.6 new-ID importer
- *   node scripts/package.mjs bridge   -> V1.5.2 old-ID exporter
+ * Package the single public Film Emulation identity.
+ * The pre-public old-ID migration bridge is intentionally not distributed.
  */
 import { execFileSync } from 'node:child_process';
 import {
@@ -16,36 +14,25 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  PUBLIC_DIST_FILES,
+  PUBLIC_PACKAGE_ENTRIES,
+  assertPublicBundleText,
+  assertPublicPackageEntries,
+} from './public-package-policy.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const OUT_DIR = join(ROOT, 'dist');
-const variant = process.argv[2] || 'current';
-if (!['current', 'bridge'].includes(variant)) throw new Error(`Unknown package variant: ${variant}`);
-
 const currentManifest = JSON.parse(readFileSync(join(ROOT, 'manifest.json'), 'utf8'));
-const definition = variant === 'bridge'
-  ? {
-      pluginId: 'com.cheukwing.filmhalation',
-      migrationRole: 'export',
-      version: '1.5.2',
-      fileName: 'FilmHalation-MigrationBridge.ccx',
-      pluginName: 'Film Halation',
-      entrypointId: 'filmHalationPanel',
-      panelLabel: 'Film Halation Migration',
-      htmlTitle: 'Film Halation Migration',
-      featureLevel: 'v1.5-bridge',
-    }
-  : {
-      pluginId: 'com.cheukwing.filmemulation',
-      migrationRole: 'import',
-      version: currentManifest.version,
-      fileName: 'FilmEmulation.ccx',
-      pluginName: 'Film Emulation',
-      entrypointId: 'filmEmulationPanel',
-      panelLabel: 'Film Emulation',
-      htmlTitle: 'Film Emulation',
-      featureLevel: 'current',
-    };
+const definition = {
+  pluginId: 'com.cheukwing.filmemulation',
+  version: currentManifest.version,
+  fileName: 'FilmEmulation.ccx',
+  pluginName: 'Film Emulation',
+  entrypointId: 'filmEmulationPanel',
+  panelLabel: 'Film Emulation',
+  htmlTitle: 'Film Emulation',
+};
 
 if (process.env.FILM_SKIP_WASM_BUILD !== '1') {
   execFileSync(process.execPath, [join(ROOT, 'scripts', 'build-wasm.mjs')], { cwd: ROOT, stdio: 'inherit' });
@@ -56,27 +43,13 @@ execFileSync(process.execPath, [join(ROOT, 'esbuild.config.mjs')], {
   env: {
     ...process.env,
     FILM_PLUGIN_ID: definition.pluginId,
-    FILM_MIGRATION_ROLE: definition.migrationRole,
-    FILM_FEATURE_LEVEL: definition.featureLevel,
   },
 });
 
 const bundleText = readFileSync(join(OUT_DIR, 'main.js'), 'utf8');
-if (!bundleText.includes(definition.featureLevel)) {
-  throw new Error(`Bundle feature gate missing for ${definition.featureLevel}`);
-}
-// Use current user-visible controls as the feature gate. The navigation was
-// intentionally simplified from internal labels such as "GRN / 70" to
-// "Grain", so the old stage-code marker would reject a valid current bundle.
-const v16UiMarkers = ['Film Resolution', 'Randomize grain', 'Apply memory'];
-if (variant === 'bridge' && v16UiMarkers.some((marker) => bundleText.includes(marker))) {
-  throw new Error('Migration bridge bundle exposes V1.6 UI text');
-}
-if (variant === 'current' && !v16UiMarkers.every((marker) => bundleText.includes(marker))) {
-  throw new Error('Current bundle is missing V1.6 UI');
-}
+assertPublicBundleText(bundleText);
 
-const stage = join(OUT_DIR, `ccx-stage-${variant}`);
+const stage = join(OUT_DIR, 'ccx-stage-public-beta');
 rmSync(stage, { recursive: true, force: true });
 mkdirSync(join(stage, 'dist'), { recursive: true });
 const manifest = {
@@ -94,9 +67,10 @@ writeFileSync(join(stage, 'manifest.json'), `${JSON.stringify(manifest, null, 2)
 const indexHtml = readFileSync(join(ROOT, 'index.html'), 'utf8')
   .replace(/<title>[^<]*<\/title>/, `<title>${definition.htmlTitle}</title>`);
 writeFileSync(join(stage, 'index.html'), indexHtml);
-for (const fileName of ['main.js', 'main.js.map', 'film_core.wasm']) {
+for (const fileName of PUBLIC_DIST_FILES) {
   copyFileSync(join(OUT_DIR, fileName), join(stage, 'dist', fileName));
 }
+assertPublicPackageEntries(PUBLIC_PACKAGE_ENTRIES);
 
 const ccx = join(OUT_DIR, definition.fileName);
 const zip = join(OUT_DIR, `${definition.fileName}.zip`);
@@ -109,4 +83,4 @@ execFileSync('powershell', [
 ], { stdio: 'inherit' });
 renameSync(zip, ccx);
 rmSync(stage, { recursive: true, force: true });
-console.log(`package (${variant}): ${ccx} (${existsSync(ccx) ? 'OK' : 'FAILED'})`);
+console.log(`package (public beta): ${ccx} (${existsSync(ccx) ? 'OK' : 'FAILED'})`);

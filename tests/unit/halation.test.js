@@ -450,7 +450,7 @@ test('T19c hue response is continuous at red wrap and neutral light stays unclas
 test('T19d Tungsten 800 preset is high-threshold, compact and hue-aware', () => {
   const p = createHalationPreset('tungsten-800');
   assert.equal(p.profile, 'tungsten-800');
-  assert.equal(HALATION_PRESET_LABELS['tungsten-800'], 'Tungsten 800 No-Remjet');
+  assert.equal(HALATION_PRESET_LABELS['tungsten-800'], 'CineStill 800T');
   assert.equal(p.sigmaUnits, 'diagonal');
   assert.ok(p.strength >= 80, 'no-remjet preset uses a high final Impact');
   assert.ok(p.threshold >= 0.8, 'weak window lights are limited');

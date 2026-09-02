@@ -1,7 +1,7 @@
 {
   "name": "film-emulation",
-  "version": "1.6.0",
-  "description": "Photoshop UXP film-emulation plugin — V1.6 migration foundation with the V1.5.1 Halation engine",
+  "version": "1.7.0",
+  "description": "Photoshop UXP film-emulation plugin — Film Emulation V1.7 Public Beta 1 — Windows test build",
   "private": true,
   "type": "module",
   "scripts": {
@@ -14,9 +14,7 @@
     "bench": "node --expose-gc tests/bench/perf.js",
     "qa:matrix": "node scripts/qa-matrix.mjs",
     "qa:simd": "node scripts/qualify-simd.mjs",
-    "package": "node scripts/package.mjs current",
-    "package:migration-bridge": "node scripts/package.mjs bridge",
-    "package:migration": "node scripts/package-migration.mjs",
+    "package": "node scripts/package.mjs",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

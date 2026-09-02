@@ -5,8 +5,12 @@
  * 控件变更 → handlers.onParamsChange()（main.jsx 负责 debounce 预览与状态刷新）。
  * 本文件只做视图与事件转发，不含算法与宿主逻辑。
  */
-import { STRINGS } from './i18n.js';
-import { createSlider, createSelect, createEffectSwitch } from './controls.js';
+import { getStrings, translateUiText } from './i18n.js';
+import {
+  createSlider as createSliderControl,
+  createSelect as createSelectControl,
+  createEffectSwitch as createEffectSwitchControl,
+} from './controls.js';
 import {
   defaultPreviewModeForDomain,
   inspectionImageLayout,
@@ -44,12 +48,25 @@ function setSliderRange(el, min, max, step, value) {
   if (value !== undefined) el.value = value;
 }
 
+function localizePanelTree(root, locale) {
+  if (locale !== 'zh-CN') return;
+  const elements = [root, ...Array.from(root.querySelectorAll?.('*') || [])];
+  for (const element of elements) {
+    if (!(element.children?.length > 0) && element.textContent) {
+      element.textContent = translateUiText(element.textContent, locale);
+    }
+    for (const attribute of ['aria-label', 'title']) {
+      const value = element.getAttribute?.(attribute);
+      if (value) element.setAttribute(attribute, translateUiText(value, locale));
+    }
+  }
+}
+
 /**
  * @param {{
  *   params: object,                       // 当前 HalationParams
  *   graph?: Array<object>,                // V1.6 graph
  *   format?: object,                      // V1.6 physical format
- *   featureLevel?: 'current'|'v1.5-bridge',
  *   onParamsChange: (partial:object)=>void, // 参数变更（partial 合并）
  *   onGraphChange?: (graph:Array<object>,changedType:string)=>void,
  *   onFormatChange?: (partial:object)=>void,
@@ -61,9 +78,12 @@ function setSliderRange(el, min, max, step, value) {
  *   onApplyMemoryModeChange?: (mode:'auto'|'high'|'balanced')=>void,
  *   onApply: ()=>void,                    // 触发 Apply
  *   onRebind: ()=>void,                   // 显式把当前像素层重新绑定为 source
- *   migrationRole?: 'export'|'import'|'none',
- *   onExportMigration?: ()=>void,
- *   onImportMigration?: ()=>void,
+ *   locale?: 'en'|'zh-CN',
+ *   onLanguageChange?: (locale:'en'|'zh-CN')=>void,
+ *   initialDomain?: 'halation'|'defringe'|'bloom'|'resolution'|'grain',
+ *   initialPreviewMode?: 'fit'|'actual',
+ *   initialPreviewPixelRatio?: number,
+ *   releaseInfo?: {name?:string,backend?:string},
  * }} handlers
  * @returns {HTMLElement}
  */
@@ -72,7 +92,6 @@ export function createPanel(handlers) {
     params,
     graph = [],
     format = { gauge: '35mm', iso: 250 },
-    featureLevel = 'current',
     onParamsChange,
     onGraphChange = () => {},
     onFormatChange = () => {},
@@ -84,10 +103,32 @@ export function createPanel(handlers) {
     onApplyMemoryModeChange = () => {},
     onApply,
     onRebind,
-    migrationRole = 'none',
-    onExportMigration,
-    onImportMigration,
+    locale = 'en',
+    onLanguageChange = () => {},
+    initialDomain = 'halation',
+    initialPreviewMode,
+    initialPreviewPixelRatio,
+    releaseInfo = {},
   } = handlers;
+  const STRINGS = getStrings(locale);
+  const localize = (value) => translateUiText(value, locale);
+  const createSlider = (options) => createSliderControl({ ...options, label: localize(options.label) });
+  const createSelect = (options) => createSelectControl({
+    ...options,
+    label: localize(options.label),
+    options: options.options.map((option) => ({ ...option, label: localize(option.label) })),
+  });
+  const createEffectSwitch = (options) => {
+    const label = localize(options.label);
+    return createEffectSwitchControl({
+      ...options,
+      label,
+      onLabel: STRINGS.toggleOn,
+      offLabel: STRINGS.toggleOff,
+      ariaLabel: STRINGS.enableEffectAria(label),
+      title: STRINGS.enableEffectTitle(label),
+    });
+  };
   let currentParams = { ...params, redshift: [...params.redshift], sigmaRatio: [...params.sigmaRatio] };
   let currentGraph = graph.map((node) => ({ ...node, params: { ...node.params }, mask: node.mask ? { ...node.mask } : createLumaMask() }));
   let currentFormat = { ...format };
@@ -355,6 +396,14 @@ export function createPanel(handlers) {
       font: 9px/1.2 "Adobe Clean", "Segoe UI", sans-serif; pointer-events: none;
     }
     .fhal-preview-frame[data-mode="actual"]:hover .fhal-pan-hint { display: block; }
+    .fhal-footer-settings {
+      padding: 4px 6px; box-sizing: border-box; border: 1px solid rgba(255,255,255,.10);
+      border-radius: 4px; background: #17181a;
+    }
+    .fhal-footer-setting {
+      min-height: 27px; padding: 2px 4px; box-sizing: border-box;
+      border: 1px solid rgba(255,255,255,.08); border-radius: 3px; background: rgba(255,255,255,.025);
+    }
     @media (max-width: 760px) {
       .fhal-workspace { flex-direction: column; }
       .fhal-domain-nav {
@@ -438,7 +487,11 @@ export function createPanel(handlers) {
   const domainButtons = {};
   const graphToggles = {};
   const previewModesByDomain = { halation: 'fit', defringe: 'actual', bloom: 'fit', resolution: 'actual', grain: 'actual' };
-  let activeDomain = 'halation';
+  const initialPanelDomain = Object.prototype.hasOwnProperty.call(domainPanels, initialDomain) ? initialDomain : 'halation';
+  if (initialPreviewMode === 'fit' || initialPreviewMode === 'actual') {
+    previewModesByDomain[initialPanelDomain] = initialPreviewMode;
+  }
+  let activeDomain = initialPanelDomain;
   let previewDomainSync = () => {};
   const addDomainButton = (domain, label) => {
     const button = document.createElement('button');
@@ -469,14 +522,11 @@ export function createPanel(handlers) {
     previewDomainSync(domain, previewModesByDomain[domain] ?? defaultPreviewModeForDomain(domain));
   };
   addDomainButton('halation', 'Halation');
-  const currentBuild = __FILM_FEATURE_LEVEL__ === 'current' && featureLevel === 'current';
-  if (__FILM_FEATURE_LEVEL__ === 'current' && featureLevel === 'current') {
-    addDomainButton('defringe', 'Defringe');
-    addDomainButton('bloom', 'Bloom');
-    addDomainButton('resolution', 'Resolution');
-    addDomainButton('grain', 'Grain');
-  }
-  showDomain('halation');
+  addDomainButton('defringe', 'Defringe');
+  addDomainButton('bloom', 'Bloom');
+  addDomainButton('resolution', 'Resolution');
+  addDomainButton('grain', 'Grain');
+  showDomain(initialPanelDomain);
 
   // ---- Basic ----
   const basicGroup = document.createElement('div');
@@ -522,7 +572,7 @@ export function createPanel(handlers) {
     createSlider({ id: 'threshold', label: STRINGS.threshold, value: params.threshold, min: params.thresholdUnits === 'stops' ? -4 : 0, max: params.thresholdUnits === 'stops' ? 4 : 1, step: params.thresholdUnits === 'stops' ? 0.1 : 0.01, curve: 'fine-max', curveExponent: 2.2, fineStepScale: 0.1, onInput: (v) => set({ threshold: v }) }),
   );
 
-  if (__FILM_FEATURE_LEVEL__ === 'current' && featureLevel === 'current') {
+  {
     const resolution = currentGraph.find((node) => node.type === 'filmResolution')?.params ?? createFilmResolutionParams();
     const grain = currentGraph.find((node) => node.type === 'grain')?.params ?? createGrainParams();
     const defringe = currentGraph.find((node) => node.type === 'defringe')?.params ?? createDefringeParams();
@@ -540,9 +590,9 @@ export function createPanel(handlers) {
       if (!bloomWarning) return;
       const bloomEnabled = currentGraph.find((node) => node.type === 'bloom')?.enabled === true;
       const hpEnabled = currentGraph.find((node) => node.type === 'highlightProtection')?.enabled === true;
-      bloomWarning.textContent = hpEnabled && !bloomEnabled
+      bloomWarning.textContent = localize(hpEnabled && !bloomEnabled
         ? 'Highlight Protection has no Bloom contribution. Enable Bloom to activate it.'
-        : 'Highlight Protection uses the nearest Bloom contribution.';
+        : 'Highlight Protection uses the nearest Bloom contribution.');
     };
     const updateNode = (type, partial = {}, enabled) => {
       const existing = currentGraph.find((node) => node.type === type);
@@ -601,7 +651,7 @@ export function createPanel(handlers) {
     bloomHeadingRow.append(bloomHeading, bloomSwitch.element);
     bloomWarning = document.createElement('sp-body');
     bloomWarning.id = 'highlight-protection-warning';
-    bloomWarning.textContent = 'Highlight Protection uses the nearest Bloom contribution.';
+    bloomWarning.textContent = localize('Highlight Protection uses the nearest Bloom contribution.');
     bloomWarning.style.opacity = '0.62';
     bloomPanel.append(bloomHeadingRow,
       createSlider({ id: 'bloomThresholdEV', label: 'Threshold (EV)', value: bloom.thresholdEV, min: -2, max: 8, step: 0.1, onInput: (value) => updateNode('bloom', { thresholdEV: value }) }),
@@ -821,7 +871,7 @@ export function createPanel(handlers) {
     }),
   );
   advBody.append(advGroup);
-  if (currentBuild) appendMaskControls('halation', advBody, {
+  appendMaskControls('halation', advBody, {
     title: 'Halation output area',
     description: 'Limits where the rendered Halation is mixed. Source extraction settings are unchanged.',
   });
@@ -899,7 +949,9 @@ export function createPanel(handlers) {
   previewStage.append(previewToolbar, previewFrame);
 
   let currentPreviewMode = 'fit';
-  let configuredPreviewPixelRatio = null;
+  let configuredPreviewPixelRatio = Number.isFinite(Number(initialPreviewPixelRatio)) && Number(initialPreviewPixelRatio) > 0
+    ? normalizePreviewPixelRatio(initialPreviewPixelRatio)
+    : null;
   const reportedPreviewPixelRatio = () => normalizePreviewPixelRatio(
     previewFrame.uxpContainer?.devicePixelRatio
       ?? globalThis.window?.devicePixelRatio
@@ -1049,16 +1101,17 @@ export function createPanel(handlers) {
     event.preventDefault?.();
     onPreviewPan(delta);
   });
+  let resizeTimer = null;
+  let previewResizeObserver = null;
   if (typeof ResizeObserver === 'function') {
-    let resizeTimer = null;
-    const observer = new ResizeObserver(() => {
+    previewResizeObserver = new ResizeObserver(() => {
       if (currentPreviewMode !== 'actual') return;
       applyActualImageSize(sourceImg);
       applyActualImageSize(img);
       clearTimeout(resizeTimer);
       resizeTimer = setTimeout(() => onPreviewViewportChange(previewViewport()), 120);
     });
-    observer.observe(previewPane);
+    previewResizeObserver.observe(previewPane);
   }
 
   // ---- 固定底栏：Apply + 状态行 + 提示（不随参数滚动，永不重叠）----
@@ -1084,14 +1137,6 @@ export function createPanel(handlers) {
   rebindBtn.textContent = STRINGS.rebind;
   rebindBtn.addEventListener('click', onRebind);
   actions.append(applyBtn, rebindBtn);
-  let migrationBtn = null;
-  if (migrationRole === 'export' || migrationRole === 'import') {
-    migrationBtn = document.createElement('sp-button');
-    migrationBtn.variant = 'secondary';
-    migrationBtn.textContent = migrationRole === 'export' ? STRINGS.exportMigration : STRINGS.importMigration;
-    migrationBtn.addEventListener('click', migrationRole === 'export' ? onExportMigration : onImportMigration);
-    actions.append(migrationBtn);
-  }
 
   const status = document.createElement('sp-body');
   status.id = 'status-line';
@@ -1105,97 +1150,76 @@ export function createPanel(handlers) {
 
   halationPanel.append(basicGroup, halationAdvanced.element);
   scrollArea.append(physicalGroup, halationPanel);
-  if (currentBuild) scrollArea.append(defringePanel, bloomPanel, resolutionPanel, grainPanel);
+  scrollArea.append(defringePanel, bloomPanel, resolutionPanel, grainPanel);
   workspace.append(domainNav, scrollArea, previewStage);
-  // Keep the compile-time feature gate in this branch so esbuild removes the
-  // control and its strings completely from the legacy migration bundle.
-  if (__FILM_FEATURE_LEVEL__ === 'current' && currentBuild) {
-    const applyMemory = createSelect({
-      id: 'applyMemoryMode',
-      label: 'Apply memory',
-      value: applyMemoryMode,
-      options: [
-        { value: 'auto', label: 'Auto (safe)' },
-        { value: 'high', label: 'High (16 GB+)' },
-        { value: 'balanced', label: 'Balanced' },
-      ],
-      onChange: (value) => onApplyMemoryModeChange(value),
-    });
-    applyMemory.title = 'High avoids repeated spatial halos when UXP cannot report memory. Use only on systems with at least 16 GB RAM.';
-    footer.append(applyMemory);
-  }
-  footer.append(actions, status, hint);
-  panel.append(workspace, footer);
-
-  /** Conflict selector: new-ID state is preserved unless the user checks an item. */
-  const chooseMigrationConflicts = (conflicts) => new Promise((resolve) => {
-    if (!conflicts.length) {
-      resolve([]);
-      return;
-    }
-    const overlay = document.createElement('div');
-    overlay.style.position = 'absolute';
-    overlay.style.inset = '0';
-    overlay.style.zIndex = '1000';
-    overlay.style.display = 'flex';
-    overlay.style.alignItems = 'center';
-    overlay.style.justifyContent = 'center';
-    overlay.style.padding = '18px';
-    overlay.style.background = 'rgba(0,0,0,.72)';
-    const card = document.createElement('div');
-    card.style.width = 'min(620px, 100%)';
-    card.style.maxHeight = '80%';
-    card.style.display = 'flex';
-    card.style.flexDirection = 'column';
-    card.style.gap = '10px';
-    card.style.padding = '16px';
-    card.style.background = '#2b2b2b';
-    card.style.border = '1px solid rgba(255,255,255,.18)';
-    const heading = document.createElement('sp-heading');
-    heading.textContent = STRINGS.migrationConflictsTitle;
-    const explanation = document.createElement('sp-body');
-    explanation.textContent = STRINGS.migrationConflictsHint;
-    const list = document.createElement('div');
-    list.style.overflowY = 'auto';
-    list.style.maxHeight = '360px';
-    list.style.display = 'flex';
-    list.style.flexDirection = 'column';
-    list.style.gap = '6px';
-    const selections = [];
-    for (const conflict of conflicts) {
-      const label = document.createElement('label');
-      label.style.display = 'flex';
-      label.style.gap = '8px';
-      label.style.alignItems = 'center';
-      const checkbox = document.createElement('input');
-      checkbox.type = 'checkbox';
-      checkbox.checked = false;
-      const text = document.createElement('span');
-      text.textContent = conflict.label;
-      label.append(checkbox, text);
-      list.append(label);
-      selections.push({ checkbox, key: conflict.key });
-    }
-    const dialogActions = document.createElement('div');
-    dialogActions.style.display = 'flex';
-    dialogActions.style.gap = '8px';
-    dialogActions.style.justifyContent = 'flex-end';
-    const cancel = document.createElement('sp-button');
-    cancel.variant = 'secondary';
-    cancel.textContent = STRINGS.migrationCancel;
-    const confirm = document.createElement('sp-button');
-    confirm.textContent = STRINGS.migrationConfirm;
-    const finish = (value) => {
-      overlay.remove();
-      resolve(value);
-    };
-    cancel.addEventListener('click', () => finish(null));
-    confirm.addEventListener('click', () => finish(selections.filter((item) => item.checkbox.checked).map((item) => item.key)));
-    dialogActions.append(cancel, confirm);
-    card.append(heading, explanation, list, dialogActions);
-    overlay.append(card);
-    panel.append(overlay);
+  const applyMemory = createSelect({
+    id: 'applyMemoryMode',
+    label: 'Apply memory',
+    value: applyMemoryMode,
+    options: [
+      { value: 'auto', label: 'Auto (safe)' },
+      { value: 'high', label: 'High (16 GB+)' },
+      { value: 'balanced', label: 'Balanced' },
+    ],
+    onChange: (value) => onApplyMemoryModeChange(value),
   });
+  applyMemory.title = 'High avoids repeated spatial halos when UXP cannot report memory. Use only on systems with at least 16 GB RAM.';
+  const languageSelect = createSelect({
+    id: 'uiLanguage',
+    label: STRINGS.language,
+    value: locale,
+    options: [
+      { value: 'zh-CN', label: STRINGS.languageChinese },
+      { value: 'en', label: STRINGS.languageEnglish },
+    ],
+    onChange: (value) => onLanguageChange(value),
+  });
+  // 将两个低频全局设置收进一行紧凑工具栏，避免下拉框在底栏横向拉满。
+  const footerSettings = document.createElement('div');
+  footerSettings.classList.add('fhal-footer-settings');
+  footerSettings.style.display = 'flex';
+  footerSettings.style.flexWrap = 'wrap';
+  footerSettings.style.alignItems = 'center';
+  footerSettings.style.gap = '8px';
+  footerSettings.style.width = '100%';
+  footerSettings.style.minWidth = '0';
+  const compactFooterSetting = (row, width, labelWidth) => {
+    row.classList.add('fhal-footer-setting');
+    row.style.flex = `0 1 ${width}px`;
+    row.style.width = `${width}px`;
+    row.style.maxWidth = '100%';
+    row.style.minWidth = '0';
+    const label = row.querySelector?.('sp-label');
+    if (label) {
+      label.style.width = `${labelWidth}px`;
+      label.style.fontSize = '11px';
+    }
+    const dropdown = row.querySelector?.('sp-dropdown');
+    if (dropdown) {
+      dropdown.style.flex = '1 1 auto';
+      dropdown.style.width = 'auto';
+      dropdown.style.minWidth = '0';
+    }
+    return row;
+  };
+  footerSettings.append(
+    compactFooterSetting(applyMemory, 232, 86),
+    compactFooterSetting(languageSelect, 190, 70),
+  );
+  const runtimeInfo = document.createElement('sp-body');
+  runtimeInfo.style.opacity = '0.52';
+  runtimeInfo.style.fontSize = '10px';
+  let currentReleaseInfo = { ...releaseInfo };
+  const setRuntimeInfo = (next = {}) => {
+    currentReleaseInfo = { ...currentReleaseInfo, ...next };
+    runtimeInfo.textContent = STRINGS.runtimeInfo(
+      currentReleaseInfo.name || 'Film Emulation',
+      currentReleaseInfo.backend || STRINGS.backendLoading,
+    );
+  };
+  setRuntimeInfo();
+  footer.append(footerSettings, actions, status, hint, runtimeInfo);
+  panel.append(workspace, footer);
 
   // 暴露给 main.jsx 的句柄
   const setControl = (id, value) => {
@@ -1216,9 +1240,11 @@ export function createPanel(handlers) {
     status,
     applyBtn,
     rebindBtn,
-    migrationBtn,
     getPreviewView() {
       return { mode: currentPreviewMode, domain: activeDomain, ...previewViewport() };
+    },
+    getPreviewLoading() {
+      return previewPane.getAttribute('data-loading') === 'true';
     },
     getReportedPreviewPixelRatio() {
       return reportedPreviewPixelRatio();
@@ -1243,7 +1269,13 @@ export function createPanel(handlers) {
       nativeImageSizes.set(previewImage, { width: Number(width), height: Number(height) });
       applyActualImageSize(previewImage);
     },
-    chooseMigrationConflicts,
+    setRuntimeInfo,
+    dispose() {
+      previewResizeObserver?.disconnect?.();
+      previewResizeObserver = null;
+      clearTimeout(resizeTimer);
+      resizeTimer = null;
+    },
     updateGraph(nextGraph) {
       currentGraph = nextGraph.map((node) => ({ ...node, params: { ...node.params }, mask: node.mask ? { ...node.mask } : createLumaMask() }));
       const halationNode = currentGraph.find((node) => node.type === 'halation');
@@ -1366,5 +1398,6 @@ export function createPanel(handlers) {
       setControl('thresholdUnits', p.thresholdUnits);
     },
   };
+  localizePanelTree(panel, locale);
   return panel;
 }

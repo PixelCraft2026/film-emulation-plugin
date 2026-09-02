@@ -129,7 +129,7 @@ export const DEFAULT_PARAMS = Object.freeze({
 export const HALATION_PRESET_LABELS = Object.freeze({
   custom: 'Custom',
   standard: 'Neutral / Legacy',
-  'tungsten-800': 'Tungsten 800 No-Remjet',
+  'tungsten-800': 'CineStill 800T',
 });
 
 const PRESET_OVERRIDES = Object.freeze({

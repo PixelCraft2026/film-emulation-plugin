@@ -1,8 +1,10 @@
 // @ts-nocheck
-/** Film Emulation V1.6 — 非破坏性 UXP 编排。 */
+/** Film Emulation V1.7 Public Beta 1 — 非破坏性 UXP 编排。 */
 import { createPanel } from './ui/panel.jsx';
 import { mergeIndependentGraphChange } from './ui/graphState.js';
 import { displayScaleForPreview } from './ui/previewMode.js';
+import { createDocumentLifecycle, shouldScheduleActivatedDocumentPreview } from './ui/documentLifecycle.js';
+import { planUiLocaleChange } from './ui/languageTransition.js';
 import { renderPreviewIncremental } from './io/previewRender.js';
 import {
   PREVIEW_MAX_EDGE,
@@ -16,7 +18,7 @@ import {
   inspectionVisibleBounds,
 } from './io/preview.js';
 import { createHalationParams, createHalationPreset, createDefaultEffectGraph, createFilmResolutionParams, createGrainParams, deriveSeed, fmix32, SEED_GOLDEN_RATIO, normalizeFilmFormat } from './core/index.js';
-import { renderDocumentToLayer, renderFilmDocumentToLayer, streamGeometry, streamFilmGeometry } from './io/streamRender.js';
+import { renderFilmDocumentToLayer, streamFilmGeometry } from './io/streamRender.js';
 import { resolveDocumentTRC, resolvePixelTRC, standardProfileName } from './io/colorPipeline.js';
 import { readDocumentPixels } from './io/imageAccess.js';
 import { createHeavyBlurPlaceholder } from './io/previewPlaceholder.js';
@@ -36,35 +38,47 @@ import {
   unlockPixelLayer,
   resolveApplyTarget,
 } from './io/layerOps.js';
-import { STRINGS } from './ui/i18n.js';
+import { detectUiLocale, getStrings } from './ui/i18n.js';
 import { floatRgbToPng, pngToDataUrl } from './ui/pngEncoder.js';
-import {
-  saveParamsForDoc,
-  loadParamsForDoc,
-  exportMigrationState,
-  prepareMigrationImport,
-  commitMigrationImport,
-} from './storage/pluginStorage.js';
+import { saveParamsForDoc, loadParamsForDoc } from './storage/pluginStorage.js';
+import { loadUiPreferences, saveUiPreferences } from './storage/preferences.js';
 import { loadBundledWasm } from './io/wasmRuntime.js';
 
 const ps = require('photoshop');
 const app = ps.app;
 const BUILD_PLUGIN_ID = __FILM_PLUGIN_ID__;
-const MIGRATION_ROLE = __FILM_MIGRATION_ROLE__;
-const FEATURE_LEVEL = __FILM_FEATURE_LEVEL__;
-const IS_CURRENT_BUILD = FEATURE_LEVEL === 'current';
+const PACKAGE_VERSION = __FILM_PACKAGE_VERSION__;
+const RELEASE_NAME = __FILM_RELEASE_NAME__;
 
-loadBundledWasm().then((wasm) => {
-  console.log(`[${BUILD_PLUGIN_ID}] feature=${FEATURE_LEVEL} compute backend: ${wasm.backend}${wasm.error ? ` (${wasm.error})` : ''}`);
-});
+function detectedHostLocale() {
+  const candidates = [];
+  try { candidates.push(app.locale); } catch (error) { /* optional host field */ }
+  try {
+    const uxp = require('uxp');
+    candidates.push(uxp.host?.uiLocale, uxp.host?.locale);
+  } catch (error) { /* optional host field */ }
+  try { candidates.push(...(globalThis.navigator?.languages || []), globalThis.navigator?.language); } catch (error) { /* optional browser field */ }
+  return detectUiLocale(candidates, 'en');
+}
+
+let uiLocale = detectedHostLocale();
+let STRINGS = getStrings(uiLocale);
+let runtimeBackend = 'loading';
+// These session-only view values survive UI remounts (for example, a language switch).
+let activeDomain = 'halation';
+let previewMode = 'fit';
+
+function runtimeBackendLabel() {
+  if (runtimeBackend === 'wasm') return STRINGS.backendWasm;
+  if (runtimeBackend === 'js') return STRINGS.backendJs;
+  return STRINGS.backendLoading;
+}
 
 let params = createHalationPreset('tungsten-800');
 function createRuntimeDocument(halationParams, seed = 0x4f1bbcdc) {
   return {
     format: { gauge: '35mm', iso: 250 },
-    graph: IS_CURRENT_BUILD
-      ? createDefaultEffectGraph(halationParams, seed)
-      : [{ id: 'halation-main', type: 'halation', enabled: true, params: createHalationParams(halationParams) }],
+    graph: createDefaultEffectGraph(halationParams, seed),
   };
 }
 let filmDocument = createRuntimeDocument(params);
@@ -110,39 +124,118 @@ let img;
 let sourceImg;
 let status;
 let applyBtn;
-let migrationBtn;
-try {
-  panel = createPanel({
-    params,
-    graph: filmDocument.graph,
-    format: filmDocument.format,
-    featureLevel: FEATURE_LEVEL,
-    onParamsChange,
-    onGraphChange,
-    onFormatChange,
-    onRandomizeGrain,
-    onPreviewModeChange,
-    onPreviewPan,
-    onPreviewViewportChange,
-    applyMemoryMode,
-    onApplyMemoryModeChange: (mode) => { applyMemoryMode = mode; },
-    onApply: runApply,
-    onRebind: runRebind,
-    migrationRole: MIGRATION_ROLE,
-    onExportMigration: runExportMigration,
-    onImportMigration: runImportMigration,
-  });
-  document.body.append(panel);
-  ({ img, sourceImg, status, applyBtn, migrationBtn } = panel.__handles);
-} catch (error) {
-  console.error('[film-emulation] panel creation failed: ' + (error && (error.stack || error.message || error)));
-  writeDiagFile('ui-error.json', { message: String(error), at: new Date().toISOString() });
-  status = { textContent: '' };
-  img = { removeAttribute() {}, src: '' };
-  sourceImg = { removeAttribute() {}, src: '' };
-  applyBtn = { disabled: false };
-  migrationBtn = { disabled: false };
+
+function mountPanel(options = {}) {
+  const previous = panel;
+  const preservePreview = options.preservePreview === true;
+  const readImageSrc = (element) => element?.getAttribute?.('src') || element?.src || '';
+  const preservedPreview = preservePreview && previous
+    ? {
+      view: previous.__handles?.getPreviewView?.(),
+      loading: previous.__handles?.getPreviewLoading?.() === true,
+      previewPixelRatio: previous.__handles?.getPreviewPixelRatio?.(),
+      previewSrc: readImageSrc(img),
+      sourceSrc: readImageSrc(sourceImg),
+      previewWidth: Number(img?.naturalWidth || 0),
+      previewHeight: Number(img?.naturalHeight || 0),
+      sourceWidth: Number(sourceImg?.naturalWidth || 0),
+      sourceHeight: Number(sourceImg?.naturalHeight || 0),
+      statusText: status?.textContent || '',
+      applyDisabled: applyBtn?.disabled === true,
+    }
+    : null;
+  if (preservedPreview?.view?.domain) activeDomain = preservedPreview.view.domain;
+  if (previous) {
+    if (!preservePreview) {
+      previewRequestId++;
+      previewAbortController?.abort();
+      clearPreviewImage();
+    }
+    previous.__handles?.dispose?.();
+    previous.remove?.();
+  }
+  try {
+    panel = createPanel({
+      params,
+      graph: filmDocument.graph,
+      format: filmDocument.format,
+      onParamsChange,
+      onGraphChange,
+      onFormatChange,
+      onRandomizeGrain,
+      onPreviewModeChange,
+      onPreviewPan,
+      onPreviewViewportChange,
+      applyMemoryMode,
+      onApplyMemoryModeChange: (mode) => { applyMemoryMode = mode; },
+      onApply: runApply,
+      onRebind: runRebind,
+      locale: uiLocale,
+      onLanguageChange: (nextLocale) => setUiLocale(nextLocale, true),
+      initialDomain: activeDomain,
+      initialPreviewMode: preservedPreview?.view?.mode,
+      initialPreviewPixelRatio: preservedPreview?.previewPixelRatio,
+      releaseInfo: { name: `${RELEASE_NAME} · ${STRINGS.windowsTestBuild}`, backend: runtimeBackendLabel() },
+    });
+    document.body.append(panel);
+    ({ img, sourceImg, status, applyBtn } = panel.__handles);
+    const restoredView = panel.__handles?.getPreviewView?.();
+    if (restoredView) {
+      activeDomain = restoredView.domain || activeDomain;
+      previewMode = restoredView.mode === 'actual' ? 'actual' : 'fit';
+    }
+    if (preservedPreview) {
+      if (preservedPreview.sourceSrc) sourceImg.src = preservedPreview.sourceSrc;
+      if (preservedPreview.previewSrc) img.src = preservedPreview.previewSrc;
+      if (preservedPreview.sourceWidth > 0 && preservedPreview.sourceHeight > 0) {
+        panel.__handles.setPreviewPixelDimensions('source', preservedPreview.sourceWidth, preservedPreview.sourceHeight);
+      }
+      if (preservedPreview.previewWidth > 0 && preservedPreview.previewHeight > 0) {
+        panel.__handles.setPreviewPixelDimensions('preview', preservedPreview.previewWidth, preservedPreview.previewHeight);
+      }
+      panel.__handles.setPreviewLoading(preservedPreview.loading, { useSource: false });
+      if (preservedPreview.statusText) status.textContent = preservedPreview.statusText;
+      applyBtn.disabled = preservedPreview.applyDisabled;
+    }
+    if (options.preview && currentDoc()) schedulePreview();
+  } catch (error) {
+    console.error('[film-emulation] panel creation failed: ' + (error && (error.stack || error.message || error)));
+    writeDiagFile('ui-error.json', { message: String(error), at: new Date().toISOString() });
+    status = { textContent: '' };
+    img = { removeAttribute() {}, getAttribute() { return ''; }, src: '' };
+    sourceImg = { removeAttribute() {}, src: '' };
+    applyBtn = { disabled: false };
+  }
 }
+
+function setUiLocale(nextLocale, persist = false) {
+  const transition = planUiLocaleChange(uiLocale, nextLocale, {
+    filmDocument,
+    documentState,
+    previewRequestId,
+  });
+  if (!transition.changed) return;
+  uiLocale = transition.uiLocale;
+  STRINGS = getStrings(uiLocale);
+  // Language is presentation-only. Keep the current preview image/request alive;
+  // rebuilding the labels must not enqueue another algorithm render.
+  mountPanel({ preservePreview: true });
+  if (persist) {
+    saveUiPreferences({ uiLocale }).catch((error) => console.warn('[film-emulation] language preference save failed: ' + (error?.message || error)));
+  }
+}
+
+mountPanel();
+
+loadUiPreferences(uiLocale)
+  .then((preferences) => setUiLocale(preferences.uiLocale, false))
+  .catch((error) => console.warn('[film-emulation] language preference load failed: ' + (error?.message || error)));
+
+loadBundledWasm().then((wasm) => {
+  runtimeBackend = wasm.available && wasm.backend !== 'js' ? 'wasm' : 'js';
+  panel?.__handles?.setRuntimeInfo?.({ backend: runtimeBackendLabel() });
+  console.log(`[${BUILD_PLUGIN_ID}] release=${RELEASE_NAME} version=${PACKAGE_VERSION} compute=${wasm.backend}${wasm.error ? ` (${wasm.error})` : ''}`);
+});
 
 async function refreshPreviewDisplayScale() {
   if (!panel?.__handles?.setPreviewPixelRatio) return false;
@@ -268,15 +361,11 @@ function currentDoc() {
   return app.activeDocument;
 }
 
-let previewMode = 'fit';
 let inspectionState = { centerX: null, centerY: null, pendingX: 0, pendingY: 0, viewportWidth: 512, viewportHeight: 512 };
 
-let lastDocId = null;
-setInterval(() => {
-  const doc = currentDoc();
-  const id = doc ? doc.id : null;
-  if (id === lastDocId) return;
-  lastDocId = id;
+const documentLifecycle = createDocumentLifecycle();
+
+async function activateDocument(doc, id) {
   previewRequestId++;
   previewAbortController?.abort();
   clearPreviewImage();
@@ -284,13 +373,29 @@ setInterval(() => {
   inspectionState = { ...inspectionState, centerX: null, centerY: null, pendingX: 0, pendingY: 0 };
   documentState = { format: { gauge: '35mm', iso: 250 }, bindings: { sourceLayer: null, targetLayer: null } };
   filmDocument = createRuntimeDocument(params, randomSeed(`document:${String(id ?? '')}`));
+  panel?.__handles?.updateParams?.(params);
+  panel?.__handles?.updateGraph?.(filmDocument.graph);
+  panel?.__handles?.updateFormat?.(filmDocument.format);
   if (!doc) {
-    status.textContent = 'No active document.';
+    status.textContent = STRINGS.statusNoDocument;
     return;
   }
-  status.textContent = 'Document changed. Loading Film Emulation state…';
-  loadStoredParams(doc, id);
-}, 750);
+  status.textContent = STRINGS.statusDocumentChanged;
+  const active = await loadStoredParams(doc, id);
+  if (shouldScheduleActivatedDocumentPreview(active, currentDoc()?.id, id)) schedulePreview();
+}
+
+function synchronizeActiveDocument() {
+  const doc = currentDoc();
+  const transition = documentLifecycle.transition(doc);
+  if (!transition.changed) return;
+  activateDocument(doc, transition.id).catch((error) => {
+    console.warn('[film-emulation] document activation failed: ' + (error?.message || error));
+    if (currentDoc()?.id === transition.id) status.textContent = STRINGS.statusFailed(error?.message || error);
+  });
+}
+
+setInterval(synchronizeActiveDocument, 750);
 
 function onParamsChange(partial) {
   try {
@@ -303,7 +408,6 @@ function onParamsChange(partial) {
 }
 
 function onGraphChange(nextGraph, changedType) {
-  if (!IS_CURRENT_BUILD) return;
   const graphDomain = String(changedType || '').split(':')[0];
   filmDocument = {
     ...filmDocument,
@@ -313,14 +417,12 @@ function onGraphChange(nextGraph, changedType) {
 }
 
 function onFormatChange(partial) {
-  if (!IS_CURRENT_BUILD) return;
   filmDocument = { ...filmDocument, format: normalizeFilmFormat({ ...filmDocument.format, ...partial }) };
   documentState.format = filmDocument.format;
   schedulePreview();
 }
 
 function onRandomizeGrain() {
-  if (!IS_CURRENT_BUILD) return;
   filmDocument = {
     ...filmDocument,
     graph: filmDocument.graph.map((node) => node.type === 'grain'
@@ -331,7 +433,8 @@ function onRandomizeGrain() {
   schedulePreview();
 }
 
-function onPreviewModeChange(mode) {
+function onPreviewModeChange(mode, domain) {
+  if (domain) activeDomain = domain;
   previewMode = mode === 'actual' ? 'actual' : 'fit';
   const view = panel?.__handles?.getPreviewView?.();
   if (view) inspectionState = { ...inspectionState, viewportWidth: view.width, viewportHeight: view.height };
@@ -663,7 +766,7 @@ async function runPanelPreview(requestId = null, signal = null) {
 async function runApply() {
   const doc = currentDoc();
   if (!doc) {
-    status.textContent = 'No active document.';
+    status.textContent = STRINGS.statusNoDocument;
     return;
   }
   status.textContent = STRINGS.statusRendering;
@@ -709,7 +812,7 @@ async function runRebind() {
     return;
   }
   if (isEffectLayerName(selectedName)) {
-    status.textContent = STRINGS.statusFailed('Select the original pixel layer, not a Film Emulation effect copy.');
+    status.textContent = STRINGS.statusFailed(STRINGS.selectOriginalSource);
     return;
   }
   const cachedSourceIsSelected = previewSourceCache?.documentID === doc.id
@@ -729,56 +832,6 @@ async function runRebind() {
   await saveParamsForDoc(doc, params, { ...documentState, document: filmDocument });
   status.textContent = STRINGS.statusRebound;
   if (!cachedSourceIsSelected || !img.getAttribute?.('src')) schedulePreview();
-}
-
-async function runExportMigration() {
-  status.textContent = STRINGS.statusMigrationExporting;
-  if (migrationBtn) migrationBtn.disabled = true;
-  try {
-    const result = await exportMigrationState();
-    if (result.cancelled) {
-      status.textContent = 'Migration export cancelled.';
-      return;
-    }
-    const invalidLabel = result.invalidEntries.length === 1 ? 'entry' : 'entries';
-    status.textContent = `Exported ${result.exported} document state(s) to ${result.fileName}; ${result.invalidEntries.length} invalid cache ${invalidLabel} skipped. CRC32 ${result.crc32}.`;
-  } catch (error) {
-    status.textContent = STRINGS.statusFailed(error.message || error);
-  } finally {
-    if (migrationBtn) migrationBtn.disabled = false;
-  }
-}
-
-async function runImportMigration() {
-  status.textContent = STRINGS.statusMigrationImporting;
-  if (migrationBtn) migrationBtn.disabled = true;
-  try {
-    // Keep the picker directly on the button call stack: UXP may require an
-    // active user gesture for getFileForOpening/getFileForSaving.
-    const plan = await prepareMigrationImport();
-    if (plan.cancelled) {
-      status.textContent = 'Migration import cancelled.';
-      return;
-    }
-    if (plan.repeated) {
-      status.textContent = `Migration package ${plan.parsed.crc32} was already imported. No state was changed.`;
-      return;
-    }
-    const overwriteKeys = await panel.__handles.chooseMigrationConflicts(plan.conflicts);
-    if (overwriteKeys === null) {
-      status.textContent = 'Migration import cancelled; no state was changed.';
-      return;
-    }
-    const result = await commitMigrationImport(plan, { overwriteKeys });
-    const invalidLabel = result.invalid === 1 ? 'entry' : 'entries';
-    status.textContent = `Imported ${result.imported} document state(s); ${result.preserved} existing state(s) preserved; ${result.invalid} invalid ${invalidLabel} skipped.`;
-    const doc = currentDoc();
-    if (doc) await loadStoredParams(doc, doc.id);
-  } catch (error) {
-    status.textContent = STRINGS.statusFailed(error.message || error);
-  } finally {
-    if (migrationBtn) migrationBtn.disabled = false;
-  }
 }
 
 async function renderToSafeCopy(doc, renderDocument, options) {
@@ -808,19 +861,13 @@ async function renderToSafeCopy(doc, renderDocument, options) {
   const sourceBounds = layerPixelBounds(sourceLayer) ?? { left: 0, top: 0, right: doc.width, bottom: doc.height };
   const deviceMemoryGB = Number(globalThis.navigator?.deviceMemory ?? 0);
   try {
-    const preflight = IS_CURRENT_BUILD
-      ? streamFilmGeometry(sourceBounds.right - sourceBounds.left, sourceBounds.bottom - sourceBounds.top, renderDocument, {
-          componentSize,
-          fullWidth: Number(doc.width),
-          fullHeight: Number(doc.height),
-          deviceMemoryGB,
-          memoryMode: applyMemoryMode,
-        })
-      : streamGeometry(sourceBounds.right - sourceBounds.left, sourceBounds.bottom - sourceBounds.top, renderDocument.graph.find((node) => node.type === 'halation').params, {
-          componentSize,
-          deviceMemoryGB,
-          memoryMode: applyMemoryMode,
-        });
+    const preflight = streamFilmGeometry(sourceBounds.right - sourceBounds.left, sourceBounds.bottom - sourceBounds.top, renderDocument, {
+      componentSize,
+      fullWidth: Number(doc.width),
+      fullHeight: Number(doc.height),
+      deviceMemoryGB,
+      memoryMode: applyMemoryMode,
+    });
     if (preflight.hardBudgetExceeded) return { ok: false, error: `Film render preflight exceeds the ${Math.round(preflight.hardBudgetBytes / 1024 ** 3)} GiB hard memory budget; no effect layer was created.` };
   } catch (error) {
     return { ok: false, error: `Film render preflight failed; no effect layer was created. ${error.message || error}` };
@@ -855,21 +902,13 @@ async function renderToSafeCopy(doc, renderDocument, options) {
   try {
     const targetBounds = layerPixelBounds(targetLayer) ?? sourceBounds;
     const trc = resolveDocumentTRC(doc);
-    const renderResult = IS_CURRENT_BUILD
-      ? await renderFilmDocumentToLayer(doc, sourceLayer, targetLayer, sourceBounds, targetBounds, renderDocument, trc, {
-          componentSize,
-          seed: renderDocument.graph.find((node) => node.type === 'grain')?.params.seed ?? 0x46534c4d,
-          signal: options.signal,
-          deviceMemoryGB,
-          memoryMode: applyMemoryMode,
-        })
-      : await renderDocumentToLayer(doc, sourceLayer, targetLayer, sourceBounds, targetBounds, renderDocument.graph.find((node) => node.type === 'halation').params, trc, {
-          componentSize,
-          seed: 0x46534c4d,
-          signal: options.signal,
-          deviceMemoryGB,
-          memoryMode: applyMemoryMode,
-        });
+    const renderResult = await renderFilmDocumentToLayer(doc, sourceLayer, targetLayer, sourceBounds, targetBounds, renderDocument, trc, {
+      componentSize,
+      seed: renderDocument.graph.find((node) => node.type === 'grain')?.params.seed ?? 0x46534c4d,
+      signal: options.signal,
+      deviceMemoryGB,
+      memoryMode: applyMemoryMode,
+    });
     if (legacyTarget && legacyTarget !== targetLayer) {
       try { legacyTarget.visible = false; } catch (error) { /* old failed target may be protected */ }
     }
@@ -889,16 +928,17 @@ async function renderToSafeCopy(doc, renderDocument, options) {
 }
 
 async function loadStoredParams(doc, expectedId = doc?.id) {
-  if (!doc) return;
+  if (!doc) return false;
   try {
     const stored = await loadParamsForDoc(doc);
-    if (!stored || currentDoc()?.id !== expectedId) {
-      status.textContent = 'Ready. Select a pixel layer and adjust a slider.';
-      return;
+    if (currentDoc()?.id !== expectedId) return false;
+    if (!stored) {
+      status.textContent = STRINGS.statusReadyForPreview;
+      return true;
     }
     params = createHalationParams(stored.params);
     const storedGraph = stored.document?.graph;
-    filmDocument = IS_CURRENT_BUILD && Array.isArray(storedGraph)
+    filmDocument = Array.isArray(storedGraph)
       ? { ...stored.document, graph: storedGraph }
       : createRuntimeDocument(params, randomSeed(`document:${String(doc.id ?? '')}`));
     documentState = {
@@ -908,15 +948,14 @@ async function loadStoredParams(doc, expectedId = doc?.id) {
     panel.__handles.updateParams(params);
     panel.__handles.updateGraph?.(filmDocument.graph);
     panel.__handles.updateFormat?.(filmDocument.format);
-    status.textContent = 'Loaded Film Emulation state. Adjust a slider to preview.';
+    status.textContent = STRINGS.statusLoaded;
+    return true;
   } catch (error) {
     console.warn('[film-emulation] state load failed: ' + error);
-    status.textContent = STRINGS.statusFailed('Stored settings could not be loaded.');
+    if (currentDoc()?.id !== expectedId) return false;
+    status.textContent = STRINGS.statusFailed(STRINGS.storedSettingsFailed);
+    return true;
   }
 }
 
-const initialDocument = currentDoc();
-if (initialDocument) {
-  filmDocument = createRuntimeDocument(params, randomSeed(`document:${String(initialDocument.id ?? '')}`));
-  loadStoredParams(initialDocument).catch((error) => console.warn('[film-emulation] initial load failed: ' + error));
-}
+synchronizeActiveDocument();

@@ -1,11 +1,11 @@
 {
-  "generatedAt": "2026-08-31T15:07:13.904Z",
+  "generatedAt": "2026-09-01T21:50:02.034Z",
   "node": "v24.19.0",
   "platform": "win32-x64",
   "cpu": "Intel64 Family 6 Model 151 Stepping 2, GenuineIntel",
-  "gitRevision": "0121b6443291af716d3e9ce8cb0d57c84178304d",
+  "gitRevision": "ac533a0bbdf2f398c79cfd10ccc62007dd17f546",
   "workingTreeDirty": true,
-  "sourceFingerprint": "080124b3a7ddce86cd4224e15eb3fda0eb61ecea9ef9295bbd4826e6efb79b39",
+  "sourceFingerprint": "e1c5592c86c6c404fa47490ab6c66c0edfa13bb655e767b27ee37977d4dffe58",
   "wasmSha256": "94814efbdb90366778f0db6921041c888871b25caac34df05c273a756eab8f7b",
   "wasmSimdSha256": "64f7d58370ca2407eb81c5aefce6219704a6f25dcd733cd1a99a5e3d2f41280f",
   "backend": {
@@ -88,20 +88,20 @@
     "warmups": 2,
     "runs": 10,
     "samplesMs": [
-      30244.4,
-      30238.3,
-      30141.7,
-      29970.7,
-      30239.1,
-      30033.8,
-      30171.5,
-      30455.3,
-      29716.2,
-      29978.5
+      29228.7,
+      29398.5,
+      29857.5,
+      29094.8,
+      29094.4,
+      29326.8,
+      29245.3,
+      29206.4,
+      28968.6,
+      29467.3
     ],
-    "p50Ms": 30141.7,
-    "p95Ms": 30455.3,
-    "peakRssMB": 3004.4,
+    "p50Ms": 29228.7,
+    "p95Ms": 29857.5,
+    "peakRssMB": 3005.3,
     "peakArrayBuffersMB": 557.5,
     "checksum": 7818973,
     "bands": 16,
@@ -175,7 +175,7 @@
         "corePixels": 24000000,
         "inputAmplification": 1.004,
         "materializationBytes": 673536000,
-        "elapsedMs": 1187.5193999999901
+        "elapsedMs": 1160.103999999992
       },
       "halation-main": {
         "id": "halation-main",
@@ -193,7 +193,7 @@
         "corePixels": 24000000,
         "inputAmplification": 1.615,
         "materializationBytes": 908160000,
-        "elapsedMs": 13455.78079999995
+        "elapsedMs": 12940.880800000043
       },
       "bloom-main+highlight-protection-main": {
         "id": "bloom-main+highlight-protection-main",
@@ -218,7 +218,7 @@
         "corePixels": 24000000,
         "inputAmplification": 1.304,
         "materializationBytes": 788736000,
-        "elapsedMs": 5459.305999999982
+        "elapsedMs": 5308.9216000000015
       },
       "film-resolution-main": {
         "id": "film-resolution-main",
@@ -236,7 +236,7 @@
         "corePixels": 24000000,
         "inputAmplification": 1.003,
         "materializationBytes": 673152000,
-        "elapsedMs": 3248.87089999998
+        "elapsedMs": 3297.961100000015
       },
       "grain-main": {
         "id": "grain-main",
@@ -254,7 +254,7 @@
         "corePixels": 24000000,
         "inputAmplification": 1,
         "materializationBytes": 672000000,
-        "elapsedMs": 5720.420299999998
+        "elapsedMs": 5888.0139999999665
       }
     },
     "nodeTimingsMs": {
@@ -372,9 +372,9 @@
       }
     },
     "timings": {
-      "total": 29232.27529999998,
+      "total": 28714.823399999994,
       "read": 0,
-      "process": 29232.27529999998,
+      "process": 28714.823399999994,
       "quantize": 0,
       "write": 0,
       "perNode": {
@@ -398,8 +398,8 @@
       "fusionCount": 2,
       "stepLatencyMs": {
         "count": 15833,
-        "total": 28531.412299996417,
-        "max": 35.01190000004135
+        "total": 28204.10730000399,
+        "max": 42.960599999991246
       },
       "work": {
         "pixelVisits": 0,
@@ -430,8 +430,8 @@
     "pixelVisitFactor": 0,
     "stepLatencyMs": {
       "count": 15833,
-      "total": 28531.412299996417,
-      "max": 35.01190000004135
+      "total": 28204.10730000399,
+      "max": 42.960599999991246
     },
     "recommendedPf9Segments": [
       [
@@ -519,7 +519,7 @@
         "corePixels": 24000000,
         "inputAmplification": 1.004,
         "materializationBytes": 673536000,
-        "elapsedMs": 1187.5193999999901
+        "elapsedMs": 1160.103999999992
       },
       "halation-main": {
         "id": "halation-main",
@@ -537,7 +537,7 @@
         "corePixels": 24000000,
         "inputAmplification": 1.615,
         "materializationBytes": 908160000,
-        "elapsedMs": 13455.78079999995
+        "elapsedMs": 12940.880800000043
       },
       "bloom-main+highlight-protection-main": {
         "id": "bloom-main+highlight-protection-main",
@@ -562,7 +562,7 @@
         "corePixels": 24000000,
         "inputAmplification": 1.304,
         "materializationBytes": 788736000,
-        "elapsedMs": 5459.305999999982
+        "elapsedMs": 5308.9216000000015
       },
       "film-resolution-main": {
         "id": "film-resolution-main",
@@ -580,7 +580,7 @@
         "corePixels": 24000000,
         "inputAmplification": 1.003,
         "materializationBytes": 673152000,
-        "elapsedMs": 3248.87089999998
+        "elapsedMs": 3297.961100000015
       },
       "grain-main": {
         "id": "grain-main",
@@ -598,102 +598,17 @@
         "corePixels": 24000000,
         "inputAmplification": 1,
         "materializationBytes": 672000000,
-        "elapsedMs": 5720.420299999998
+        "elapsedMs": 5888.0139999999665
       }
     },
     "bandInputAmplification": 5.926,
     "pixelVisitFactor": 0,
     "stepLatencyMs": {
       "count": 15833,
-      "total": 28531.412299996417,
-      "max": 35.01190000004135
+      "total": 28204.10730000399,
+      "max": 42.960599999991246
     },
     "recommendation": "PF-9/PF-10 segmented execution is enabled for the selected resident plan. Re-run the formal 24MP 2+10 gate and Photoshop UDT matrix before starting PF-11; no algorithm or planner changes are included here."
-  },
-  "pf11Decision": {
-    "implemented": true,
-    "optimizations": [
-      "four-column resumable van Vliet vertical traversal",
-      "same-scale downsample reuse",
-      "redundant validation and interior-init traversal removal",
-      "physical Bloom plus Highlight Protection fusion with logical attribution",
-      "debug dual-run fusion bypass"
-    ],
-    "profiled6MP": {
-      "beforeReport": "tests/performance-baselines/pf11-pre-6mp-profile.json",
-      "afterReport": "tests/performance-baselines/pf11-post-6mp-profile.json",
-      "beforeP95Ms": 7274.4,
-      "afterP95Ms": 7064.4,
-      "beforePixelVisits": 1169242998,
-      "afterPixelVisits": 1016430498,
-      "pixelVisitReduction": 0.13069353441618814,
-      "elapsedReduction": 0.02886836027713624
-    },
-    "formal24MP": {
-      "pf10P95Ms": 30858,
-      "currentScalarP50Ms": 30141.7,
-      "currentScalarP95Ms": 30455.3,
-      "p95SpeedupFactor": 1.0132226574684866,
-      "targetSpeedupFactorMin": 1.3,
-      "targetMet": false
-    },
-    "conclusion": "PF-11 materially reduced measured traversal but did not reach the 1.3x end-to-end target. Preserve the frozen visual algorithm and treat the remaining cost as CPU and memory-traffic ceiling evidence."
-  },
-  "pf12Decision": {
-    "scalarReport": "tests/performance-data.json",
-    "simdReport": "tests/performance-baselines/pf12-qualified-24mp-simd.json",
-    "qualificationReport": "tests/performance-baselines/pf12-qualified-24mp-qualification.json",
-    "sourceFingerprint": "080124b3a7ddce86cd4224e15eb3fda0eb61ecea9ef9295bbd4826e6efb79b39",
-    "scalar": {
-      "p50Ms": 30141.7,
-      "p95Ms": 30455.3,
-      "checksum": 7818973,
-      "allocationCount": 2
-    },
-    "simd": {
-      "p50Ms": 26152.7,
-      "p95Ms": 26389.1,
-      "checksum": 7818973,
-      "allocationCount": 2
-    },
-    "p50Speedup": 0.15252727251870746,
-    "p95Speedup": 0.15408634625659845,
-    "requiredP95Speedup": 0.1,
-    "qualified": true,
-    "autoPromoted": true,
-    "artifactBound": true,
-    "artifacts": {
-      "scalarSha256": "94814efbdb90366778f0db6921041c888871b25caac34df05c273a756eab8f7b",
-      "simdSha256": "64f7d58370ca2407eb81c5aefce6219704a6f25dcd733cd1a99a5e3d2f41280f"
-    },
-    "correctness": {
-      "sameGraph": true,
-      "sameSourceFingerprint": true,
-      "sameChecksum": true,
-      "noFallback": true,
-      "noUnexpectedGrowth": true,
-      "fixedVectorGate": true
-    },
-    "preview": {
-      "report": "tests/performance-baselines/pf12-preview-qualified.json",
-      "uncachedP50Ms": 865.8,
-      "uncachedP95Ms": 911.6,
-      "uncachedStepP95Ms": 4.2018000000007305,
-      "cachedP50Ms": 169.7,
-      "cachedP95Ms": 202.1,
-      "cachedStepP95Ms": 2.3835999999992055,
-      "stepGateMs": 20,
-      "stepGatePassed": true,
-      "cachedPreviewGateMs": 500,
-      "cachedPreviewGatePassed": true
-    },
-    "gate0P95SpeedupFactor": 6.7404723920103375,
-    "pf12b": {
-      "mainPackageImplemented": false,
-      "status": "optional-independent-poc",
-      "reason": "Decision B remains passed and native/GPU requires a separate development ID, package and hardware qualification. Photoshop 27.1 / UXP 9.0.2 A/B testing found the qualified Node SIMD artifact host-unsafe, so the standard package is scalar-only and SIMD remains a Node QA artifact.",
-      "recommendedFirstSegment": "halation-main"
-    }
   },
   "backendFinal": {
     "available": true,
