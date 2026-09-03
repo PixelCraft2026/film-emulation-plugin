@@ -2,7 +2,7 @@
 // WASM dependency: both the JS reference executor and the native adapter use
 // the same little-endian layout and validation rules.
 import { fnv1aUtf8 } from './seed.js';
-import { createHalationParams, resolveSigmaParams, thresholdLinear } from './params.js';
+import { createHalationParams, halationThresholdLinear, isHalationThresholdDisabled, resolveSigmaParams, thresholdLinear } from './params.js';
 
 // Kept local to avoid a renderPlan -> effectRegistry -> pipeline ->
 // wasmBackend -> commandBuffer initialization cycle.
@@ -171,9 +171,14 @@ function commandParams(node, plan, context) {
     Number(context.fullWidth ?? plan?.fullWidth ?? plan?.width ?? 1),
     Number(context.fullHeight ?? plan?.fullHeight ?? plan?.height ?? 1),
   ));
+  const thresholdDisabled = isHalationThresholdDisabled(resolved.threshold, resolved.thresholdUnits);
   return {
     ...resolved,
-    threshold: thresholdLinear(resolved.threshold, resolved.thresholdUnits),
+    // Resident scalar/WASM executors can bypass the entire Halation node at
+    // the semantic Threshold endpoint. This also avoids encoding Infinity or
+    // a host-dependent HDR ceiling in the finite command-buffer ABI.
+    strength: thresholdDisabled ? 0 : resolved.strength,
+    threshold: halationThresholdLinear(resolved.threshold, resolved.thresholdUnits),
     backgroundThreshold: thresholdLinear(resolved.backgroundThreshold, resolved.thresholdUnits),
     thresholdUnits: 'linear',
   };

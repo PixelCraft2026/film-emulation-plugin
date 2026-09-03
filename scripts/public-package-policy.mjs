@@ -5,6 +5,7 @@ export const PUBLIC_DIST_FILES = Object.freeze([
 ]);
 
 export const PUBLIC_PACKAGE_ENTRIES = Object.freeze([
+  'LICENSE',
   'manifest.json',
   'index.html',
   ...PUBLIC_DIST_FILES.map((name) => `dist/${name}`),

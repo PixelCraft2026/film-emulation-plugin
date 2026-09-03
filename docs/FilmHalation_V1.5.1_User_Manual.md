@@ -5,9 +5,9 @@
 Halation 引擎版本：1.5.1
 Photoshop 最低版本：23.3  
 测试平台范围：Windows 10/11；macOS 未验证，不纳入本 Beta 的支持声明
-最后核对：2026-09-02
+最后核对：2026-09-03
 
-> 文件名继续沿用 `FilmHalation_V1.5.1_User_Manual.md` 作为仓库历史路径；文档标题和内容以 Film Emulation V1.7 Public Beta 1 为准。本次为 Windows 测试版，仍需要真实 Photoshop 主机矩阵持续验证，不等于正式稳定版。
+> 文件名继续沿用 `FilmHalation_V1.5.1_User_Manual.md` 作为仓库历史路径；文档标题和内容以 Film Emulation V1.7 Public Beta 1 为准。本轮 Windows Photoshop 实机验收已由项目维护者汇总签核，但它仍是公开测试版，不等于正式稳定版。
 
 ## 1. 插件用途与边界
 
@@ -353,6 +353,7 @@ EV = log2(max(Y, 2^-24) / 0.18)
 - linear：Threshold 直接表示线性亮度值。
 - stops：换算公式为 `T = 0.18 × 2^EV`。
 - EV 示例：-2 = 0.045，0 = 0.18，+1 = 0.36，+2 = 0.72。
+- 主 Threshold 的 +3–+4 控件区间是 HDR 头部肩部：它从 +3 EV 连续加速延伸到更高的有效曝光阈值，并在 +4 进入“无光源”；Background Threshold 仍按显示值直接换算。
 - 切换单位时，当前 Threshold 和 Background Threshold 数字不会自动换算，必须重新调整。
 
 ### 5.4 Highlight Extraction（高光提取）
@@ -401,6 +402,8 @@ EV = log2(max(Y, 2^-24) / 0.18)
 
 - 调低：更多中等亮度、窗户、反射和灯光进入；画面更容易形成连续红雾。
 - 调高：只保留更亮的灯芯；弱光收敛，但可能只剩很细的高光点。
+- linear 0–0.9 保留原有线性阈值；0.9–1 是高精度 HDR 头部肩部，向右连续覆盖越来越高的浮点亮度，因此从最右向左移动时会先出现最高的 HDR 峰，再逐渐扩大到较低的高光区域。
+- 最右端（linear 1 或 +4 EV）是明确的“无光源”端点：所有有限的 32 位 HDR 高光都被排除，Halation 输出逐样本保持输入；端点之前仍按连续的 HDR 曝光坐标响应。
 - 它决定“谁能参与”，不直接决定最终光晕有多红或多宽。
 
 如果强灯不够明显但弱窗已经很多，不要继续降低 Threshold；优先提高 Amplify、Source Expansion 或 Strong Core。
@@ -992,7 +995,7 @@ Fit 整图预览会采用速度优先路径；100% 原生像素检查与 Apply �
 
 ### 11.4 Public Beta 验证状态
 
-当前代码进入 `V1.7 Public Beta 1` Windows 测试版：typecheck、Node 单元/数值测试、manifest validation、bundle build 和 QA 代理矩阵均纳入门禁；公开安装身份为 `com.cheukwing.filmemulation` / `filmEmulationPanel` / 1.7.0，唯一安装包为 `FilmEmulation.ccx`。2026-09-02 当前源码 fingerprint `e1c5592c…` 的 24MP、16-bit、Quality、Balanced、2+10 scalar P50/P95 为 29.229/29.858s，峰值 RSS 约 3.01GB，无 fallback；checksum、graph hash、plan hash 和 scalar WASM SHA-256 与冻结基线一致，本轮没有算法输出变化。历史 SIMD P95 26.389s 只作为独立 Node QA 结果保留，Photoshop 标准包固定使用 scalar。Node 数据不能替代 Photoshop：Windows 10/11 上的 2024/2026 UDT、Photoshop 23.3、物理 16GB 主机以及真实 Imaging API 的 8/16/32 位、四种 profile、透明边缘、文档切换、取消和失败回滚矩阵仍需继续完成。macOS 未验证，不纳入本 Beta 的支持声明。
+当前代码进入 `V1.7 Public Beta 1` Windows 测试版：typecheck、Node 单元/数值测试、manifest validation、bundle build、QA 代理矩阵和单包策略均纳入门禁；公开安装身份为 `com.cheukwing.filmemulation` / `filmEmulationPanel` / 1.7.0，唯一安装包为 `FilmEmulation.ccx`。2026-09-03 源码 fingerprint `93b34eb6…` 的 24MP、16-bit、Quality、Balanced、2+10 scalar Node 结果为：默认发布配置 P50/P95 14.935/15.126s、完整六节点 graph 30.749/31.077s，完整 graph 峰值 RSS 约 3.01GB，无 fallback；缓存 1024px 完整预览 P50/P95 为 189.8/246.4ms。scalar WASM SHA-256 为 `94814efb…`，Photoshop 标准包固定使用 scalar。HDR Threshold 的右端响应是本轮有意的算法修复，不能把旧版在该范围的输出当作应保持不变的 golden。项目维护者已确认 Windows Photoshop 实机矩阵完成；由于采用汇总签核，没有逐项保存独立 PASS 和逐次计时记录。该结论足以进入 Windows Public Beta 分发，但不等同于正式稳定版。macOS 未验证，不纳入本 Beta 的支持声明。
 
 ## 12. 位深、工作空间与输出注意事项
 
@@ -1013,6 +1016,8 @@ Fit 整图预览会采用速度优先路径；100% 原生像素检查与 Apply �
 - 保留浮点 HDR 值，不执行整数抖动量化；
 - Threshold 仍然在线性光语义下工作；
 - E>1 的高光按曝光档继续扩展，不会压成与 clipped white 完全相同；
+- 面板 PNG 是无 ICC 的 SDR 图像，因此 Preview 会把 32 位线性像素按源图白点执行仅用于显示的保色相 HDR→SDR 映射并编码为 sRGB；该映射不会写入 graph、源图层或 Apply 的浮点结果；
+- 即使某些 Photoshop/UXP 版本没有在 `getPixels` 返回的 profile 名中附加 `Linear`，插件也会按 32 位 Imaging API 像素契约处理，避免重复 gamma 解码；
 - 若 Highlight Rolloff 非零，当前实现仍会应用用户指定的输出软肩。
 
 ### 12.4 Rec.2020 与其他宽色域
@@ -1083,7 +1088,7 @@ Highlight Protection 只消费最近前置 Bloom 的 `bloomContribution`。如�
 
 ### 13.11 为什么名称是 Public Beta 1
 
-当前 package/manifest 与 graph 均为 1.7.0，公开名称使用 `Film Emulation V1.7 Public Beta 1` 来明确发布通道，并在界面和文档中标注为 Windows 测试版。功能和自动门禁已经进入公开测试阶段，但 Windows 10/11 上的 Photoshop 23.3、物理 16GB、真实 Preview/Apply/cancel 和 2024/2026 UDT 仍需继续覆盖，因此尚不称为正式稳定版；macOS 暂不在本 Beta 的支持声明内。
+当前 package/manifest 与 graph 均为 1.7.0，公开名称使用 `Film Emulation V1.7 Public Beta 1` 来明确发布通道，并在界面和文档中标注为 Windows 测试版。自动门禁和本轮 Windows Photoshop 实机验收均已完成，可以进入 Public Beta 分发；由于仍需收集更多真实设备和工作流反馈，因此尚不称为正式稳定版。macOS 暂不在本 Beta 的支持声明内。
 
 ## 14. 推荐调参顺序速查
 

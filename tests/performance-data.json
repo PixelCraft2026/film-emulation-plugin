@@ -1,11 +1,11 @@
 {
-  "generatedAt": "2026-09-01T21:50:02.034Z",
+  "generatedAt": "2026-09-02T21:01:30.147Z",
   "node": "v24.19.0",
   "platform": "win32-x64",
   "cpu": "Intel64 Family 6 Model 151 Stepping 2, GenuineIntel",
-  "gitRevision": "ac533a0bbdf2f398c79cfd10ccc62007dd17f546",
+  "gitRevision": "fe6c28740c3f6d9a8503e33abf1fa9c10dc8e7f2",
   "workingTreeDirty": true,
-  "sourceFingerprint": "e1c5592c86c6c404fa47490ab6c66c0edfa13bb655e767b27ee37977d4dffe58",
+  "sourceFingerprint": "93b34eb61e923f3372ed32398178b1fc2179fc4425e2200a839800df69c282fe",
   "wasmSha256": "94814efbdb90366778f0db6921041c888871b25caac34df05c273a756eab8f7b",
   "wasmSimdSha256": "64f7d58370ca2407eb81c5aefce6219704a6f25dcd733cd1a99a5e3d2f41280f",
   "backend": {
@@ -76,32 +76,327 @@
     "memoryMode": "balanced",
     "deviceMemoryGB": 16,
     "backend": "scalar",
-    "profileResident": false,
-    "collectStepSamples": false,
+    "profileResident": true,
+    "collectStepSamples": true,
     "graphFixtures": [
       "v16-shipping-default",
       "v16-full"
     ]
+  },
+  "apply24MP": {
+    "label": "24MP streamed fast",
+    "warmups": 2,
+    "runs": 10,
+    "samplesMs": [
+      12897.1,
+      14321.9,
+      13154.6,
+      13001.1,
+      12533.5,
+      12653,
+      12341.9,
+      12493.6,
+      12504,
+      12750.6
+    ],
+    "p50Ms": 12653,
+    "p95Ms": 14321.9,
+    "peakRssMB": 2269.1,
+    "peakArrayBuffersMB": 2205.4,
+    "checksum": 8354496,
+    "bands": 1,
+    "memoryMode": "high",
+    "graphHash": null,
+    "planHash": null,
+    "backend": null,
+    "backendVariant": null,
+    "executionMode": null,
+    "execution": null,
+    "segments": null,
+    "nodeTimingsMs": {},
+    "copies": {
+      "inputBytes": 0,
+      "outputBytes": 0,
+      "count": 0
+    },
+    "passes": {
+      "fullPixelPasses": 0,
+      "perNode": {}
+    },
+    "timings": {
+      "total": 12653,
+      "read": 0,
+      "process": 12653,
+      "quantize": 0,
+      "write": 0,
+      "perNode": {},
+      "perStage": {}
+    },
+    "scheduler": null,
+    "bandInputAmplification": null,
+    "pixelVisitFactor": null,
+    "fallback": null
+  },
+  "preview1024": {
+    "label": "1024px preview fast",
+    "warmups": 2,
+    "runs": 10,
+    "samplesMs": [
+      452.3,
+      480.7,
+      461.8,
+      395.7,
+      393.8,
+      416.4,
+      401.3,
+      449.9,
+      395.9,
+      411.4
+    ],
+    "p50Ms": 411.4,
+    "p95Ms": 480.7,
+    "peakRssMB": 0,
+    "peakArrayBuffersMB": 0,
+    "checksum": 4.315698623657227,
+    "bands": 1,
+    "memoryMode": "n/a",
+    "graphHash": null,
+    "planHash": null,
+    "backend": null,
+    "backendVariant": null,
+    "executionMode": null,
+    "execution": null,
+    "segments": null,
+    "nodeTimingsMs": {},
+    "copies": {
+      "inputBytes": 0,
+      "outputBytes": 0,
+      "count": 0
+    },
+    "passes": {
+      "fullPixelPasses": 0,
+      "perNode": {}
+    },
+    "timings": {
+      "total": 411.4,
+      "read": 0,
+      "process": 411.4,
+      "quantize": 0,
+      "write": 0,
+      "perNode": {},
+      "perStage": {}
+    },
+    "scheduler": null,
+    "bandInputAmplification": null,
+    "pixelVisitFactor": null,
+    "fallback": null
+  },
+  "v16ShippingDefault": {
+    "label": "24MP V1.7 resident shipping-default Quality Balanced",
+    "warmups": 2,
+    "runs": 10,
+    "samplesMs": [
+      14760.9,
+      15024.3,
+      15125.5,
+      14935.2,
+      14716.7,
+      14991.5,
+      14560.5,
+      15070.9,
+      14953.6,
+      14696
+    ],
+    "p50Ms": 14935.2,
+    "p95Ms": 15125.5,
+    "peakRssMB": 2633.5,
+    "peakArrayBuffersMB": 557.5,
+    "checksum": 8354470,
+    "bands": 2,
+    "memoryMode": "balanced",
+    "graphHash": "7ee22d73",
+    "planHash": "f8d3dc4b",
+    "backend": "wasm-resident",
+    "backendVariant": "wasm-resident-scalar",
+    "executionMode": "resident-segmented",
+    "execution": {
+      "mode": "resident-segmented",
+      "selected": {
+        "mode": "resident-segmented",
+        "valid": true,
+        "reason": "segment-local frame materialization",
+        "estimatedPeakBytes": 2737440576,
+        "estimatedKernelPixelVisits": 310080000,
+        "trafficBytes": 1580160000,
+        "bandCount": 4
+      },
+      "candidates": {
+        "wholeFrame": {
+          "mode": "whole-frame",
+          "valid": false,
+          "reason": "whole-frame resident layout",
+          "estimatedPeakBytes": 3792000576,
+          "estimatedKernelPixelVisits": 192000000,
+          "trafficBytes": 672000000,
+          "bandCount": 1
+        },
+        "residentSegmented": {
+          "mode": "resident-segmented",
+          "valid": true,
+          "reason": "segment-local frame materialization",
+          "estimatedPeakBytes": 2737440576,
+          "estimatedKernelPixelVisits": 310080000,
+          "trafficBytes": 1580160000,
+          "bandCount": 4
+        },
+        "legacyBanded": {
+          "mode": "legacy-banded",
+          "valid": true,
+          "reason": "compatibility fallback",
+          "estimatedPeakBytes": 1824000000,
+          "estimatedKernelPixelVisits": 192000000,
+          "trafficBytes": 672000000,
+          "bandCount": 4
+        }
+      },
+      "persistentFrameBytes": 672000000,
+      "fixedBytes": 1601760576,
+      "hostReadBytes": 48000000,
+      "commandBytes": 576,
+      "stagingBytes": 305760000,
+      "wasmLimit": 4294967295
+    },
+    "segments": {
+      "halation-main": {
+        "id": "halation-main",
+        "nodeIds": [
+          "halation-main"
+        ],
+        "transients": {
+          "reads": [],
+          "writes": []
+        },
+        "bands": 4,
+        "inputHalo": 410,
+        "generatedFieldHalo": 0,
+        "inputPixels": 38760000,
+        "corePixels": 24000000,
+        "inputAmplification": 1.615,
+        "materializationBytes": 908160000,
+        "elapsedMs": 13886.454399999988
+      }
+    },
+    "nodeTimingsMs": {
+      "halation": {
+        "samples": [
+          13706.4,
+          14051.3,
+          14161.8,
+          13981.4,
+          13732.9,
+          14010,
+          13595,
+          14101.8,
+          13941.3,
+          13723.1
+        ],
+        "p50": 13941.3,
+        "p95": 14161.8
+      }
+    },
+    "copies": {
+      "inputBytes": 384000000,
+      "outputBytes": 288000000,
+      "count": 2
+    },
+    "passes": {
+      "fullPixelPasses": 1,
+      "perNode": {
+        "halation-main": 1
+      }
+    },
+    "timings": {
+      "total": 14015.820000000007,
+      "read": 0,
+      "process": 14015.820000000007,
+      "quantize": 0,
+      "write": 0,
+      "perNode": {
+        "halation-main": 13723.06470000028
+      },
+      "perStage": {
+        "halation-main.extract": 2136.2273000002024,
+        "halation-main.sourceExpansion": 1945.2262000010815,
+        "halation-main.diffuse[0,0]": 839.7845999990241,
+        "halation-main.diffuse[0,1]": 517.9113999995752,
+        "halation-main.diffuse[0,2]": 483.9426000008243,
+        "halation-main.diffuse[1,0]": 846.7940999991843,
+        "halation-main.diffuse[1,1]": 724.8972000001813,
+        "halation-main.diffuse[1,2]": 605.7221000000136,
+        "halation-main.diffuse[2,0]": 841.24599999981,
+        "halation-main.diffuse[2,1]": 892.1950999990222,
+        "halation-main.diffuse[2,2]": 743.0124000004143,
+        "halation-main.interiorProtection": 723.1677999999956,
+        "halation-main.globalDiffusion": 1143.317800000892,
+        "halation-main.composite": 1279.6201000000583,
+        "resident.command": 1.0893000001087785,
+        "resident.upload": 62.34549999999581,
+        "resident.materialize": 54.04570000007516,
+        "resident.segmentCommit": 31.8625999999349,
+        "resident.yield": 16.485299999534618,
+        "resident.scheduler": 60.159300000057556,
+        "resident.download": 66.76760000002105
+      }
+    },
+    "scheduler": {
+      "stepCalls": 1660,
+      "maxStepWork": 262144,
+      "plannedArenaFloats": 207480000,
+      "actualArenaFloats": 207480000,
+      "plannedTransientFloats": 76440000,
+      "actualTransientFloats": 76440000,
+      "allocationCount": 2,
+      "fusionCount": 0,
+      "stepLatencyMs": {
+        "count": 7600,
+        "total": 13723.06470000028,
+        "max": 18.089399999997113,
+        "p50": 0.7861000000266358,
+        "p95": 7.783299999951851
+      },
+      "work": {
+        "pixelVisits": 1987659126,
+        "pixelsRead": 6451297544,
+        "pixelsWritten": 2762103000,
+        "convolutionTaps": 2303977544,
+        "downsamplePixels": 23019000,
+        "upsamplePixels": 232560000
+      },
+      "memoryGeneration": 3
+    },
+    "bandInputAmplification": 1.615,
+    "pixelVisitFactor": 82.81913025,
+    "fallback": null
   },
   "v16Full": {
     "label": "6000x4000 V1.7 resident full Quality Balanced",
     "warmups": 2,
     "runs": 10,
     "samplesMs": [
-      29228.7,
-      29398.5,
-      29857.5,
-      29094.8,
-      29094.4,
-      29326.8,
-      29245.3,
-      29206.4,
-      28968.6,
-      29467.3
+      30973.3,
+      31076.9,
+      30944.7,
+      30749.2,
+      30828.5,
+      30196,
+      30182.5,
+      30819.5,
+      30409.5,
+      30734.5
     ],
-    "p50Ms": 29228.7,
-    "p95Ms": 29857.5,
-    "peakRssMB": 3005.3,
+    "p50Ms": 30749.2,
+    "p95Ms": 31076.9,
+    "peakRssMB": 3013.9,
     "peakArrayBuffersMB": 557.5,
     "checksum": 7818973,
     "bands": 16,
@@ -175,7 +470,7 @@
         "corePixels": 24000000,
         "inputAmplification": 1.004,
         "materializationBytes": 673536000,
-        "elapsedMs": 1160.103999999992
+        "elapsedMs": 1205.9155000000028
       },
       "halation-main": {
         "id": "halation-main",
@@ -193,7 +488,7 @@
         "corePixels": 24000000,
         "inputAmplification": 1.615,
         "materializationBytes": 908160000,
-        "elapsedMs": 12940.880800000043
+        "elapsedMs": 13804.035600000061
       },
       "bloom-main+highlight-protection-main": {
         "id": "bloom-main+highlight-protection-main",
@@ -218,7 +513,7 @@
         "corePixels": 24000000,
         "inputAmplification": 1.304,
         "materializationBytes": 788736000,
-        "elapsedMs": 5308.9216000000015
+        "elapsedMs": 5824.708600000013
       },
       "film-resolution-main": {
         "id": "film-resolution-main",
@@ -236,7 +531,7 @@
         "corePixels": 24000000,
         "inputAmplification": 1.003,
         "materializationBytes": 673152000,
-        "elapsedMs": 3297.961100000015
+        "elapsedMs": 3390.6816999999573
       },
       "grain-main": {
         "id": "grain-main",
@@ -254,105 +549,105 @@
         "corePixels": 24000000,
         "inputAmplification": 1,
         "materializationBytes": 672000000,
-        "elapsedMs": 5888.0139999999665
+        "elapsedMs": 5699.380300000077
       }
     },
     "nodeTimingsMs": {
       "defringe": {
         "samples": [
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0
+          1195.4,
+          1137,
+          1093.8,
+          1177.5,
+          1146.5,
+          1126.9,
+          1116.8,
+          1089.4,
+          1117.3,
+          1139
         ],
-        "p50": 0,
-        "p95": 0
+        "p50": 1126.9,
+        "p95": 1195.4
       },
       "halation": {
         "samples": [
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0
+          13779.5,
+          13768.7,
+          13648.8,
+          13523.1,
+          13866.1,
+          13453.3,
+          13448.8,
+          13765.1,
+          13599,
+          13640.9
         ],
-        "p50": 0,
-        "p95": 0
+        "p50": 13640.9,
+        "p95": 13866.1
       },
       "bloom": {
         "samples": [
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0
+          5263,
+          5164.6,
+          5269.5,
+          5217.1,
+          5326.8,
+          5235,
+          5046.9,
+          5205.2,
+          5137.9,
+          5390.3
         ],
-        "p50": 0,
-        "p95": 0
+        "p50": 5217.1,
+        "p95": 5390.3
       },
       "highlightProtection": {
         "samples": [
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0
+          329.3,
+          339.7,
+          348.8,
+          344,
+          332.2,
+          354.2,
+          316.7,
+          372,
+          336.8,
+          327.3
         ],
-        "p50": 0,
-        "p95": 0
+        "p50": 336.8,
+        "p95": 372
       },
       "filmResolution": {
         "samples": [
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0
+          3307,
+          3261.5,
+          3290.6,
+          3269.8,
+          3274.2,
+          3237.1,
+          3172.9,
+          3286.6,
+          3214.2,
+          3305.2
         ],
-        "p50": 0,
-        "p95": 0
+        "p50": 3269.8,
+        "p95": 3307
       },
       "grain": {
         "samples": [
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0
+          5746.7,
+          6035.4,
+          5933.4,
+          5829.3,
+          5556.4,
+          5489.4,
+          5741.7,
+          5803.4,
+          5700.9,
+          5620.1
         ],
-        "p50": 0,
-        "p95": 0
+        "p50": 5741.7,
+        "p95": 6035.4
       }
     },
     "copies": {
@@ -372,24 +667,71 @@
       }
     },
     "timings": {
-      "total": 28714.823399999994,
+      "total": 30040.778900000034,
       "read": 0,
-      "process": 28714.823399999994,
+      "process": 30040.778900000034,
       "quantize": 0,
       "write": 0,
       "perNode": {
-        "defringe-main": 0,
-        "halation-main": 0,
-        "bloom-main": 0,
-        "highlight-protection-main": 0,
-        "film-resolution-main": 0,
-        "grain-main": 0
+        "defringe-main": 1138.978000001167,
+        "halation-main": 13640.884099999676,
+        "bloom-main": 5390.343199999188,
+        "highlight-protection-main": 327.325899999938,
+        "film-resolution-main": 3305.1511000015307,
+        "grain-main": 5620.059599999222
       },
-      "perStage": {}
+      "perStage": {
+        "defringe-main.extract": 46.70630000077654,
+        "defringe-main.blurY": 424.751200000057,
+        "defringe-main.blurCg": 444.2275000002701,
+        "defringe-main.composite": 223.29300000006333,
+        "halation-main.extract": 2126.290700000478,
+        "halation-main.sourceExpansion": 1974.6868999993894,
+        "halation-main.diffuse[0,0]": 836.733299996471,
+        "halation-main.diffuse[0,1]": 495.5176999998512,
+        "halation-main.diffuse[0,2]": 514.9693999981973,
+        "halation-main.diffuse[1,0]": 854.9007999999449,
+        "halation-main.diffuse[1,1]": 725.9773000011919,
+        "halation-main.diffuse[1,2]": 558.5472999999765,
+        "halation-main.diffuse[2,0]": 828.1920000010869,
+        "halation-main.diffuse[2,1]": 899.7089000010164,
+        "halation-main.diffuse[2,2]": 748.0339000027161,
+        "halation-main.interiorProtection": 720.401499999105,
+        "halation-main.globalDiffusion": 1079.6287000004668,
+        "halation-main.composite": 1277.2956999997841,
+        "bloom-main.extract": 241.99330000020564,
+        "bloom-main.diffuse[0,0]": 835.5322000009473,
+        "bloom-main.diffuse[0,1]": 442.87850000034086,
+        "bloom-main.diffuse[0,2]": 444.0956000010483,
+        "bloom-main.diffuse[1,0]": 815.6553999964381,
+        "bloom-main.diffuse[1,1]": 466.31520000030287,
+        "bloom-main.diffuse[1,2]": 411.61789999948815,
+        "bloom-main.diffuse[2,0]": 871.8353000010829,
+        "bloom-main.diffuse[2,1]": 471.6572999993805,
+        "bloom-main.diffuse[2,2]": 388.76249999995343,
+        "highlight-protection-main.protect[fusedBloomComposite]": 327.325899999938,
+        "film-resolution-main.weights": 360.4871000002604,
+        "film-resolution-main.channelExtract": 77.07329999969807,
+        "film-resolution-main.primaryBlur": 986.1494999987772,
+        "film-resolution-main.wideBlur": 1542.2208000016399,
+        "film-resolution-main.composite": 339.2204000011552,
+        "grain-main.init": 33.2402000001166,
+        "grain-main.fieldGenerate": 1018.7606000005035,
+        "grain-main.fieldBlur": 905.2151999992784,
+        "grain-main.fieldAccumulate": 1264.7150999993319,
+        "grain-main.composite": 2398.1284999999916,
+        "resident.command": 1.1664000001037493,
+        "resident.upload": 61.10320000001229,
+        "resident.materialize": 202.3525000003865,
+        "resident.segmentCommit": 124.68510000000242,
+        "resident.yield": 36.659299999359064,
+        "resident.scheduler": 137.26249999948777,
+        "resident.download": 54.807999999960884
+      }
     },
     "scheduler": {
-      "stepCalls": 15833,
-      "maxStepWork": 0,
+      "stepCalls": 323,
+      "maxStepWork": 262144,
       "plannedArenaFloats": 210216000,
       "actualArenaFloats": 210216000,
       "plannedTransientFloats": 137088000,
@@ -398,8 +740,81 @@
       "fusionCount": 2,
       "stepLatencyMs": {
         "count": 15833,
-        "total": 28204.10730000399,
-        "max": 42.960599999991246
+        "total": 29422.74190000072,
+        "max": 36.49050000007264,
+        "p50": 0.8216000000247732,
+        "p95": 5.023999999975786
+      },
+      "work": {
+        "pixelVisits": 4133373302,
+        "pixelsRead": 16672068799,
+        "pixelsWritten": 5588075480,
+        "convolutionTaps": 8767708491,
+        "downsamplePixels": 30354000,
+        "upsamplePixels": 420336000
+      },
+      "memoryGeneration": 3
+    },
+    "bandInputAmplification": 5.926,
+    "pixelVisitFactor": 172.22388758333332,
+    "fallback": null
+  },
+  "v16Preview1024Uncached": {
+    "label": "1024px V1.7 full uncached preview",
+    "warmups": 2,
+    "runs": 10,
+    "samplesMs": [
+      1107.1,
+      1059.4,
+      1028.6,
+      1004.9,
+      1005.1,
+      1017.8,
+      974.1,
+      1070,
+      975.5,
+      1047.1
+    ],
+    "p50Ms": 1017.8,
+    "p95Ms": 1107.1,
+    "peakRssMB": 0,
+    "peakArrayBuffersMB": 0,
+    "checksum": 4.454530715942383,
+    "bands": 1,
+    "memoryMode": "n/a",
+    "graphHash": "bfba75d0",
+    "planHash": "e3019f21",
+    "backend": null,
+    "backendVariant": null,
+    "executionMode": null,
+    "execution": null,
+    "segments": null,
+    "nodeTimingsMs": {},
+    "copies": {
+      "inputBytes": 0,
+      "outputBytes": 0,
+      "count": 0
+    },
+    "passes": {
+      "fullPixelPasses": 0,
+      "perNode": {}
+    },
+    "timings": {
+      "total": 1042,
+      "read": 0,
+      "process": 1042,
+      "quantize": 0,
+      "write": 0,
+      "perNode": {},
+      "perStage": {}
+    },
+    "scheduler": {
+      "stepLatencyMs": {
+        "count": 156,
+        "total": 245.30979999923147,
+        "max": 28.836099999956787,
+        "p50": 0.7854999999981374,
+        "p95": 4.430500000016764
       },
       "work": {
         "pixelVisits": 0,
@@ -408,30 +823,162 @@
         "convolutionTaps": 0,
         "downsamplePixels": 0,
         "upsamplePixels": 0
-      },
-      "memoryGeneration": 3
+      }
     },
-    "bandInputAmplification": 5.926,
+    "bandInputAmplification": null,
+    "pixelVisitFactor": 0,
+    "fallback": null
+  },
+  "v16Preview1024Cached": {
+    "label": "1024px V1.7 full cached preview",
+    "warmups": 2,
+    "runs": 10,
+    "samplesMs": [
+      178.2,
+      161,
+      189.8,
+      207.2,
+      246.4,
+      208.9,
+      227.6,
+      193.7,
+      182.8,
+      181
+    ],
+    "p50Ms": 189.8,
+    "p95Ms": 246.4,
+    "peakRssMB": 0,
+    "peakArrayBuffersMB": 0,
+    "checksum": 4.454530715942383,
+    "bands": 1,
+    "memoryMode": "n/a",
+    "graphHash": "bfba75d0",
+    "planHash": "e3019f21",
+    "backend": null,
+    "backendVariant": null,
+    "executionMode": null,
+    "execution": null,
+    "segments": null,
+    "nodeTimingsMs": {},
+    "copies": {
+      "inputBytes": 0,
+      "outputBytes": 0,
+      "count": 0
+    },
+    "passes": {
+      "fullPixelPasses": 0,
+      "perNode": {}
+    },
+    "timings": {
+      "total": 175,
+      "read": 0,
+      "process": 175,
+      "quantize": 0,
+      "write": 0,
+      "perNode": {},
+      "perStage": {}
+    },
+    "scheduler": {
+      "stepLatencyMs": {
+        "count": 28,
+        "total": 16.273000000277534,
+        "max": 3.5384000000776723,
+        "p50": 0.10869999998249114,
+        "p95": 2.51859999995213
+      },
+      "work": {
+        "pixelVisits": 0,
+        "pixelsRead": 0,
+        "pixelsWritten": 0,
+        "convolutionTaps": 0,
+        "downsamplePixels": 0,
+        "upsamplePixels": 0
+      }
+    },
+    "bandInputAmplification": null,
     "pixelVisitFactor": 0,
     "fallback": null
   },
   "pf8HotspotDecision": {
-    "topFiveNodePhases": [],
-    "stageShare": {},
+    "topFiveNodePhases": [
+      {
+        "phase": "grain-main.composite",
+        "elapsedMs": 2398.1284999999916
+      },
+      {
+        "phase": "halation-main.extract",
+        "elapsedMs": 2126.290700000478
+      },
+      {
+        "phase": "halation-main.sourceExpansion",
+        "elapsedMs": 1974.6868999993894
+      },
+      {
+        "phase": "film-resolution-main.wideBlur",
+        "elapsedMs": 1542.2208000016399
+      },
+      {
+        "phase": "halation-main.composite",
+        "elapsedMs": 1277.2956999997841
+      }
+    ],
+    "stageShare": {
+      "grain-main.composite": 0.07982910523002414,
+      "halation-main.extract": 0.07078014545090493,
+      "halation-main.sourceExpansion": 0.06573354527766213,
+      "film-resolution-main.wideBlur": 0.05133757700276001,
+      "halation-main.composite": 0.04251872776839959,
+      "grain-main.fieldAccumulate": 0.04209994368685728,
+      "halation-main.globalDiffusion": 0.035938771880527555,
+      "grain-main.fieldGenerate": 0.03391258939695809,
+      "film-resolution-main.primaryBlur": 0.032827028329773966,
+      "grain-main.fieldBlur": 0.030132880475987837,
+      "halation-main.diffuse[2,1]": 0.029949586293883192,
+      "bloom-main.diffuse[2,0]": 0.029021727529211366,
+      "halation-main.diffuse[1,0]": 0.028458010454580587,
+      "halation-main.diffuse[0,0]": 0.027853249171128185,
+      "bloom-main.diffuse[0,0]": 0.027813266852443244,
+      "halation-main.diffuse[2,0]": 0.02756892565129481,
+      "bloom-main.diffuse[1,0]": 0.02715160624535062,
+      "halation-main.diffuse[2,2]": 0.024900616009084747,
+      "halation-main.diffuse[1,1]": 0.024166394034516564,
+      "halation-main.interiorProtection": 0.02398078633038054,
+      "halation-main.diffuse[1,2]": 0.018592969971227207,
+      "halation-main.diffuse[0,2]": 0.017142345134007052,
+      "halation-main.diffuse[0,1]": 0.016494835292032013,
+      "bloom-main.diffuse[2,1]": 0.015700568269865333,
+      "bloom-main.diffuse[1,1]": 0.015522739991282394,
+      "defringe-main.blurCg": 0.0147874827573219,
+      "bloom-main.diffuse[0,2]": 0.014783092058942847,
+      "bloom-main.diffuse[0,1]": 0.01474257713072614,
+      "defringe-main.blurY": 0.014139154028394933,
+      "bloom-main.diffuse[1,2]": 0.01370197162229664,
+      "bloom-main.diffuse[2,2]": 0.012941159125536289,
+      "film-resolution-main.weights": 0.011999925208339387,
+      "film-resolution-main.composite": 0.011291997492154067,
+      "highlight-protection-main.protect[fusedBloomComposite]": 0.010896052365670771,
+      "bloom-main.extract": 0.008055493527839432,
+      "defringe-main.composite": 0.007432996352836347,
+      "film-resolution-main.channelExtract": 0.0025656225577991914,
+      "defringe-main.extract": 0.0015547632821456732,
+      "grain-main.init": 0.001106502601372848
+    },
     "memoryTraffic": {
-      "pixelVisits": 0,
-      "pixelsRead": 0,
-      "pixelsWritten": 0,
-      "convolutionTaps": 0,
-      "downsamplePixels": 0,
-      "upsamplePixels": 0
+      "pixelVisits": 4133373302,
+      "pixelsRead": 16672068799,
+      "pixelsWritten": 5588075480,
+      "convolutionTaps": 8767708491,
+      "downsamplePixels": 30354000,
+      "upsamplePixels": 420336000
     },
     "bandInputAmplification": 5.926,
-    "pixelVisitFactor": 0,
+    "pixelVisitFactor": 172.22388758333332,
     "stepLatencyMs": {
       "count": 15833,
-      "total": 28204.10730000399,
-      "max": 42.960599999991246
+      "total": 29422.74190000072,
+      "max": 36.49050000007264,
+      "p50": 0.8216000000247732,
+      "p95": 5.023999999975786
     },
     "recommendedPf9Segments": [
       [
@@ -519,7 +1066,7 @@
         "corePixels": 24000000,
         "inputAmplification": 1.004,
         "materializationBytes": 673536000,
-        "elapsedMs": 1160.103999999992
+        "elapsedMs": 1205.9155000000028
       },
       "halation-main": {
         "id": "halation-main",
@@ -537,7 +1084,7 @@
         "corePixels": 24000000,
         "inputAmplification": 1.615,
         "materializationBytes": 908160000,
-        "elapsedMs": 12940.880800000043
+        "elapsedMs": 13804.035600000061
       },
       "bloom-main+highlight-protection-main": {
         "id": "bloom-main+highlight-protection-main",
@@ -562,7 +1109,7 @@
         "corePixels": 24000000,
         "inputAmplification": 1.304,
         "materializationBytes": 788736000,
-        "elapsedMs": 5308.9216000000015
+        "elapsedMs": 5824.708600000013
       },
       "film-resolution-main": {
         "id": "film-resolution-main",
@@ -580,7 +1127,7 @@
         "corePixels": 24000000,
         "inputAmplification": 1.003,
         "materializationBytes": 673152000,
-        "elapsedMs": 3297.961100000015
+        "elapsedMs": 3390.6816999999573
       },
       "grain-main": {
         "id": "grain-main",
@@ -598,15 +1145,17 @@
         "corePixels": 24000000,
         "inputAmplification": 1,
         "materializationBytes": 672000000,
-        "elapsedMs": 5888.0139999999665
+        "elapsedMs": 5699.380300000077
       }
     },
     "bandInputAmplification": 5.926,
-    "pixelVisitFactor": 0,
+    "pixelVisitFactor": 172.22388758333332,
     "stepLatencyMs": {
       "count": 15833,
-      "total": 28204.10730000399,
-      "max": 42.960599999991246
+      "total": 29422.74190000072,
+      "max": 36.49050000007264,
+      "p50": 0.8216000000247732,
+      "p95": 5.023999999975786
     },
     "recommendation": "PF-9/PF-10 segmented execution is enabled for the selected resident plan. Re-run the formal 24MP 2+10 gate and Photoshop UDT matrix before starting PF-11; no algorithm or planner changes are included here."
   },

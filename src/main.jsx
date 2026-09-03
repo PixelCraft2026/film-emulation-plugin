@@ -19,7 +19,7 @@ import {
 } from './io/preview.js';
 import { createHalationParams, createHalationPreset, createDefaultEffectGraph, createFilmResolutionParams, createGrainParams, deriveSeed, fmix32, SEED_GOLDEN_RATIO, normalizeFilmFormat } from './core/index.js';
 import { renderFilmDocumentToLayer, streamFilmGeometry } from './io/streamRender.js';
-import { resolveDocumentTRC, resolvePixelTRC, standardProfileName } from './io/colorPipeline.js';
+import { preparePanelPreviewSRGB, resolveDocumentTRC, resolveImagingPixelTRC, standardProfileName } from './io/colorPipeline.js';
 import { readDocumentPixels } from './io/imageAccess.js';
 import { createHeavyBlurPlaceholder } from './io/previewPlaceholder.js';
 import { documentComponentSize } from './io/bitDepth.js';
@@ -680,12 +680,30 @@ async function runPanelPreview(requestId = null, signal = null) {
     });
     const readMs = Date.now() - readStarted;
     if (signal?.aborted || (requestId !== null && requestId !== previewRequestId)) return;
+    const trc = {
+      display: resolveImagingPixelTRC(
+        doc,
+        sources.display.colorProfile,
+        sources.display.componentSize,
+        standardProfileName('sRGB'),
+      ),
+      effect: resolveImagingPixelTRC(
+        doc,
+        sources.effect.colorProfile,
+        sources.effect.componentSize,
+      ),
+    };
     const sourceChanged = !previewCache || previewCache.sourceKey !== sources.cacheKey;
     if (sourceChanged) {
       panel?.__handles?.resetPreviewPanVisual?.();
-      const sourcePixels = sources.mode === 'actual'
+      const sourcePixelsRaw = sources.mode === 'actual'
         ? inspectionSourcePreviewPixels(sources)
         : immediateSourcePreviewPixels(sources.display);
+      const sourceDisplay = preparePanelPreviewSRGB(sourcePixelsRaw.rgb, trc.display, {
+        componentSize: sources.display.componentSize,
+        alpha: sourcePixelsRaw.alpha,
+      });
+      const sourcePixels = { ...sourcePixelsRaw, rgb: sourceDisplay.rgb };
       const baseResult = {
         png: floatRgbToPng(sourcePixels.width, sourcePixels.height, sourcePixels.rgb, sourcePixels.alpha),
         dataUrl: null,
@@ -715,10 +733,6 @@ async function runPanelPreview(requestId = null, signal = null) {
       await new Promise((resolve) => setTimeout(resolve, 16));
       if (signal?.aborted || (requestId !== null && requestId !== previewRequestId)) return;
     }
-    const trc = {
-      display: resolvePixelTRC(doc, sources.display.colorProfile),
-      effect: resolvePixelTRC(doc, sources.effect.colorProfile),
-    };
     const objectUrl = supportsPreviewObjectUrl();
     const result = await renderPreviewIncremental(doc, renderParams, trc, previewCache, sources, {
       signal,

@@ -21,7 +21,14 @@ import {
   createLumaMask,
 } from '../core/index.js';
 import { readDocumentPixels } from './imageAccess.js';
-import { decodeToLinear, encodePanelPreviewSRGB, primariesMatrices, standardProfileName } from './colorPipeline.js';
+import {
+  decodeToLinear,
+  encodePanelPreviewSRGB,
+  panelSdrWhitePoint,
+  primariesMatrices,
+  standardProfileName,
+  toneMapPanelPreviewLinear,
+} from './colorPipeline.js';
 import { documentComponentSize } from './bitDepth.js';
 import {
   PREVIEW_EFFECT_MAX_EDGE,
@@ -705,7 +712,25 @@ export async function renderPreviewIncremental(doc, paramsOrDocument, trc, cache
     : displayWork.alpha;
   const outputWidth = outputCrop ? Math.floor(outputCrop.width) : w;
   const outputHeight = outputCrop ? Math.floor(outputCrop.height) : h;
-  const display = encodePanelPreviewSRGB(outputRgb);
+  // A 32-bit document is scene-linear HDR, while the panel PNG is untagged
+  // SDR. Derive one stable white point from the unchanged visible source and
+  // apply the mapping only to the PNG copy, never to graphResult/Apply data.
+  let sdrWhitePoint = c.panelSdrWhitePoint;
+  if (!Number.isFinite(sdrWhitePoint)) {
+    if (Number(displaySource.componentSize) === 32) {
+      const sourceOutputRgb = outputCrop
+        ? cropInterleavedRgb(baseLinear, w, h, outputCrop)
+        : baseLinear;
+      sdrWhitePoint = panelSdrWhitePoint(sourceOutputRgb, outputAlpha);
+    } else {
+      sdrWhitePoint = 1;
+    }
+    c.panelSdrWhitePoint = sdrWhitePoint;
+  }
+  const panelLinear = Number(displaySource.componentSize) === 32
+    ? toneMapPanelPreviewLinear(outputRgb, sdrWhitePoint)
+    : outputRgb;
+  const display = encodePanelPreviewSRGB(panelLinear);
   // 2.3：面板预览与画布写回保持一致的 soft-knee（>1 值软滚降；0=硬裁剪）
   if (p.rolloff > 0) applyRolloff(display, p.rolloff);
   throwIfCancelled(signal);

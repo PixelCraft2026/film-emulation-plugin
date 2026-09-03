@@ -4,7 +4,7 @@ import { processTiledWithTrc, processFilmBandWithTrcAsync } from './tileRender.j
 import { readDocumentPixels, encodeDisplayRgbaBuffer, writeDocumentRgbaBuffer } from './imageAccess.js';
 import { streamGeometry, streamFilmGeometry } from './streamGeometry.js';
 import { normalizeComponentSize } from './bitDepth.js';
-import { decodeToLinear, encodeFromLinear, documentProfileName, primariesMatrices, resolvePixelTRC } from './colorPipeline.js';
+import { decodeToLinear, encodeFromLinear, documentProfileName, primariesMatrices, resolveImagingPixelTRC } from './colorPipeline.js';
 import { applyMatrix3 } from '../core/color/primaries.js';
 import { BufferArena, FILM_GRAPH_VERSION, createFilmExecutor, createV17ResidentBackend } from '../core/index.js';
 export { streamGeometry, streamFilmGeometry } from './streamGeometry.js';
@@ -65,7 +65,7 @@ export async function renderDocumentToLayer(doc, sourceLayer, targetLayer, sourc
       bounds: bandBounds,
     });
     timings.readMs += nowMs() - started;
-    const sourceTrc = resolvePixelTRC(doc, source.colorProfile);
+    const sourceTrc = resolveImagingPixelTRC(doc, source.colorProfile, source.componentSize ?? componentSize);
     const bandProfile = String(source.colorProfile || documentProfileName(doc)).trim();
     if (!outputTrc) {
       outputTrc = sourceTrc;
@@ -155,7 +155,7 @@ async function renderSegmentedFilmDocumentToLayer(doc, sourceLayer, targetLayer,
       bounds: { left: sourceBounds.left, top: sourceBounds.top + band.y0, right: sourceBounds.right, bottom: sourceBounds.top + band.y1 },
     });
     uploadTimings.readMs += nowMs() - started;
-    const blockTrc = resolvePixelTRC(doc, source.colorProfile);
+    const blockTrc = resolveImagingPixelTRC(doc, source.colorProfile, source.componentSize ?? componentSize);
     const blockProfile = String(source.colorProfile || documentProfileName(doc)).trim();
     if (!sourceTrc) { sourceTrc = blockTrc; profileName = blockProfile; }
     else if (blockProfile && profileName && blockProfile !== profileName) throw new Error(`Imaging API changed color profile between upload bands: "${profileName}" vs "${blockProfile}"`);
@@ -169,7 +169,7 @@ async function renderSegmentedFilmDocumentToLayer(doc, sourceLayer, targetLayer,
     options.onProgress?.(0.25 * ((band.y1) / height));
     await yieldRenderControl(options.signal);
   }
-  if (!sourceTrc) sourceTrc = resolvePixelTRC(doc, '');
+  if (!sourceTrc) sourceTrc = resolveImagingPixelTRC(doc, '', componentSize);
   const started = nowMs();
   const rendered = await executor.renderAsync({ width, height, rgb: canonicalRgb, alpha: canonicalAlpha }, document, {
     fullWidth: Number(doc.width ?? width),
@@ -290,7 +290,7 @@ export async function renderFilmDocumentToLayer(doc, sourceLayer, targetLayer, s
     let started = nowMs();
     const source = await readDocumentPixels(doc, { componentSize, layerID: sourceLayer.id, layerName: sourceLayer.name, bounds: bandBounds });
     timings.readMs += nowMs() - started;
-    const sourceTrc = resolvePixelTRC(doc, source.colorProfile);
+    const sourceTrc = resolveImagingPixelTRC(doc, source.colorProfile, source.componentSize ?? componentSize);
     const bandProfile = String(source.colorProfile || documentProfileName(doc)).trim();
     if (!outputTrc) { outputTrc = sourceTrc; pixelProfile = bandProfile; }
     else if (bandProfile && pixelProfile && bandProfile !== pixelProfile) throw new Error(`Imaging API changed color profile between bands: "${pixelProfile}" vs "${bandProfile}"`);

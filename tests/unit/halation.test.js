@@ -15,6 +15,8 @@ import {
   blend,
   alphaFor,
   computeHalo,
+  halationThresholdLinear,
+  isHalationThresholdDisabled,
   thresholdLinear,
   sigmaPxFor,
   resolveSigmaParams,
@@ -253,6 +255,12 @@ test('T14 units (#3/#5): threshold stops 换算、σ 对角线单位、validate'
   assert.ok(Math.abs(thresholdLinear(1, 'stops') - 0.36) < 1e-9, '+1 stop = 0.36');
   assert.ok(Math.abs(thresholdLinear(-1, 'stops') - 0.09) < 1e-9, '-1 stop = 0.09');
   assert.equal(thresholdLinear(0.7, 'linear'), 0.7, 'linear 直通');
+  assert.equal(halationThresholdLinear(0.74, 'linear'), 0.74, 'Neutral preset remains on the legacy linear scale');
+  assert.equal(halationThresholdLinear(0.86, 'linear'), 0.86, 'CineStill preset remains on the legacy linear scale');
+  assert.equal(halationThresholdLinear(0.9, 'linear'), 0.9, 'HDR shoulder is continuous at its pivot');
+  assert.ok(Math.abs(halationThresholdLinear(0.95, 'linear') - 1) < 1e-12);
+  assert.ok(Math.abs(halationThresholdLinear(0.99, 'linear') - 1.8) < 1e-12);
+  assert.ok(Math.abs(halationThresholdLinear(3.5, 'stops') - 2.88) < 1e-9, 'upper stops shoulder expands +3.5 control to +4 effective EV');
   // σ 对角线单位：7‰ 对角线（3:2 图 6000×4000 → 对角线 7211px → σ≈50.5px）
   const d = createHalationParams({ sigma: 7, sigmaUnits: 'diagonal' });
   const px = sigmaPxFor(d, 6000, 4000);
@@ -291,6 +299,53 @@ test('T14 units (#3/#5): threshold stops 换算、σ 对角线单位、validate'
   const inLinear = extractStep({ width: 1, height: 1, rgb }, createHalationParams({ threshold: 0.7 }));
   assert.ok(inStops.S[0] > 0.7, `stops 0 档提取 Y=0.2 (S=${inStops.S[0].toFixed(3)})`);
   assert.equal(inLinear.S[0], 0, 'linear 0.7 不提取 Y=0.2');
+});
+
+test('T14b Threshold right endpoint excludes every finite HDR emitter', () => {
+  assert.equal(isHalationThresholdDisabled(1, 'linear'), true);
+  assert.equal(isHalationThresholdDisabled(4, 'stops'), true);
+  assert.equal(isHalationThresholdDisabled(0.99, 'linear'), false);
+  assert.equal(isHalationThresholdDisabled(3.9, 'stops'), false);
+
+  const rgb = new Float32Array([
+    0.25, 0.25, 0.25,
+    1, 1, 1,
+    16, 8, 4,
+    3.0e38, 2.0e38, 1.0e38,
+  ]);
+  for (const params of [
+    createHalationParams({ strength: 100, threshold: 1, thresholdUnits: 'linear' }),
+    createHalationParams({ strength: 100, threshold: 4, thresholdUnits: 'stops' }),
+  ]) {
+    const extracted = extractHighlights({ width: 4, height: 1, rgb }, params);
+    for (const field of [extracted.S, extracted.W, extracted.U, extracted.sourceR, extracted.sourceG, extracted.sourceB]) {
+      assert.ok(field && field.every((value) => value === 0), 'off endpoint leaves no source field');
+    }
+    const rendered = processHalation({ width: 4, height: 1, rgb }, params);
+    assert.deepEqual(rendered.rgb, rgb, 'off endpoint is sample-identical even for extreme finite HDR');
+  }
+
+  const belowEndpoint = createHalationParams({ threshold: 0.99, thresholdUnits: 'linear' });
+  const active = extractHighlights(
+    { width: 1, height: 1, rgb: new Float32Array([16, 16, 16]) },
+    belowEndpoint,
+  );
+  assert.ok(active.W[0] > 0, 'the HDR response remains continuous immediately before the endpoint');
+
+  const levels = [1.01, 1.05, 1.1, 1.2, 1.4, 1.8, 2.4, 3.2, 4.8, 8, 16];
+  const gradient = new Float32Array(levels.flatMap((value) => [value, value, value]));
+  const selectedCounts = [0.9999, 0.999, 0.998, 0.997, 0.995, 0.99, 0.98, 0.95].map((threshold) => {
+    const result = extractHighlights(
+      { width: levels.length, height: 1, rgb: gradient },
+      createHalationParams({ threshold, sourceSoftness: 0 }),
+    );
+    return Array.from(result.W).filter((value) => value > 0).length;
+  });
+  assert.deepEqual(
+    selectedCounts,
+    [0, 1, 2, 3, 4, 5, 7, 11],
+    'moving left through the HDR shoulder progressively admits the histogram tail instead of all HDR at once',
+  );
 });
 
 test('T15 exact threshold and independent softness never produce NaN', () => {

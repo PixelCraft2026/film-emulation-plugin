@@ -1,0 +1,76 @@
+name: Film Emulation Beta 问题反馈
+description: 报告 Public Beta 1 的预览、应用、色彩、性能或界面问题
+title: "[Beta] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢参与测试。请不要上传包含隐私或未获授权的原始照片；可使用裁切样片或屏幕录制。
+  - type: input
+    id: photoshop
+    attributes:
+      label: Photoshop 与 UXP 版本
+      description: 例如 Photoshop 27.1、UXP 9.0.2
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows、CPU 与内存
+      description: 例如 Windows 11 24H2、Intel i7、32GB
+    validations:
+      required: true
+  - type: input
+    id: document
+    attributes:
+      label: 文档信息
+      description: 尺寸、8/16/32 位、色彩空间、源图层类型
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 从打开文档开始，按顺序列出每一步
+      placeholder: |
+        1. 选择……
+        2. 打开……
+        3. 调整……
+    validations:
+      required: true
+  - type: textarea
+    id: settings
+    attributes:
+      label: 模块、预设与关键参数
+      description: 请注明是否为 CineStill 800T / Neutral，以及 Threshold、Sigma、Strength 等关键值
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期结果
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际结果
+      description: 请说明影响 Preview、Apply、源图层还是效果图层
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 截图、录屏与错误信息
+      description: 可拖入脱敏后的截图或录屏；请同时复制插件状态栏和错误文字
+  - type: checkboxes
+    id: source_safety
+    attributes:
+      label: 源图层安全
+      options:
+        - label: 我已检查源图层是否被修改，并在上文说明结果
+          required: true
+        - label: 我确认附件不包含隐私或未获授权的图像
+          required: true

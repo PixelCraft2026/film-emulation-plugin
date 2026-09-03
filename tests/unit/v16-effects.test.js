@@ -361,6 +361,37 @@ test('100% preview keeps the Photoshop color-managed Source as its visible base'
   assert.ok(Math.abs(decoded.data[2] - Math.round(displayRgb[2] * 255)) <= 1);
 });
 
+test('32-bit preview maps canonical HDR to an SDR PNG without changing render samples', async () => {
+  const width = 2;
+  const height = 1;
+  const rgb = new Float32Array([
+    0.18, 0.18, 0.18,
+    4, 2, 1,
+  ]);
+  const alpha = new Float32Array([1, 1]);
+  const graph = createDefaultEffectGraph(createHalationParams({ strength: 0 }), 0x12345678);
+  const linearTrc = { decode: (value) => value, encode: (value) => value, baseKey: 'sRGB' };
+  const result = await renderPreviewIncremental(
+    { width, height, bitsPerChannel: 32 },
+    { format: { gauge: '35mm', iso: 250 }, graph },
+    { display: linearTrc, effect: linearTrc },
+    null,
+    {
+      display: { width, height, rgb, alpha, componentSize: 32 },
+      effect: { width, height, rgb, alpha, componentSize: 32 },
+      cacheKey: 'hdr-to-sdr-panel',
+      previewScale: 1,
+      effectPreviewScale: 1,
+    },
+    { returnDataUrl: false },
+  );
+  const decoded = PNG.sync.read(Buffer.from(result.png));
+  assert.ok(decoded.data[0] > 90 && decoded.data[0] < 140, `18% linear gray remains visible (${decoded.data[0]})`);
+  assert.equal(decoded.data[4], 255, 'scene peak maps to SDR white');
+  assert.ok(decoded.data[5] > decoded.data[6] && decoded.data[6] > 0, 'HDR channel ordering remains intact');
+  assert.deepEqual(result.cache.graphResult.rgb, rgb, 'panel tone mapping does not alter canonical Preview/Apply samples');
+});
+
 test('100% Grain preview transfers the Apply-native gain onto the color-managed base', async () => {
   const width = 36;
   const height = 28;

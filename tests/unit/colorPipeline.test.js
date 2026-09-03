@@ -3,7 +3,20 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { trcNameFromProfile, resolveDocumentTRC, resolvePixelTRC, standardProfileName, imageDataWriteProfile, matchProfileName, lumaForProfileKey, encodePanelPreviewSRGB } from '../../src/io/colorPipeline.js';
+import {
+  encodePanelPreviewSRGB,
+  imageDataWriteProfile,
+  lumaForProfileKey,
+  matchProfileName,
+  panelSdrWhitePoint,
+  preparePanelPreviewSRGB,
+  resolveDocumentTRC,
+  resolveImagingPixelTRC,
+  resolvePixelTRC,
+  standardProfileName,
+  toneMapPanelPreviewLinear,
+  trcNameFromProfile,
+} from '../../src/io/colorPipeline.js';
 
 test('trcNameFromProfile: matches Rec.2020 and known bases', () => {
   assert.equal(trcNameFromProfile('sRGB IEC61966-2.1'), 'sRGB');
@@ -64,6 +77,48 @@ test('resolvePixelTRC: actual Imaging API profile overrides document profile', (
 
   const noReturnedProfile = resolvePixelTRC(doc, '');
   assert.equal(noReturnedProfile.profileKey, 'Rec2020', 'missing pixel profile falls back to document profile');
+});
+
+test('resolveImagingPixelTRC: native 32-bit pixels stay linear when the host omits its Linear suffix', () => {
+  const doc = { colorProfileName: 'ProPhoto RGB' };
+  const returnedPlain = resolveImagingPixelTRC(doc, 'sRGB IEC61966-2.1', 32, 'sRGB IEC61966-2.1');
+  assert.equal(returnedPlain.profileKey, 'linear');
+  assert.equal(returnedPlain.baseKey, 'sRGB', 'the actual/requested display primaries win over document primaries');
+  assert.equal(returnedPlain.decode(0.18), 0.18, 'scene-linear mid-gray is not gamma-decoded twice');
+
+  const missingNativeProfile = resolveImagingPixelTRC(doc, '', 32);
+  assert.equal(missingNativeProfile.profileKey, 'linear');
+  assert.equal(missingNativeProfile.baseKey, 'ProPhoto', 'native reads recover primaries from the document');
+
+  const sixteenBit = resolveImagingPixelTRC(doc, 'sRGB IEC61966-2.1', 16, 'sRGB IEC61966-2.1');
+  assert.equal(sixteenBit.profileKey, 'sRGB', '8/16-bit encoded pixels retain their declared TRC');
+});
+
+test('32-bit panel preparation encodes linear midtones and tone-maps HDR without changing hue ratios', () => {
+  const trc = resolveImagingPixelTRC(
+    { colorProfileName: 'sRGB IEC61966-2.1' },
+    'sRGB IEC61966-2.1',
+    32,
+    'sRGB IEC61966-2.1',
+  );
+  const linearSdr = new Float32Array([0.18, 0.18, 0.18]);
+  const preparedSdr = preparePanelPreviewSRGB(linearSdr, trc, { componentSize: 32 });
+  assert.equal(preparedSdr.whitePoint, 1);
+  assert.ok(Math.abs(preparedSdr.rgb[0] - 0.4613561) < 1e-6, 'linear 18% gray is encoded to visible sRGB gray');
+  assert.deepEqual(linearSdr, new Float32Array([0.18, 0.18, 0.18]), 'panel conversion does not mutate source pixels');
+
+  const hdr = new Float32Array([0.18, 0.12, 0.06, 4, 2, 1]);
+  assert.equal(panelSdrWhitePoint(hdr), 4);
+  assert.equal(
+    panelSdrWhitePoint(hdr, new Float32Array([1, 0])),
+    1,
+    'fully transparent hidden HDR does not change the visible display exposure',
+  );
+  const mapped = toneMapPanelPreviewLinear(hdr, 4);
+  assert.ok(mapped.every((value) => Number.isFinite(value) && value <= 1), 'HDR display copy fits the SDR PNG range');
+  assert.ok(Math.abs(mapped[3] / mapped[4] - 2) < 1e-6);
+  assert.ok(Math.abs(mapped[4] / mapped[5] - 2) < 1e-6, 'one per-pixel scale preserves hue ratios');
+  assert.deepEqual(hdr, new Float32Array([0.18, 0.12, 0.06, 4, 2, 1]), 'tone mapping never mutates canonical HDR');
 });
 
 test('resolveDocumentTRC: untagged/unknown falls back to sRGB with assumed flag', () => {

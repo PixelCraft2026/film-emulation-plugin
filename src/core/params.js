@@ -56,6 +56,69 @@ export const SIGMA_UNITS = Object.freeze(['pixels', 'diagonal']);
 /** 中灰基准（stops 模式换算：#3）。 */
 export const MIDDLE_GRAY = 0.18;
 
+/**
+ * The visible Threshold control has an explicit "no emitters" endpoint.
+ * Values below the endpoint retain the continuous SDR/HDR exposure model;
+ * the right-most value is intentionally semantic rather than another finite
+ * scene-light threshold, because 32-bit documents have no fixed upper bound.
+ */
+export const HALATION_THRESHOLD_OFF_ENDPOINT = Object.freeze({
+  linear: 1,
+  stops: 4,
+});
+
+/** Top-of-control shoulder: ordinary values below it keep their legacy meaning. */
+export const HALATION_THRESHOLD_HDR_SHOULDER = Object.freeze({
+  linear: 0.9,
+  stops: 3,
+});
+
+// Must remain finite after Float32 command-buffer encoding. The exact endpoint
+// bypasses Halation via strength=0, so this is only an ABI-safe placeholder.
+const HALATION_THRESHOLD_FINITE_CEILING = 1e30;
+
+/**
+ * Return true when the user-visible Threshold control is at its off endpoint.
+ * @param {number} v
+ * @param {'linear'|'stops'|string|undefined} units
+ */
+export function isHalationThresholdDisabled(v, units) {
+  const endpoint = units === 'stops'
+    ? HALATION_THRESHOLD_OFF_ENDPOINT.stops
+    : HALATION_THRESHOLD_OFF_ENDPOINT.linear;
+  return Number.isFinite(v) && v >= endpoint;
+}
+
+/**
+ * Convert the user-facing Halation Threshold to its physical linear-light
+ * value. The upper control shoulder expands continuously toward the unbounded
+ * 32-bit HDR domain, avoiding the old 1.000=off / 0.999=all-HDR discontinuity.
+ *
+ * Below 0.9 linear or +3 stops this is exactly the legacy conversion, so all
+ * built-in presets and ordinary SDR tuning retain their numerical meaning.
+ * @param {number} v
+ * @param {'linear'|'stops'|string|undefined} units
+ * @returns {number}
+ */
+export function halationThresholdLinear(v, units) {
+  if (isHalationThresholdDisabled(v, units)) return HALATION_THRESHOLD_FINITE_CEILING;
+  if (units === 'stops') {
+    const pivot = HALATION_THRESHOLD_HDR_SHOULDER.stops;
+    const endpoint = HALATION_THRESHOLD_OFF_ENDPOINT.stops;
+    const effectiveStops = v <= pivot
+      ? v
+      : pivot + ((v - pivot) * (endpoint - pivot)) / Math.max(1e-9, endpoint - v);
+    return Math.min(HALATION_THRESHOLD_FINITE_CEILING, MIDDLE_GRAY * Math.pow(2, Math.min(120, effectiveStops)));
+  }
+  const pivot = HALATION_THRESHOLD_HDR_SHOULDER.linear;
+  const endpoint = HALATION_THRESHOLD_OFF_ENDPOINT.linear;
+  if (v <= pivot) return v;
+  return Math.min(
+    HALATION_THRESHOLD_FINITE_CEILING,
+    pivot + ((v - pivot) * (endpoint - pivot)) / Math.max(1e-9, endpoint - v),
+  );
+}
+
 /** V1 默认参数（PRD §4.2 / TDD 默认值表）。 */
 export const DEFAULT_PARAMS = Object.freeze({
   /** 强度 0..100；α = strength/100 × ADDITIVE_SCALE */

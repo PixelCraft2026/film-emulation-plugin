@@ -64,6 +64,7 @@ const manifest = {
   })),
 };
 writeFileSync(join(stage, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
+copyFileSync(join(ROOT, 'LICENSE'), join(stage, 'LICENSE'));
 const indexHtml = readFileSync(join(ROOT, 'index.html'), 'utf8')
   .replace(/<title>[^<]*<\/title>/, `<title>${definition.htmlTitle}</title>`);
 writeFileSync(join(stage, 'index.html'), indexHtml);

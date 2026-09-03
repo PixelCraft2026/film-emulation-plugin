@@ -569,7 +569,7 @@ export function createPanel(handlers) {
       onInput: (v) => set({ strength: v }),
     }),
     createSlider({ id: 'sigma', label: STRINGS.sigma, value: params.sigma, min: params.sigmaUnits === 'diagonal' ? 0.1 : 0.5, max: params.sigmaUnits === 'diagonal' ? 10 : 50, step: params.sigmaUnits === 'diagonal' ? 0.1 : 0.5, curve: 'fine-min', curveExponent: 2.2, fineStepScale: 0.1, onInput: (v) => set({ sigma: v }) }),
-    createSlider({ id: 'threshold', label: STRINGS.threshold, value: params.threshold, min: params.thresholdUnits === 'stops' ? -4 : 0, max: params.thresholdUnits === 'stops' ? 4 : 1, step: params.thresholdUnits === 'stops' ? 0.1 : 0.01, curve: 'fine-max', curveExponent: 2.2, fineStepScale: 0.1, onInput: (v) => set({ threshold: v }) }),
+    createSlider({ id: 'threshold', label: STRINGS.threshold, value: params.threshold, min: params.thresholdUnits === 'stops' ? -4 : 0, max: params.thresholdUnits === 'stops' ? 4 : 1, step: params.thresholdUnits === 'stops' ? 0.1 : 0.01, curve: 'fine-max', curveExponent: 2.2, fineStepScale: 0.01, onInput: (v) => set({ threshold: v }) }),
   );
 
   {

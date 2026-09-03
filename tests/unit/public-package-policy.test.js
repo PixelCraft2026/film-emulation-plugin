@@ -8,6 +8,7 @@ import {
 
 test('public beta package is one scalar-only bundle without migration UI', () => {
   assert.deepEqual(PUBLIC_PACKAGE_ENTRIES, [
+    'LICENSE',
     'manifest.json',
     'index.html',
     'dist/main.js',

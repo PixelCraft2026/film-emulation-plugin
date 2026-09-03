@@ -9,7 +9,7 @@
  *  - 提供整图批量 decode（显示编码→线性）与 encode（线性→显示编码），
  *    decode 不 clamp（保留 32-bit HDR >1），encode 不 clamp（HDR 语义留到写回时按位深量化）。
  */
-import { getTRC, SPACE_TO_SRGB, SRGB_TO_SPACE } from '../core/index.js';
+import { applyMatrix3, getTRC, SPACE_TO_SRGB, SRGB_TO_SPACE } from '../core/index.js';
 
 /**
  * canonical space（#7）：算法统一在线性 sRGB primaries 执行——
@@ -158,6 +158,44 @@ export function resolvePixelTRC(doc, pixelProfileName) {
 }
 
 /**
+ * Resolve native-depth pixels returned by Photoshop Imaging API.
+ *
+ * Photoshop 32-bit RGB pixels are scene-linear Float32 samples even on host
+ * versions that omit the documented "Linear RGB Profile" suffix, or return
+ * only the requested base profile name. The component size is therefore part
+ * of the pixel contract here; it must not be inferred solely from a sometimes
+ * missing/mislabelled profile string.
+ *
+ * `requestedProfileName` is used only to recover primaries when getPixels did
+ * not return a profile (the panel display read explicitly requests sRGB).
+ */
+export function resolveImagingPixelTRC(doc, pixelProfileName, componentSize, requestedProfileName = '') {
+  const returnedName = String(pixelProfileName || '').trim();
+  const requestedName = String(requestedProfileName || '').trim();
+  const resolved = resolvePixelTRC(doc, returnedName || requestedName);
+  if (Number(componentSize) !== 32) return resolved;
+
+  const documentName = documentProfileName(doc);
+  const baseKey = trcNameFromProfile(returnedName)
+    ?? trcNameFromProfile(requestedName)
+    ?? trcNameFromProfile(documentName)
+    ?? 'sRGB';
+  const profileName = returnedName || requestedName || documentName;
+  const trc = getTRC('linear');
+  const assumed = !trcNameFromProfile(returnedName)
+    && !trcNameFromProfile(requestedName)
+    && !trcNameFromProfile(documentName);
+  return {
+    ...trc,
+    profileKey: 'linear',
+    baseKey,
+    profileName,
+    assumed,
+    note: `Photoshop 32-bit Imaging API pixels: linear ${baseKey}${assumed ? ' (assumed primaries)' : ''}.`,
+  };
+}
+
+/**
  * 批量 decode：显示编码 RGB → 线性 RGB（保留 HDR >1）。
  * @param {Float32Array} rgb 显示编码（w*h*3）
  * @param {{decode:(v:number)=>number}} trc
@@ -187,4 +225,69 @@ export function encodePanelPreviewSRGB(rgb) {
     throw new TypeError('Panel preview encoder requires an interleaved Float32 RGB buffer');
   }
   return encodeFromLinear(rgb, getTRC('sRGB'));
+}
+
+/** Find the visible scene white used by the panel-only HDR -> SDR display transform. */
+export function panelSdrWhitePoint(rgb, alpha = null) {
+  if (!(rgb instanceof Float32Array) || rgb.length % 3 !== 0) {
+    throw new TypeError('Panel SDR white-point analysis requires an interleaved Float32 RGB buffer');
+  }
+  if (alpha && (!(alpha instanceof Float32Array) || alpha.length * 3 !== rgb.length)) {
+    throw new TypeError('Panel SDR white-point alpha must match the RGB pixel count');
+  }
+  let white = 1;
+  for (let p = 0, pixel = 0; p < rgb.length; p += 3, pixel += 1) {
+    if (alpha && !(alpha[pixel] > 0)) continue;
+    for (let channel = 0; channel < 3; channel += 1) {
+      const value = rgb[p + channel];
+      if (!Number.isFinite(value)) throw new TypeError(`Panel preview contains a non-finite RGB sample at ${p + channel}`);
+      if (value > white) white = value;
+    }
+  }
+  return white;
+}
+
+/**
+ * Hue-preserving extended-Reinhard mapping for an untagged SDR panel PNG.
+ * It is identity for an SDR frame (whitePoint <= 1), maps the brightest HDR
+ * channel to 1, and applies one scale to each pixel so channel ratios survive.
+ * This never mutates the canonical HDR render used by Apply.
+ */
+export function toneMapPanelPreviewLinear(rgb, whitePoint) {
+  if (!(rgb instanceof Float32Array) || rgb.length % 3 !== 0) {
+    throw new TypeError('Panel HDR tone mapping requires an interleaved Float32 RGB buffer');
+  }
+  const output = new Float32Array(rgb);
+  const white = Number(whitePoint);
+  if (!(white > 1 + 1e-6) || !Number.isFinite(white)) return output;
+  const whiteSquared = white * white;
+  for (let p = 0; p < output.length; p += 3) {
+    const peak = Math.max(0, output[p], output[p + 1], output[p + 2]);
+    if (!(peak > 0)) continue;
+    const mappedPeak = (peak * (1 + peak / whiteSquared)) / (1 + peak);
+    const scale = mappedPeak / peak;
+    output[p] *= scale;
+    output[p + 1] *= scale;
+    output[p + 2] *= scale;
+  }
+  return output;
+}
+
+/**
+ * Convert Imaging API pixels into display-ready, untagged sRGB PNG samples.
+ * 32-bit HDR is tone-mapped only for this panel representation; SDR frames
+ * and the canonical/Apply buffers remain untouched.
+ */
+export function preparePanelPreviewSRGB(rgb, trc, options = {}) {
+  const linear = decodeToLinear(rgb, trc);
+  const { toSRGB } = primariesMatrices(trc?.baseKey);
+  if (toSRGB) applyMatrix3(linear, toSRGB);
+  const whitePoint = Number(options.componentSize) === 32 ? panelSdrWhitePoint(linear, options.alpha) : 1;
+  const displayLinear = Number(options.componentSize) === 32
+    ? toneMapPanelPreviewLinear(linear, whitePoint)
+    : linear;
+  return {
+    rgb: encodePanelPreviewSRGB(displayLinear),
+    whitePoint,
+  };
 }

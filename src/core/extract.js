@@ -1,4 +1,5 @@
 import { tryWasmMaxFilter } from './wasmBackend.js';
+import { halationThresholdLinear, isHalationThresholdDisabled } from './params.js';
 
 /**
  * 高光提取 — Y / M / S / G / W（PRD §5.2 / TDD §5）。
@@ -257,8 +258,13 @@ export function extractHighlights(input, params, options = {}) {
 
   const luma = options.luma ?? [LUMA_R, LUMA_G, LUMA_B];
   const spillMix = options.extraction === 'spill' ? (options.spillMix ?? 1) : 0;
-  // #3：thresholdUnits='stops' 时阈值按中灰基准曝光档位换算（跨位深/工作空间语义统一）
-  const T = params.thresholdUnits === 'stops' ? MIDDLE_GRAY * Math.pow(2, params.threshold) : params.threshold;
+  // #3：thresholdUnits='stops' 时阈值按中灰基准曝光档位换算（跨位深/工作空间语义统一）。
+  // 滑块最右端是明确的“无光源”端点，而不是一个仍可被 32-bit HDR 越过的有限阈值。
+  // Number.MAX_VALUE keeps all intermediate arithmetic finite while rejecting every Float32 pixel.
+  const sourceDisabled = isHalationThresholdDisabled(params.threshold, params.thresholdUnits);
+  const T = sourceDisabled
+    ? Number.MAX_VALUE
+    : halationThresholdLinear(params.threshold, params.thresholdUnits);
   const BT = params.thresholdUnits === 'stops' ? MIDDLE_GRAY * Math.pow(2, params.backgroundThreshold) : params.backgroundThreshold;
   const sourceSoftness = params.sourceSoftness ?? params.thresholdSoftness;
   const backgroundSoftness = params.backgroundSoftness ?? params.thresholdSoftness;

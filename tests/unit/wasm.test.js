@@ -759,6 +759,70 @@ test('resident Highlight Protection warns without Bloom and consumes the nearest
   resetWasmBackend();
 });
 
+test('resident scalar treats the Threshold right endpoint as exact Halation identity for HDR', async (t) => {
+  if (!existsSync(wasmPath)) {
+    t.skip('assets/film_core.wasm not built; run npm run build:wasm');
+    return;
+  }
+  await installWasmModule(readFileSync(wasmPath));
+  const width = 7;
+  const height = 5;
+  const rgb = new Float32Array(width * height * 3).fill(0.04);
+  rgb[(2 * width + 3) * 3] = 32;
+  rgb[(2 * width + 3) * 3 + 1] = 16;
+  rgb[(2 * width + 3) * 3 + 2] = 8;
+  const alpha = new Float32Array(width * height).fill(1);
+
+  for (const params of [
+    createHalationParams({ strength: 100, threshold: 1, thresholdUnits: 'linear' }),
+    createHalationParams({ strength: 100, threshold: 4, thresholdUnits: 'stops' }),
+  ]) {
+    const graph = createDefaultEffectGraph(params, 7);
+    const plan = createFilmRenderPlan({ width, height, graph, quality: 'fast', memoryMode: 'high' });
+    const resident = createV17ResidentBackend(plan);
+    assert.ok(resident, 'scalar resident backend is available');
+    const executor = createFilmExecutor(plan, { backend: 'wasm-resident', residentBackend: resident });
+    try {
+      const result = executor.render({ width, height, rgb, alpha }, { graph }, { quality: 'fast' });
+      assert.deepEqual(result.rgb, rgb);
+      assert.equal(result.alpha, alpha);
+    } finally {
+      executor.dispose();
+    }
+  }
+
+  const shoulderParams = createHalationParams({
+    strength: 100,
+    sigma: 1.5,
+    threshold: 0.995,
+    thresholdUnits: 'linear',
+    sourceSoftness: 0.03,
+  });
+  const shoulderGraph = createDefaultEffectGraph(shoulderParams, 7);
+  const shoulderDocument = { graph: shoulderGraph };
+  const shoulderContext = { quality: 'fast', fullWidth: width, fullHeight: height };
+  const expected = processFilm(
+    { width, height, rgb, alpha },
+    shoulderDocument,
+    { ...shoulderContext, backend: 'js' },
+  );
+  const shoulderPlan = createFilmRenderPlan({ width, height, graph: shoulderGraph, quality: 'fast', memoryMode: 'high' });
+  const shoulderResident = createV17ResidentBackend(shoulderPlan);
+  const shoulderExecutor = createFilmExecutor(shoulderPlan, { backend: 'wasm-resident', residentBackend: shoulderResident });
+  try {
+    const actual = shoulderExecutor.render({ width, height, rgb, alpha }, shoulderDocument, shoulderContext);
+    let maxDifference = 0;
+    for (let i = 0; i < actual.rgb.length; i += 1) {
+      maxDifference = Math.max(maxDifference, Math.abs(actual.rgb[i] - expected.rgb[i]));
+    }
+    assert.ok(maxDifference <= 1e-3, `HDR shoulder JS/scalar max difference=${maxDifference}`);
+    assert.notDeepEqual(actual.rgb, rgb, 'the shoulder admits only the qualifying HDR source instead of staying off');
+  } finally {
+    shoulderExecutor.dispose();
+  }
+  resetWasmBackend();
+});
+
 test('resident ABI rejects malformed plans, non-finite values, stale handles, and reports memory generations', async (t) => {
   if (!existsSync(wasmPath)) {
     t.skip('assets/film_core.wasm not built; run npm run build:wasm');

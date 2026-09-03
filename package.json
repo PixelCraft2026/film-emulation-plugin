@@ -3,6 +3,7 @@
   "version": "1.7.0",
   "description": "Photoshop UXP film-emulation plugin — Film Emulation V1.7 Public Beta 1 — Windows test build",
   "private": true,
+  "license": "GPL-3.0-only",
   "type": "module",
   "scripts": {
     "build": "node esbuild.config.mjs",
