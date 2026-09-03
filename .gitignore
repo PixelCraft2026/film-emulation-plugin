@@ -7,5 +7,7 @@ Thumbs.db
 .reasonix/
 native/film_core/target/
 tests/qa-matrix-report.json
+tests/performance-baselines/
 docs/*
 !docs/FilmHalation_V1.5.1_User_Manual.md
+AGENTS.md

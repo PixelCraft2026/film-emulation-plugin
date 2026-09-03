@@ -1,5 +1,5 @@
-import { readFileSync, writeFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 
 const [, , scalarArgument, simdArgument, outputArgument] = process.argv;
 if (!scalarArgument || !simdArgument) {
@@ -73,6 +73,7 @@ const result = {
     : 'FAIL: keep Auto on the scalar resident backend.',
 };
 
+mkdirSync(dirname(outputPath), { recursive: true });
 writeFileSync(outputPath, `${JSON.stringify(result, null, 2)}\n`, 'utf8');
 console.log(`${result.decision} P95 speedup=${(p95Speedup * 100).toFixed(2)}%`);
 console.log(`report: ${outputPath}`);
