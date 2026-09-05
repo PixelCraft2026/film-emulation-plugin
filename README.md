@@ -8,7 +8,7 @@ Film Emulation 是一款面向 Photoshop 的胶片物理效果插件。它不会
 
 > 这是第一个公开 Beta。当前支持 Windows 10/11 和 Photoshop 23.3 及以上版本；macOS 尚未完成实机验证。插件界面可随时在中文和 English 之间切换。
 
-[效果对比](#效果对比) · [功能介绍](#它能做什么) · [下载安装](#安装) · [三步上手](#三步上手) · [后续规划](#后续工作展望) · [用户手册](docs/FilmHalation_V1.5.1_User_Manual.md) · [反馈问题](#反馈问题) · [发布说明](RELEASE_NOTES.md)
+[效果对比](#效果对比) · [功能介绍](#它能做什么) · [下载安装](#安装) · [三步上手](#三步上手) · [后续规划](#后续工作展望) · [用户手册](docs/FilmEmulation_V1.7_User_Manual.md) · [反馈问题](#反馈问题) · [发布说明](RELEASE_NOTES.md)
 
 ## 效果对比
 
@@ -121,7 +121,7 @@ Public Beta 1 是第一个公开版本，不需要迁移旧 ID 或导出旧插�
 - 中英文切换不会改变当前模块、参数或预览画面。
 - 应用内存模式建议保持 `自动（安全）/ Auto (safe)`。只有确认机器内存充足时才使用 High。
 
-完整参数解释见[用户手册](docs/FilmHalation_V1.5.1_User_Manual.md)。
+完整参数解释见[用户手册](docs/FilmEmulation_V1.7_User_Manual.md)。
 
 ## 非破坏性与隐私
 

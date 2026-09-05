@@ -8,6 +8,7 @@ Thumbs.db
 native/film_core/target/
 tests/qa-matrix-report.json
 tests/performance-baselines/
+presentations/
 docs/*
-!docs/FilmHalation_V1.5.1_User_Manual.md
+!docs/FilmEmulation_V1.7_User_Manual.md
 AGENTS.md
